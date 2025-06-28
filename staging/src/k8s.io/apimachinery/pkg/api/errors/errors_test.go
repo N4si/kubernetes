@@ -110,13 +110,13 @@ func TestErrorNew(t *testing.T) {
 	if time, ok := SuggestsClientDelay(NewTooManyRequests("doing something", 1)); time != 1 || !ok {
 		t.Errorf("unexpected %d", time)
 	}
-	if time, ok := SuggestsClientDelay(NewGenericServerResponse(429, "get", resource("tests"), "test", "doing something", 10, true)); time != 10 || !ok {
+	if time, ok := SuggestsClientDelay(NewGenericServerResponse(429, http.MethodGet, resource("tests"), "test", "doing something", 10, true)); time != 10 || !ok {
 		t.Errorf("unexpected %d", time)
 	}
-	if time, ok := SuggestsClientDelay(NewGenericServerResponse(500, "get", resource("tests"), "test", "doing something", 10, true)); time != 10 || !ok {
+	if time, ok := SuggestsClientDelay(NewGenericServerResponse(500, http.MethodGet, resource("tests"), "test", "doing something", 10, true)); time != 10 || !ok {
 		t.Errorf("unexpected %d", time)
 	}
-	if time, ok := SuggestsClientDelay(NewGenericServerResponse(429, "get", resource("tests"), "test", "doing something", 0, true)); time != 0 || ok {
+	if time, ok := SuggestsClientDelay(NewGenericServerResponse(429, http.MethodGet, resource("tests"), "test", "doing something", 0, true)); time != 0 || ok {
 		t.Errorf("unexpected %d", time)
 	}
 }
@@ -164,7 +164,7 @@ func TestNewInvalid(t *testing.T) {
 			`Kind "name" is invalid: field[0].name: Not found: "bar"`,
 		},
 		{
-			field.NotSupported(field.NewPath("field[0].name"), "bar", nil),
+			field.NotSupported[string](field.NewPath("field[0].name"), "bar", nil),
 			&metav1.StatusDetails{
 				Kind: "Kind",
 				Name: "name",

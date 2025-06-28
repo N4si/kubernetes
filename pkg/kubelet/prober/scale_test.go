@@ -19,7 +19,6 @@ package prober
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"sync"
@@ -38,7 +37,8 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/status"
 	statustest "k8s.io/kubernetes/pkg/kubelet/status/testing"
 	kubeletutil "k8s.io/kubernetes/pkg/kubelet/util"
-	utilpointer "k8s.io/utils/pointer"
+	"k8s.io/kubernetes/test/utils/ktesting"
+	"k8s.io/utils/ptr"
 )
 
 // TCP sockets goes through a TIME-WAIT state (default 60 sec) before being freed,
@@ -80,17 +80,12 @@ func TestTCPPortExhaustion(t *testing.T) {
 		{"HTTP", true},
 	}
 	for _, tt := range tests {
-		t.Run(fmt.Sprintf(tt.name), func(t *testing.T) {
-			testRootDir := ""
-			if tempDir, err := ioutil.TempDir("", "kubelet_test."); err != nil {
-				t.Fatalf("can't make a temp rootdir: %v", err)
-			} else {
-				testRootDir = tempDir
-			}
-			podManager := kubepod.NewBasicPodManager(nil)
+		t.Run(tt.name, func(t *testing.T) {
+			logger, _ := ktesting.NewTestContext(t)
+			podManager := kubepod.NewBasicPodManager()
 			podStartupLatencyTracker := kubeletutil.NewPodStartupLatencyTracker()
 			m := NewManager(
-				status.NewManager(&fake.Clientset{}, podManager, &statustest.FakePodDeletionSafetyProvider{}, podStartupLatencyTracker, testRootDir),
+				status.NewManager(&fake.Clientset{}, podManager, &statustest.FakePodDeletionSafetyProvider{}, podStartupLatencyTracker),
 				results.NewManager(),
 				results.NewManager(),
 				results.NewManager(),
@@ -136,11 +131,11 @@ func TestTCPPortExhaustion(t *testing.T) {
 								StartedAt: metav1.Now(),
 							},
 						},
-						Started: utilpointer.Bool(true),
+						Started: ptr.To(true),
 					})
 				}
 				podManager.AddPod(&pod)
-				m.statusManager.SetPodStatus(&pod, pod.Status)
+				m.statusManager.SetPodStatus(logger, &pod, pod.Status)
 				m.AddPod(&pod)
 			}
 			t.Logf("Adding %d pods with %d containers each in %v", numTestPods, numContainers, time.Since(now))
@@ -257,14 +252,14 @@ func (f *fakePod) probeHandler() v1.ProbeHandler {
 		handler = v1.ProbeHandler{
 			HTTPGet: &v1.HTTPGetAction{
 				Host: "127.0.0.1",
-				Port: intstr.FromInt(port),
+				Port: intstr.FromInt32(int32(port)),
 			},
 		}
 	} else {
 		handler = v1.ProbeHandler{
 			TCPSocket: &v1.TCPSocketAction{
 				Host: "127.0.0.1",
-				Port: intstr.FromInt(port),
+				Port: intstr.FromInt32(int32(port)),
 			},
 		}
 	}

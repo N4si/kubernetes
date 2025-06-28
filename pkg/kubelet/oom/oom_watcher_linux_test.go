@@ -23,9 +23,11 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/kubernetes/test/utils/ktesting"
 
 	"github.com/google/cadvisor/utils/oomparser"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type fakeStreamer struct {
@@ -41,6 +43,7 @@ func (fs *fakeStreamer) StreamOoms(outStream chan<- *oomparser.OomInstance) {
 // TestWatcherRecordsEventsForOomEvents ensures that our OomInstances coming
 // from `StreamOoms` are translated into events in our recorder.
 func TestWatcherRecordsEventsForOomEvents(t *testing.T) {
+	tCtx := ktesting.Init(t)
 	oomInstancesToStream := []*oomparser.OomInstance{
 		{
 			Pid:                 1000,
@@ -63,10 +66,10 @@ func TestWatcherRecordsEventsForOomEvents(t *testing.T) {
 		recorder:    fakeRecorder,
 		oomStreamer: fakeStreamer,
 	}
-	assert.NoError(t, oomWatcher.Start(node))
+	require.NoError(t, oomWatcher.Start(tCtx, node))
 
 	eventsRecorded := getRecordedEvents(fakeRecorder, numExpectedOomEvents)
-	assert.Equal(t, numExpectedOomEvents, len(eventsRecorded))
+	assert.Len(t, eventsRecorded, numExpectedOomEvents)
 }
 
 func getRecordedEvents(fakeRecorder *record.FakeRecorder, numExpectedOomEvents int) []string {
@@ -92,6 +95,7 @@ func getRecordedEvents(fakeRecorder *record.FakeRecorder, numExpectedOomEvents i
 func TestWatcherRecordsEventsForOomEventsCorrectContainerName(t *testing.T) {
 	// By "incorrect" container name, we mean a container name for which we
 	// don't want to record an oom event.
+	tCtx := ktesting.Init(t)
 	numOomEventsWithIncorrectContainerName := 1
 	oomInstancesToStream := []*oomparser.OomInstance{
 		{
@@ -122,10 +126,10 @@ func TestWatcherRecordsEventsForOomEventsCorrectContainerName(t *testing.T) {
 		recorder:    fakeRecorder,
 		oomStreamer: fakeStreamer,
 	}
-	assert.NoError(t, oomWatcher.Start(node))
+	require.NoError(t, oomWatcher.Start(tCtx, node))
 
 	eventsRecorded := getRecordedEvents(fakeRecorder, numExpectedOomEvents)
-	assert.Equal(t, numExpectedOomEvents, len(eventsRecorded))
+	assert.Len(t, eventsRecorded, numExpectedOomEvents)
 }
 
 // TestWatcherRecordsEventsForOomEventsWithAdditionalInfo verifies that our the
@@ -134,6 +138,8 @@ func TestWatcherRecordsEventsForOomEventsWithAdditionalInfo(t *testing.T) {
 	// The process and event info should appear in the event message.
 	eventPid := 1000
 	processName := "fakeProcess"
+
+	tCtx := ktesting.Init(t)
 
 	oomInstancesToStream := []*oomparser.OomInstance{
 		{
@@ -157,11 +163,11 @@ func TestWatcherRecordsEventsForOomEventsWithAdditionalInfo(t *testing.T) {
 		recorder:    fakeRecorder,
 		oomStreamer: fakeStreamer,
 	}
-	assert.NoError(t, oomWatcher.Start(node))
+	require.NoError(t, oomWatcher.Start(tCtx, node))
 
 	eventsRecorded := getRecordedEvents(fakeRecorder, numExpectedOomEvents)
 
-	assert.Equal(t, numExpectedOomEvents, len(eventsRecorded))
+	assert.Len(t, eventsRecorded, numExpectedOomEvents)
 	assert.Contains(t, eventsRecorded[0], systemOOMEvent)
 	assert.Contains(t, eventsRecorded[0], fmt.Sprintf("pid: %d", eventPid))
 	assert.Contains(t, eventsRecorded[0], fmt.Sprintf("victim process: %s", processName))

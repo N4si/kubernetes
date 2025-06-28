@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	certutil "k8s.io/client-go/util/cert"
@@ -42,7 +43,8 @@ var (
 	rootCACert, servCert *x509.Certificate
 	rootCAKey, servKey   crypto.Signer
 
-	ecdsaKey *ecdsa.PrivateKey
+	ecdsaP256Key *ecdsa.PrivateKey
+	ecdsaP384Key *ecdsa.PrivateKey
 )
 
 func TestMain(m *testing.M) {
@@ -52,7 +54,7 @@ func TestMain(m *testing.M) {
 		Config: certutil.Config{
 			CommonName: "Root CA 1",
 		},
-		PublicKeyAlgorithm: x509.RSA,
+		EncryptionAlgorithm: kubeadmapi.EncryptionAlgorithmRSA2048,
 	})
 	if err != nil {
 		panic(fmt.Sprintf("Failed generating Root CA: %v", err))
@@ -71,9 +73,14 @@ func TestMain(m *testing.M) {
 		panic(fmt.Sprintf("Failed generating serving cert/key: %v", err))
 	}
 
-	ecdsaKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	ecdsaP256Key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		panic("Could not generate ECDSA key")
+		panic("Could not generate ECDSA P256 key")
+	}
+
+	ecdsaP384Key, err = ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		panic("Could not generate ECDSA P384 key")
 	}
 
 	os.Exit(m.Run())
@@ -85,8 +92,12 @@ func TestNewCertAndKey(t *testing.T) {
 		key  crypto.Signer
 	}{
 		{
-			name: "ECDSA should succeed",
-			key:  ecdsaKey,
+			name: "ECDSA P256 should succeed",
+			key:  ecdsaP256Key,
+		},
+		{
+			name: "ECDSA P384 should succeed",
+			key:  ecdsaP384Key,
 		},
 	}
 
@@ -112,7 +123,7 @@ func TestHasServerAuth(t *testing.T) {
 	// Override NewPrivateKey to reuse the same key for all certs
 	// since this test is only checking cert.ExtKeyUsage
 	privateKeyFunc := NewPrivateKey
-	NewPrivateKey = func(x509.PublicKeyAlgorithm) (crypto.Signer, error) {
+	NewPrivateKey = func(kubeadmapi.EncryptionAlgorithmType) (crypto.Signer, error) {
 		return rootCAKey, nil
 	}
 	defer func() {
@@ -135,13 +146,24 @@ func TestHasServerAuth(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "has ServerAuth ECDSA",
+			name: "has ServerAuth ECDSA P256",
 			config: CertConfig{
 				Config: certutil.Config{
 					CommonName: "test",
 					Usages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 				},
-				PublicKeyAlgorithm: x509.ECDSA,
+				EncryptionAlgorithm: kubeadmapi.EncryptionAlgorithmECDSAP256,
+			},
+			expected: true,
+		},
+		{
+			name: "has ServerAuth ECDSA P384",
+			config: CertConfig{
+				Config: certutil.Config{
+					CommonName: "test",
+					Usages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+				},
+				EncryptionAlgorithm: kubeadmapi.EncryptionAlgorithmECDSAP384,
 			},
 			expected: true,
 		},
@@ -503,10 +525,17 @@ func TestTryLoadKeyFromDisk(t *testing.T) {
 			expected:   true,
 		},
 		{
-			desc:       "ECDSA valid path and name",
+			desc:       "ECDSA P256 valid path and name",
 			pathSuffix: "",
 			name:       "foo",
-			caKey:      ecdsaKey,
+			caKey:      ecdsaP256Key,
+			expected:   true,
+		},
+		{
+			desc:       "ECDSA P384 valid path and name",
+			pathSuffix: "",
+			name:       "foo",
+			caKey:      ecdsaP384Key,
 			expected:   true,
 		},
 	}
@@ -634,13 +663,7 @@ func TestGetAPIServerAltNames(t *testing.T) {
 			}
 
 			for _, DNSName := range rt.expectedDNSNames {
-				found := false
-				for _, val := range altNames.DNSNames {
-					if val == DNSName {
-						found = true
-						break
-					}
-				}
+				found := slices.Contains(altNames.DNSNames, DNSName)
 
 				if !found {
 					t.Errorf("%s: altNames does not contain DNSName %s but %v", rt.name, DNSName, altNames.DNSNames)
@@ -696,13 +719,7 @@ func TestGetEtcdAltNames(t *testing.T) {
 	expectedDNSNames := []string{"myNode", "localhost", proxy}
 	for _, DNSName := range expectedDNSNames {
 		t.Run(DNSName, func(t *testing.T) {
-			found := false
-			for _, val := range altNames.DNSNames {
-				if val == DNSName {
-					found = true
-					break
-				}
-			}
+			found := slices.Contains(altNames.DNSNames, DNSName)
 
 			if !found {
 				t.Errorf("altNames does not contain DNSName %s", DNSName)
@@ -758,13 +775,7 @@ func TestGetEtcdPeerAltNames(t *testing.T) {
 	expectedDNSNames := []string{hostname, proxy}
 	for _, DNSName := range expectedDNSNames {
 		t.Run(DNSName, func(t *testing.T) {
-			found := false
-			for _, val := range altNames.DNSNames {
-				if val == DNSName {
-					found = true
-					break
-				}
-			}
+			found := slices.Contains(altNames.DNSNames, DNSName)
 
 			if !found {
 				t.Errorf("altNames does not contain DNSName %s", DNSName)
@@ -936,6 +947,27 @@ func TestVerifyCertChain(t *testing.T) {
 					rt.expected,
 					(actual == nil),
 				)
+			}
+		})
+	}
+}
+
+func TestRSAKeySizeFromAlgorithmType(t *testing.T) {
+	var tests = []struct {
+		algorithm    kubeadmapi.EncryptionAlgorithmType
+		expectedSize int
+	}{
+		{algorithm: "unknown", expectedSize: 0},
+		{algorithm: "", expectedSize: 2048},
+		{algorithm: kubeadmapi.EncryptionAlgorithmRSA2048, expectedSize: 2048},
+		{algorithm: kubeadmapi.EncryptionAlgorithmRSA3072, expectedSize: 3072},
+		{algorithm: kubeadmapi.EncryptionAlgorithmRSA4096, expectedSize: 4096},
+	}
+	for _, rt := range tests {
+		t.Run(string(rt.algorithm), func(t *testing.T) {
+			size := rsaKeySizeFromAlgorithmType(rt.algorithm)
+			if size != rt.expectedSize {
+				t.Errorf("expected size: %d, got: %d", rt.expectedSize, size)
 			}
 		})
 	}

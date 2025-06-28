@@ -17,7 +17,6 @@ limitations under the License.
 package ipam
 
 import (
-	"context"
 	"net"
 	"testing"
 	"time"
@@ -28,6 +27,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/kubernetes/pkg/controller/nodeipam/ipam/test"
 	"k8s.io/kubernetes/pkg/controller/testutil"
+	"k8s.io/kubernetes/test/utils/ktesting"
 	netutils "k8s.io/utils/net"
 )
 
@@ -274,12 +274,13 @@ func TestOccupyPreExistingCIDR(t *testing.T) {
 	}
 
 	// test function
+	tCtx := ktesting.Init(t)
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
 			// Initialize the range allocator.
 			fakeNodeInformer := test.FakeNodeInformer(tc.fakeNodeHandler)
-			nodeList, _ := tc.fakeNodeHandler.List(context.TODO(), metav1.ListOptions{})
-			_, err := NewCIDRRangeAllocator(tc.fakeNodeHandler, fakeNodeInformer, tc.allocatorParams, nodeList)
+			nodeList, _ := tc.fakeNodeHandler.List(tCtx, metav1.ListOptions{})
+			_, err := NewCIDRRangeAllocator(tCtx, tc.fakeNodeHandler, fakeNodeInformer, tc.allocatorParams, nodeList)
 			if err == nil && tc.ctrlCreateFail {
 				t.Fatalf("creating range allocator was expected to fail, but it did not")
 			}
@@ -508,11 +509,12 @@ func TestAllocateOrOccupyCIDRSuccess(t *testing.T) {
 	}
 
 	// test function
+	_, tCtx := ktesting.NewTestContext(t)
 	testFunc := func(tc testCase) {
 		fakeNodeInformer := test.FakeNodeInformer(tc.fakeNodeHandler)
-		nodeList, _ := tc.fakeNodeHandler.List(context.TODO(), metav1.ListOptions{})
+		nodeList, _ := tc.fakeNodeHandler.List(tCtx, metav1.ListOptions{})
 		// Initialize the range allocator.
-		allocator, err := NewCIDRRangeAllocator(tc.fakeNodeHandler, fakeNodeInformer, tc.allocatorParams, nodeList)
+		allocator, err := NewCIDRRangeAllocator(tCtx, tc.fakeNodeHandler, fakeNodeInformer, tc.allocatorParams, nodeList)
 		if err != nil {
 			t.Errorf("%v: failed to create CIDRRangeAllocator with error %v", tc.description, err)
 			return
@@ -524,7 +526,7 @@ func TestAllocateOrOccupyCIDRSuccess(t *testing.T) {
 		}
 		rangeAllocator.nodesSynced = test.AlwaysReady
 		rangeAllocator.recorder = testutil.NewFakeRecorder()
-		go allocator.Run(wait.NeverStop)
+		go allocator.Run(tCtx)
 
 		// this is a bit of white box testing
 		// pre allocate the cidrs as per the test
@@ -545,7 +547,7 @@ func TestAllocateOrOccupyCIDRSuccess(t *testing.T) {
 			if node.Spec.PodCIDRs == nil {
 				updateCount++
 			}
-			if err := allocator.AllocateOrOccupyCIDR(node); err != nil {
+			if err := allocator.AllocateOrOccupyCIDR(tCtx, node); err != nil {
 				t.Errorf("%v: unexpected error in AllocateOrOccupyCIDR: %v", tc.description, err)
 			}
 		}
@@ -608,10 +610,10 @@ func TestAllocateOrOccupyCIDRFailure(t *testing.T) {
 			},
 		},
 	}
-
+	_, tCtx := ktesting.NewTestContext(t)
 	testFunc := func(tc testCase) {
 		// Initialize the range allocator.
-		allocator, err := NewCIDRRangeAllocator(tc.fakeNodeHandler, test.FakeNodeInformer(tc.fakeNodeHandler), tc.allocatorParams, nil)
+		allocator, err := NewCIDRRangeAllocator(tCtx, tc.fakeNodeHandler, test.FakeNodeInformer(tc.fakeNodeHandler), tc.allocatorParams, nil)
 		if err != nil {
 			t.Logf("%v: failed to create CIDRRangeAllocator with error %v", tc.description, err)
 		}
@@ -622,7 +624,7 @@ func TestAllocateOrOccupyCIDRFailure(t *testing.T) {
 		}
 		rangeAllocator.nodesSynced = test.AlwaysReady
 		rangeAllocator.recorder = testutil.NewFakeRecorder()
-		go allocator.Run(wait.NeverStop)
+		go allocator.Run(tCtx)
 
 		// this is a bit of white box testing
 		for setIdx, allocatedList := range tc.allocatedCIDRs {
@@ -637,7 +639,7 @@ func TestAllocateOrOccupyCIDRFailure(t *testing.T) {
 				}
 			}
 		}
-		if err := allocator.AllocateOrOccupyCIDR(tc.fakeNodeHandler.Existing[0]); err == nil {
+		if err := allocator.AllocateOrOccupyCIDR(tCtx, tc.fakeNodeHandler.Existing[0]); err == nil {
 			t.Errorf("%v: unexpected success in AllocateOrOccupyCIDR: %v", tc.description, err)
 		}
 		// We don't expect any updates, so just sleep for some time
@@ -753,10 +755,10 @@ func TestReleaseCIDRSuccess(t *testing.T) {
 			},
 		},
 	}
-
+	logger, tCtx := ktesting.NewTestContext(t)
 	testFunc := func(tc releaseTestCase) {
 		// Initialize the range allocator.
-		allocator, _ := NewCIDRRangeAllocator(tc.fakeNodeHandler, test.FakeNodeInformer(tc.fakeNodeHandler), tc.allocatorParams, nil)
+		allocator, _ := NewCIDRRangeAllocator(tCtx, tc.fakeNodeHandler, test.FakeNodeInformer(tc.fakeNodeHandler), tc.allocatorParams, nil)
 		rangeAllocator, ok := allocator.(*rangeAllocator)
 		if !ok {
 			t.Logf("%v: found non-default implementation of CIDRAllocator, skipping white-box test...", tc.description)
@@ -764,7 +766,7 @@ func TestReleaseCIDRSuccess(t *testing.T) {
 		}
 		rangeAllocator.nodesSynced = test.AlwaysReady
 		rangeAllocator.recorder = testutil.NewFakeRecorder()
-		go allocator.Run(wait.NeverStop)
+		go allocator.Run(tCtx)
 
 		// this is a bit of white box testing
 		for setIdx, allocatedList := range tc.allocatedCIDRs {
@@ -780,7 +782,7 @@ func TestReleaseCIDRSuccess(t *testing.T) {
 			}
 		}
 
-		err := allocator.AllocateOrOccupyCIDR(tc.fakeNodeHandler.Existing[0])
+		err := allocator.AllocateOrOccupyCIDR(tCtx, tc.fakeNodeHandler.Existing[0])
 		if len(tc.expectedAllocatedCIDRFirstRound) != 0 {
 			if err != nil {
 				t.Fatalf("%v: unexpected error in AllocateOrOccupyCIDR: %v", tc.description, err)
@@ -805,12 +807,12 @@ func TestReleaseCIDRSuccess(t *testing.T) {
 				},
 			}
 			nodeToRelease.Spec.PodCIDRs = cidrToRelease
-			err = allocator.ReleaseCIDR(&nodeToRelease)
+			err = allocator.ReleaseCIDR(logger, &nodeToRelease)
 			if err != nil {
 				t.Fatalf("%v: unexpected error in ReleaseCIDR: %v", tc.description, err)
 			}
 		}
-		if err = allocator.AllocateOrOccupyCIDR(tc.fakeNodeHandler.Existing[0]); err != nil {
+		if err = allocator.AllocateOrOccupyCIDR(tCtx, tc.fakeNodeHandler.Existing[0]); err != nil {
 			t.Fatalf("%v: unexpected error in AllocateOrOccupyCIDR: %v", tc.description, err)
 		}
 		if err := test.WaitForUpdatedNodeWithTimeout(tc.fakeNodeHandler, 1, wait.ForeverTestTimeout); err != nil {
@@ -837,5 +839,113 @@ func TestReleaseCIDRSuccess(t *testing.T) {
 
 	for _, tc := range testCases {
 		testFunc(tc)
+	}
+}
+func TestNodeDeletionReleaseCIDR(t *testing.T) {
+	_, clusterCIDRv4, err := netutils.ParseCIDRSloppy("10.10.0.0/16")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	_, allocatedCIDR, err := netutils.ParseCIDRSloppy("10.10.0.0/24")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	testCases := []struct {
+		description       string
+		nodeKey           string
+		existingNodes     []*v1.Node
+		shouldReleaseCIDR bool
+	}{
+		{
+			description: "Regular node not under deletion",
+			nodeKey:     "node0",
+			existingNodes: []*v1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node0",
+					},
+					Spec: v1.NodeSpec{
+						PodCIDR:  allocatedCIDR.String(),
+						PodCIDRs: []string{allocatedCIDR.String()}},
+				},
+			},
+			shouldReleaseCIDR: false,
+		},
+		{
+			description: "Node under deletion",
+			nodeKey:     "node0",
+			existingNodes: []*v1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node0",
+						DeletionTimestamp: &metav1.Time{Time: time.Now()},
+					},
+					Spec: v1.NodeSpec{
+						PodCIDR:  allocatedCIDR.String(),
+						PodCIDRs: []string{allocatedCIDR.String()}},
+				},
+			},
+			shouldReleaseCIDR: false,
+		},
+		{
+			description:       "Node deleted",
+			nodeKey:           "node0",
+			existingNodes:     []*v1.Node{},
+			shouldReleaseCIDR: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			allocatorParams := CIDRAllocatorParams{
+				ClusterCIDRs: []*net.IPNet{clusterCIDRv4}, ServiceCIDR: nil,
+				SecondaryServiceCIDR: nil,
+				NodeCIDRMaskSizes:    []int{24},
+			}
+
+			fakeNodeHandler := &testutil.FakeNodeHandler{
+				Existing:  tc.existingNodes,
+				Clientset: fake.NewSimpleClientset(),
+			}
+			_, tCtx := ktesting.NewTestContext(t)
+
+			fakeNodeInformer := test.FakeNodeInformer(fakeNodeHandler)
+			nodeList, err := fakeNodeHandler.List(tCtx, metav1.ListOptions{})
+			if err != nil {
+				t.Fatalf("Failed to get list of nodes %v", err)
+			}
+			allocator, err := NewCIDRRangeAllocator(tCtx, fakeNodeHandler, fakeNodeInformer, allocatorParams, nodeList)
+			if err != nil {
+				t.Fatalf("failed to create CIDRRangeAllocator: %v", err)
+			}
+			rangeAllocator, ok := allocator.(*rangeAllocator)
+			if !ok {
+				t.Fatalf("found non-default implementation of CIDRAllocator")
+			}
+			rangeAllocator.nodesSynced = test.AlwaysReady
+			rangeAllocator.recorder = testutil.NewFakeRecorder()
+
+			if err := rangeAllocator.syncNode(tCtx, tc.nodeKey); err != nil {
+				t.Fatalf("failed to run rangeAllocator.syncNode")
+			}
+
+			if len(rangeAllocator.cidrSets) != 1 {
+				t.Fatalf("Expected a single cidrSet, but got %d", len(rangeAllocator.cidrSets))
+			}
+
+			// if the allocated CIDR was released we expect the nextAllocated CIDR to be the same
+			nextCIDR, err := rangeAllocator.cidrSets[0].AllocateNext()
+			if err != nil {
+				t.Fatalf("unexpected error trying to allocate next CIDR: %v", err)
+			}
+			expectedCIDR := "10.10.1.0/24" // existing allocated is 10.0.0.0/24
+			if tc.shouldReleaseCIDR {
+				expectedCIDR = allocatedCIDR.String() // if cidr was released we expect to reuse it. ie: 10.0.0.0/24
+			}
+			if nextCIDR.String() != expectedCIDR {
+				t.Fatalf("Expected CIDR %s to be allocated next, but got: %v", expectedCIDR, nextCIDR.String())
+			}
+		})
 	}
 }

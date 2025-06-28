@@ -27,6 +27,7 @@ import (
 	core "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/klog/v2/ktesting"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -85,7 +86,7 @@ func TestPatchNode(t *testing.T) {
 			continue
 		}
 		actions := fakeClient.Actions()
-		assert.Equal(t, 1, len(actions), "unexpected actions: %#v", actions)
+		assert.Len(t, actions, 1, "unexpected actions: %#v", actions)
 		patchAction := actions[0].(core.PatchActionImpl)
 		assert.Equal(t, testCase.patch, string(patchAction.Patch), "%d: unexpected patch: %s", i, string(patchAction.Patch))
 	}
@@ -144,9 +145,9 @@ func TestUpdateNodeIfNeeded(t *testing.T) {
 		}
 		actions := fakeClient.Actions()
 		if testCase.patch == "" {
-			assert.Equal(t, 0, len(actions), "unexpected actions: %#v", actions)
+			assert.Empty(t, actions, "unexpected actions")
 		} else {
-			assert.Equal(t, 1, len(actions), "unexpected actions: %#v", actions)
+			assert.Len(t, actions, 1, "unexpected actions: %#v", actions)
 			patchAction := actions[0].(core.PatchActionImpl)
 			assert.Equal(t, testCase.patch, string(patchAction.Patch), "%d: unexpected patch: %s", i, string(patchAction.Patch))
 		}
@@ -229,13 +230,14 @@ func TestDesiredTTL(t *testing.T) {
 
 	for i, testCase := range testCases {
 		ttlController := &Controller{
-			queue:             workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
+			queue:             workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
 			nodeCount:         testCase.nodeCount,
 			desiredTTLSeconds: testCase.desiredTTL,
 			boundaryStep:      testCase.boundaryStep,
 		}
 		if testCase.addNode {
-			ttlController.addNode(&v1.Node{})
+			logger, _ := ktesting.NewTestContext(t)
+			ttlController.addNode(logger, &v1.Node{})
 		}
 		if testCase.deleteNode {
 			ttlController.deleteNode(&v1.Node{})

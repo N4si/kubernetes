@@ -24,18 +24,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
-
 	netutil "k8s.io/apimachinery/pkg/util/net"
 	versionutil "k8s.io/apimachinery/pkg/util/version"
 	pkgversion "k8s.io/component-base/version"
 	"k8s.io/klog/v2"
 
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 const (
-	getReleaseVersionTimeout = time.Duration(10 * time.Second)
+	getReleaseVersionTimeout = 10 * time.Second
 )
 
 var (
@@ -46,7 +45,12 @@ var (
 	kubeBucketPrefixes    = regexp.MustCompile(`^((release|ci)/)?([-\w.+]+)$`)
 )
 
-// KubernetesReleaseVersion is helper function that can fetch
+// KubernetesReleaseVersion during unit tests equals kubernetesReleaseVersionTest
+// and returns a static placeholder version. When not running in unit tests
+// it equals kubernetesReleaseVersionDefault.
+var KubernetesReleaseVersion = kubernetesReleaseVersionDefault
+
+// kubernetesReleaseVersionDefault is helper function that can fetch
 // available version information from release servers based on
 // label names, like "stable" or "latest".
 //
@@ -64,7 +68,7 @@ var (
 //	latest      (latest release, including alpha/beta)
 //	latest-1    (latest release in 1.x, including alpha/beta)
 //	latest-1.0  (and similarly 1.1, 1.2, 1.3, ...)
-func KubernetesReleaseVersion(version string) (string, error) {
+func kubernetesReleaseVersionDefault(version string) (string, error) {
 	return kubernetesReleaseVersion(version, fetchFromURL)
 }
 

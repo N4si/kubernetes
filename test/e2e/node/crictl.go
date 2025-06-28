@@ -31,11 +31,11 @@ import (
 
 var _ = SIGDescribe("crictl", func() {
 	f := framework.NewDefaultFramework("crictl")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.BeforeEach(func() {
 		// `crictl` is not available on all cloud providers.
-		e2eskipper.SkipUnlessProviderIs("gce", "gke")
+		e2eskipper.SkipUnlessProviderIs("gce")
 	})
 
 	ginkgo.It("should be able to run crictl on the node", func(ctx context.Context) {

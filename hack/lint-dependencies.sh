@@ -25,25 +25,40 @@ set -o pipefail
 KUBE_ROOT=$(dirname "${BASH_SOURCE[0]}")/..
 source "${KUBE_ROOT}/hack/lib/init.sh"
 
-# Explicitly opt into go modules, even though we're inside a GOPATH directory
-export GO111MODULE=on
-# Explicitly set GOFLAGS to ignore vendor, since GOFLAGS=-mod=vendor breaks dependency resolution while rebuilding vendor
-export GOFLAGS=-mod=mod
 # Detect problematic GOPROXY settings that prevent lookup of dependencies
 if [[ "${GOPROXY:-}" == "off" ]]; then
   kube::log::error "Cannot run with \$GOPROXY=off"
   exit 1
 fi
 
-kube::golang::verify_go_version
+kube::golang::setup_env
 kube::util::require-jq
+
+# Set the Go environment, otherwise we get "can't compute 'all' using the
+# vendor directory".
+export GOWORK=off
+export GOFLAGS=-mod=mod
 
 # let us log all errors before we exit
 rc=0
 
 # List of dependencies we need to avoid dragging back into kubernetes/kubernetes
 # Check if unwanted dependencies are removed
+# The array and map in `unwanted-dependencies.json` are in alphabetical order.
 go run k8s.io/kubernetes/cmd/dependencyverifier "${KUBE_ROOT}/hack/unwanted-dependencies.json"
+
+k8s_module_regex="k8s[.]io/(kubernetes"
+for repo in $(kube::util::list_staging_repos); do
+  k8s_module_regex="${k8s_module_regex}|${repo}"
+done
+k8s_module_regex="${k8s_module_regex})"
+
+recursive_dependencies=$(go mod graph | grep -E " ${k8s_module_regex}" | grep -E -v "^${k8s_module_regex}" || true)
+if [[ -n "${recursive_dependencies}" ]]; then
+  echo "These external modules depend on k8s.io/kubernetes or staging modules, which is not allowed:"
+  echo ""
+  echo "${recursive_dependencies}"
+fi
 
 outdated=$(go list -m -json all | jq -r "
   select(.Replace.Version != null) |
@@ -85,10 +100,10 @@ unused=$(comm -23 \
 if [[ -n "${unused}" ]]; then
   echo ""
   echo "Use the given commands to remove pinned module versions that aren't actually used:"
-  echo "${unused}" | xargs -L 1 echo 'GO111MODULE=on go mod edit -dropreplace'
+  echo "${unused}" | xargs -L 1 echo 'go mod edit -dropreplace'
 fi
 
-if [[ -n "${unused}${outdated}${noncanonical}" ]]; then
+if [[ -n "${unused}${outdated}${noncanonical}${recursive_dependencies}" ]]; then
   rc=1
 else
   echo "All pinned versions of checked dependencies match their preferred version."

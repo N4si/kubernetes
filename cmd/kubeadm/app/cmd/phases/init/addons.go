@@ -19,7 +19,6 @@ package phases
 import (
 	"io"
 
-	"github.com/pkg/errors"
 	"github.com/spf13/pflag"
 
 	clientset "k8s.io/client-go/kubernetes"
@@ -30,6 +29,7 @@ import (
 	cmdutil "k8s.io/kubernetes/cmd/kubeadm/app/cmd/util"
 	dnsaddon "k8s.io/kubernetes/cmd/kubeadm/app/phases/addons/dns"
 	proxyaddon "k8s.io/kubernetes/cmd/kubeadm/app/phases/addons/proxy"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 var (
@@ -42,7 +42,7 @@ var (
 		Install the kube-proxy addon components via the API server.
 		`)
 
-	printManifest bool = false
+	printManifest = false
 )
 
 // NewAddonPhase returns the addon Cobra command
@@ -56,7 +56,6 @@ func NewAddonPhase() workflow.Phase {
 	return workflow.Phase{
 		Name:  "addon",
 		Short: "Install required addons for passing conformance tests",
-		Long:  cmdutil.MacroCommandLongDescription,
 		Phases: []workflow.Phase{
 			{
 				Name:           "all",
@@ -84,10 +83,10 @@ func NewAddonPhase() workflow.Phase {
 	}
 }
 
-func getInitData(c workflow.RunData) (*kubeadmapi.InitConfiguration, clientset.Interface, io.Writer, error) {
+func getInitData(c workflow.RunData) (*kubeadmapi.InitConfiguration, clientset.Interface, string, io.Writer, error) {
 	data, ok := c.(InitData)
 	if !ok {
-		return nil, nil, nil, errors.New("addon phase invoked with an invalid data struct")
+		return nil, nil, "", nil, errors.New("addon phase invoked with an invalid data struct")
 	}
 	cfg := data.Cfg()
 	var client clientset.Interface
@@ -95,26 +94,27 @@ func getInitData(c workflow.RunData) (*kubeadmapi.InitConfiguration, clientset.I
 	if !printManifest {
 		client, err = data.Client()
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, "", nil, err
 		}
 	}
 
 	out := data.OutputWriter()
-	return cfg, client, out, err
+	patchesDir := data.PatchesDir()
+	return cfg, client, patchesDir, out, err
 }
 
 // runCoreDNSAddon installs CoreDNS addon to a Kubernetes cluster
 func runCoreDNSAddon(c workflow.RunData) error {
-	cfg, client, out, err := getInitData(c)
+	cfg, client, patchesDir, out, err := getInitData(c)
 	if err != nil {
 		return err
 	}
-	return dnsaddon.EnsureDNSAddon(&cfg.ClusterConfiguration, client, out, printManifest)
+	return dnsaddon.EnsureDNSAddon(&cfg.ClusterConfiguration, client, patchesDir, out, printManifest)
 }
 
 // runKubeProxyAddon installs KubeProxy addon to a Kubernetes cluster
 func runKubeProxyAddon(c workflow.RunData) error {
-	cfg, client, out, err := getInitData(c)
+	cfg, client, _, out, err := getInitData(c)
 	if err != nil {
 		return err
 	}

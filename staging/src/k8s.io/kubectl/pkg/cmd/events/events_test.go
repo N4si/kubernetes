@@ -18,17 +18,17 @@ package events
 
 import (
 	"io"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes"
-	restclient "k8s.io/client-go/rest"
 	"net/http"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
+	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/rest/fake"
 	cmdtesting "k8s.io/kubectl/pkg/cmd/testing"
 )
@@ -50,7 +50,7 @@ func getFakeEvents() *corev1.EventList {
 				},
 				Type:                corev1.EventTypeNormal,
 				Reason:              "ScalingReplicaSet",
-				Message:             "Scaled up replica set bar-002 to 1",
+				Message:             "Scaled up replica set bar-002 from 0 to 1",
 				ReportingController: "deployment-controller",
 				EventTime:           metav1.NewMicroTime(time.Now().Add(-30 * time.Minute)),
 				Series: &corev1.EventSeries{
@@ -72,7 +72,7 @@ func getFakeEvents() *corev1.EventList {
 				},
 				Type:                corev1.EventTypeWarning,
 				Reason:              "ScalingReplicaSet",
-				Message:             "Scaled up replica set bar-002 to 1",
+				Message:             "Scaled up replica set bar-002 from 0 to 1",
 				ReportingController: "deployment-controller",
 				EventTime:           metav1.NewMicroTime(time.Now().Add(-28 * time.Minute)),
 				Series: &corev1.EventSeries{
@@ -94,7 +94,7 @@ func getFakeEvents() *corev1.EventList {
 				},
 				Type:                corev1.EventTypeNormal,
 				Reason:              "ScalingReplicaSet",
-				Message:             "Scaled up replica set bar-002 to 1",
+				Message:             "Scaled up replica set bar-002 from 0 to 1",
 				ReportingController: "deployment-controller",
 				EventTime:           metav1.NewMicroTime(time.Now().Add(-25 * time.Minute)),
 				Series: &corev1.EventSeries{
@@ -108,9 +108,9 @@ func getFakeEvents() *corev1.EventList {
 
 func TestEventIsSorted(t *testing.T) {
 	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
-	streams, _, buf, _ := genericclioptions.NewTestIOStreams()
+	streams, _, buf, _ := genericiooptions.NewTestIOStreams()
 	clientset, err := kubernetes.NewForConfig(cmdtesting.DefaultClientConfig())
-	if err != err {
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -135,9 +135,9 @@ func TestEventIsSorted(t *testing.T) {
 	}
 
 	expected := `NAMESPACE   LAST SEEN           TYPE      REASON              OBJECT           MESSAGE
-foo         20m (x3 over 30m)   Normal    ScalingReplicaSet   Deployment/bar   Scaled up replica set bar-002 to 1
-foo         18m (x3 over 28m)   Warning   ScalingReplicaSet   Deployment/bar   Scaled up replica set bar-002 to 1
-otherfoo    15m (x3 over 25m)   Normal    ScalingReplicaSet   Deployment/bar   Scaled up replica set bar-002 to 1
+foo         20m (x3 over 30m)   Normal    ScalingReplicaSet   Deployment/bar   Scaled up replica set bar-002 from 0 to 1
+foo         18m (x3 over 28m)   Warning   ScalingReplicaSet   Deployment/bar   Scaled up replica set bar-002 from 0 to 1
+otherfoo    15m (x3 over 25m)   Normal    ScalingReplicaSet   Deployment/bar   Scaled up replica set bar-002 from 0 to 1
 `
 	if e, a := expected, buf.String(); e != a {
 		t.Errorf("expected\n%v\ngot\n%v", e, a)
@@ -146,9 +146,9 @@ otherfoo    15m (x3 over 25m)   Normal    ScalingReplicaSet   Deployment/bar   S
 
 func TestEventNoHeaders(t *testing.T) {
 	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
-	streams, _, buf, _ := genericclioptions.NewTestIOStreams()
+	streams, _, buf, _ := genericiooptions.NewTestIOStreams()
 	clientset, err := kubernetes.NewForConfig(cmdtesting.DefaultClientConfig())
-	if err != err {
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -172,9 +172,9 @@ func TestEventNoHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expected := `foo        20m (x3 over 30m)   Normal    ScalingReplicaSet   Deployment/bar   Scaled up replica set bar-002 to 1
-foo        18m (x3 over 28m)   Warning   ScalingReplicaSet   Deployment/bar   Scaled up replica set bar-002 to 1
-otherfoo   15m (x3 over 25m)   Normal    ScalingReplicaSet   Deployment/bar   Scaled up replica set bar-002 to 1
+	expected := `foo        20m (x3 over 30m)   Normal    ScalingReplicaSet   Deployment/bar   Scaled up replica set bar-002 from 0 to 1
+foo        18m (x3 over 28m)   Warning   ScalingReplicaSet   Deployment/bar   Scaled up replica set bar-002 from 0 to 1
+otherfoo   15m (x3 over 25m)   Normal    ScalingReplicaSet   Deployment/bar   Scaled up replica set bar-002 from 0 to 1
 `
 	if e, a := expected, buf.String(); e != a {
 		t.Errorf("expected\n%v\ngot\n%v", e, a)
@@ -183,9 +183,9 @@ otherfoo   15m (x3 over 25m)   Normal    ScalingReplicaSet   Deployment/bar   Sc
 
 func TestEventFiltered(t *testing.T) {
 	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
-	streams, _, buf, _ := genericclioptions.NewTestIOStreams()
+	streams, _, buf, _ := genericiooptions.NewTestIOStreams()
 	clientset, err := kubernetes.NewForConfig(cmdtesting.DefaultClientConfig())
-	if err != err {
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -211,7 +211,7 @@ func TestEventFiltered(t *testing.T) {
 	}
 
 	expected := `NAMESPACE   LAST SEEN           TYPE      REASON              OBJECT           MESSAGE
-foo         18m (x3 over 28m)   Warning   ScalingReplicaSet   Deployment/bar   Scaled up replica set bar-002 to 1
+foo         18m (x3 over 28m)   Warning   ScalingReplicaSet   Deployment/bar   Scaled up replica set bar-002 from 0 to 1
 `
 	if e, a := expected, buf.String(); e != a {
 		t.Errorf("expected\n%v\ngot\n%v", e, a)

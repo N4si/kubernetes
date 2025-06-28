@@ -21,17 +21,17 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/davecgh/go-spew/spew"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/dump"
 	"k8s.io/apimachinery/pkg/version"
 	. "k8s.io/client-go/discovery"
 	"k8s.io/client-go/openapi"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/rest/fake"
 
-	openapi_v2 "github.com/google/gnostic/openapiv2"
+	openapi_v2 "github.com/google/gnostic-models/openapiv2"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -257,8 +257,8 @@ func TestDeferredDiscoveryRESTMapper_CacheMiss(t *testing.T) {
 	})
 	assert.NoError(err)
 	assert.True(cdc.fresh, "should be fresh after a cache-miss")
-	assert.Equal(cdc.invalidateCalls, 1, "should have called Invalidate() once")
-	assert.Equal(gvk.Kind, "Foo")
+	assert.Equal(1, cdc.invalidateCalls, "should have called Invalidate() once")
+	assert.Equal("Foo", gvk.Kind)
 
 	gvk, err = m.KindFor(schema.GroupVersionResource{
 		Group:    "a",
@@ -266,7 +266,7 @@ func TestDeferredDiscoveryRESTMapper_CacheMiss(t *testing.T) {
 		Resource: "foo",
 	})
 	assert.NoError(err)
-	assert.Equal(cdc.invalidateCalls, 1, "should NOT have called Invalidate() again")
+	assert.Equal(1, cdc.invalidateCalls, "should NOT have called Invalidate() again")
 
 	gvk, err = m.KindFor(schema.GroupVersionResource{
 		Group:    "a",
@@ -274,7 +274,7 @@ func TestDeferredDiscoveryRESTMapper_CacheMiss(t *testing.T) {
 		Resource: "bar",
 	})
 	assert.Error(err)
-	assert.Equal(cdc.invalidateCalls, 1, "should NOT have called Invalidate() again after another cache-miss, but with fresh==true")
+	assert.Equal(1, cdc.invalidateCalls, "should NOT have called Invalidate() again after another cache-miss, but with fresh==true")
 
 	cdc.fresh = false
 	gvk, err = m.KindFor(schema.GroupVersionResource{
@@ -283,7 +283,7 @@ func TestDeferredDiscoveryRESTMapper_CacheMiss(t *testing.T) {
 		Resource: "bar",
 	})
 	assert.Error(err)
-	assert.Equal(cdc.invalidateCalls, 2, "should HAVE called Invalidate() again after another cache-miss, but with fresh==false")
+	assert.Equal(2, cdc.invalidateCalls, "should HAVE called Invalidate() again after another cache-miss, but with fresh==false")
 }
 
 func TestGetAPIGroupResources(t *testing.T) {
@@ -364,7 +364,7 @@ func TestGetAPIGroupResources(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if !reflect.DeepEqual(test.expected, got) {
-				t.Errorf("unexpected result:\nexpected = %s\ngot = %s", spew.Sdump(test.expected), spew.Sdump(got))
+				t.Errorf("unexpected result:\nexpected = %s\ngot = %s", dump.Pretty(test.expected), dump.Pretty(got))
 			}
 		})
 	}

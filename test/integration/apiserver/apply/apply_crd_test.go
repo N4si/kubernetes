@@ -25,13 +25,11 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
-
-	"go.etcd.io/etcd/client/pkg/v3/transport"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"google.golang.org/grpc"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
@@ -414,35 +412,13 @@ func findCRDCondition(crd *apiextensionsv1.CustomResourceDefinition, conditionTy
 // apply falls back to non-schema behavior
 func TestApplyCRDUnhandledSchema(t *testing.T) {
 	storageConfig := framework.SharedEtcd()
-	tlsInfo := transport.TLSInfo{
-		CertFile:      storageConfig.Transport.CertFile,
-		KeyFile:       storageConfig.Transport.KeyFile,
-		TrustedCAFile: storageConfig.Transport.TrustedCAFile,
-	}
-	tlsConfig, err := tlsInfo.ClientConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	etcdConfig := clientv3.Config{
-		Endpoints:   storageConfig.Transport.ServerList,
-		DialTimeout: 20 * time.Second,
-		DialOptions: []grpc.DialOption{
-			grpc.WithBlock(), // block until the underlying connection is up
-		},
-		TLS: tlsConfig,
-	}
-	etcdclient, err := clientv3.New(etcdConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer etcdclient.Close()
-
 	server, err := apiservertesting.StartTestServer(t, apiservertesting.NewDefaultTestServerOptions(), nil, storageConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer server.TearDownFn()
 	config := server.ClientConfig
+	etcdclient := server.EtcdClient
 
 	apiExtensionClient, err := clientset.NewForConfig(config)
 	if err != nil {
@@ -731,5 +707,111 @@ spec:
 	}
 	if len(status.Status().Details.Causes) != 1 {
 		t.Fatalf("Expecting to get one conflict when a different applier updates existing list item, got: %v", status.Status().Details.Causes)
+	}
+}
+
+func TestNoOpApplyWithDefaultsSameResourceVersionCRD(t *testing.T) {
+	// https://github.com/kubernetes/kubernetes/issues/124605
+	server, err := apiservertesting.StartTestServer(t, apiservertesting.NewDefaultTestServerOptions(), nil, framework.SharedEtcd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.TearDownFn()
+	config := server.ClientConfig
+
+	apiExtensionClient, err := clientset.NewForConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	noxuDefinition := fixtures.NewNoxuV1CustomResourceDefinition(apiextensionsv1.ClusterScoped)
+	err = json.Unmarshal([]byte(`{
+		"openAPIV3Schema": {
+			"type": "object",
+			"properties": {
+				"spec": {
+					"type": "object",
+					"properties": {
+						"infrastructureRef": {
+							"type": "object",
+							"properties": {
+								"name": {
+									"type": "string"
+								},
+								"namespace": {
+									"type": "string",
+									"default": "default-namespace"
+								}
+							},
+							"x-kubernetes-map-type": "atomic"
+						}
+					}
+				}
+			}
+		}
+	}`), &noxuDefinition.Spec.Versions[0].Schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noxuDefinition, err = fixtures.CreateNewV1CustomResourceDefinition(noxuDefinition, apiExtensionClient, dynamicClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	group := noxuDefinition.Spec.Group
+	kind := noxuDefinition.Spec.Names.Kind
+	resource := noxuDefinition.Spec.Names.Plural
+	version := noxuDefinition.Spec.Versions[0].Name
+	apiVersion := noxuDefinition.Spec.Group + "/" + version
+	gvr := schema.GroupVersionResource{Group: group, Version: version, Resource: resource}
+	name := "mytest"
+
+	// fieldWithDefault will be defaulted
+	applyConfiguration := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": apiVersion,
+			"kind":       kind,
+			"metadata": map[string]interface{}{
+				"name": name,
+			},
+			"spec": map[string]interface{}{"infrastructureRef": map[string]interface{}{"name": "infrastructure-machine-1\n"}},
+		},
+	}
+
+	created, err := dynamicClient.Resource(gvr).Apply(context.TODO(), name, applyConfiguration, metav1.ApplyOptions{FieldManager: "apply_test"})
+
+	if err != nil {
+		t.Fatalf("failed to create custom resource with apply: %v:\n%v", err, created)
+	}
+
+	createdAccessor, err := meta.Accessor(created)
+	if err != nil {
+		t.Fatalf("Failed to get meta accessor for updated object: %v", err)
+	}
+
+	// Sleep for one second to make sure that the times of each update operation is different.
+	time.Sleep(1 * time.Second)
+
+	updated, err := dynamicClient.Resource(gvr).Apply(context.TODO(), name, applyConfiguration, metav1.ApplyOptions{FieldManager: "apply_test"})
+	if err != nil {
+		t.Fatalf("failed to update custom resource with apply: %v:\n%v", err, updated)
+	}
+
+	updatedAccessor, err := meta.Accessor(updated)
+	if err != nil {
+		t.Fatalf("Failed to get meta accessor for updated object: %v", err)
+	}
+
+	if createdAccessor.GetResourceVersion() != updatedAccessor.GetResourceVersion() {
+		t.Fatalf("Expected same resource version to be %v but got: %v\nold object:\n%v\nnew object:\n%v",
+			createdAccessor.GetResourceVersion(),
+			updatedAccessor.GetResourceVersion(),
+			created,
+			updated,
+		)
 	}
 }

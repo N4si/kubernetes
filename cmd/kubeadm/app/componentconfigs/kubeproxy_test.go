@@ -31,7 +31,7 @@ import (
 	kubeproxyconfig "k8s.io/kube-proxy/config/v1alpha1"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
 )
 
@@ -118,7 +118,7 @@ func TestKubeProxyDefault(t *testing.T) {
 			}
 			got.Default(&test.clusterCfg, &test.endpoint, &kubeadmapi.NodeRegistrationOptions{})
 			if !reflect.DeepEqual(got, &expected) {
-				t.Fatalf("Missmatch between expected and got:\nExpected:\n%v\n---\nGot:\n%v", expected, got)
+				t.Fatalf("Mismatch between expected and got:\nExpected:\n%v\n---\nGot:\n%v", expected, got)
 			}
 		})
 	}

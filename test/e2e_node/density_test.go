@@ -53,7 +53,7 @@ const (
 	kubeletAddr = "localhost:10255"
 )
 
-var _ = SIGDescribe("Density [Serial] [Slow]", func() {
+var _ = SIGDescribe("Density", framework.WithSerial(), framework.WithSlow(), func() {
 	const (
 		// The data collection time of resource collector and the standalone cadvisor
 		// is not synchronized, so resource collector may miss data or
@@ -66,7 +66,7 @@ var _ = SIGDescribe("Density [Serial] [Slow]", func() {
 	)
 
 	f := framework.NewDefaultFramework("density-test")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.BeforeEach(func(ctx context.Context) {
 		// Start a standalone cadvisor pod using 'createSync', the pod is running when it returns
@@ -76,19 +76,25 @@ var _ = SIGDescribe("Density [Serial] [Slow]", func() {
 		rc = NewResourceCollector(containerStatsPollingPeriod)
 	})
 
-	ginkgo.Context("create a batch of pods", func() {
-		// TODO(coufon): the values are generous, set more precise limits with benchmark data
-		// and add more tests
+	f.Context("create a batch of pods", framework.WithFlaky(), func() {
+		// If this test case fails with am error similar to
+		// "container "runtime": expected 95th% usage < 0.900; got 0.941",
+		// it is likely that cpuLimits or memLimits need to be increased.
+		// Actual resource usage values can be found in the test output, e.g.:
+		// I1029 11:28:15.671913 1005 resource_usage_test.go:206] CPU usage of containers:
+		// container 50th% 90th% 95th% 99th% 100th%
+		// "runtime" 0.004 0.941 0.941 0.941 0.976
+		// "kubelet" 0.009 0.082 0.082 0.082 0.101
 		dTests := []densityTest{
 			{
 				podsNr:   10,
 				interval: 0 * time.Millisecond,
 				cpuLimits: e2ekubelet.ContainersCPUSummary{
-					kubeletstatsv1alpha1.SystemContainerKubelet: {0.50: 0.30, 0.95: 0.50},
-					kubeletstatsv1alpha1.SystemContainerRuntime: {0.50: 0.40, 0.95: 0.60},
+					kubeletstatsv1alpha1.SystemContainerKubelet: {0.50: 0.1, 0.95: 0.20},
+					kubeletstatsv1alpha1.SystemContainerRuntime: {0.50: 0.1, 0.95: 1.5},
 				},
 				memLimits: e2ekubelet.ResourceUsagePerContainer{
-					kubeletstatsv1alpha1.SystemContainerKubelet: &e2ekubelet.ContainerResourceUsage{MemoryRSSInBytes: 100 * 1024 * 1024},
+					kubeletstatsv1alpha1.SystemContainerKubelet: &e2ekubelet.ContainerResourceUsage{MemoryRSSInBytes: 50 * 1024 * 1024},
 					kubeletstatsv1alpha1.SystemContainerRuntime: &e2ekubelet.ContainerResourceUsage{MemoryRSSInBytes: 500 * 1024 * 1024},
 				},
 				// percentile limit of single pod startup latency
@@ -162,7 +168,7 @@ var _ = SIGDescribe("Density [Serial] [Slow]", func() {
 
 		for _, testArg := range dTests {
 			itArg := testArg
-			desc := fmt.Sprintf("latency/resource should be within limit when create %d pods with %v interval [Benchmark][NodeSpecialFeature:Benchmark]", itArg.podsNr, itArg.interval)
+			desc := fmt.Sprintf("latency/resource should be within limit when create %d pods with %v interval [Benchmark]", itArg.podsNr, itArg.interval)
 			ginkgo.It(desc, func(ctx context.Context) {
 				itArg.createMethod = "batch"
 				testInfo := getTestNodeInfo(f, itArg.getTestName(), desc)
@@ -200,7 +206,7 @@ var _ = SIGDescribe("Density [Serial] [Slow]", func() {
 		for _, testArg := range dTests {
 			itArg := testArg
 			ginkgo.Context("", func() {
-				desc := fmt.Sprintf("latency/resource should be within limit when create %d pods with %v interval (QPS %d) [Benchmark][NodeSpecialFeature:Benchmark]", itArg.podsNr, itArg.interval, itArg.APIQPSLimit)
+				desc := fmt.Sprintf("latency/resource should be within limit when create %d pods with %v interval (QPS %d) [Benchmark]", itArg.podsNr, itArg.interval, itArg.APIQPSLimit)
 				// The latency caused by API QPS limit takes a large portion (up to ~33%) of e2e latency.
 				// It makes the pod startup latency of Kubelet (creation throughput as well) under-estimated.
 				// Here we set API QPS limit from default 5 to 60 in order to test real Kubelet performance.
@@ -225,7 +231,7 @@ var _ = SIGDescribe("Density [Serial] [Slow]", func() {
 		}
 	})
 
-	ginkgo.Context("create a sequence of pods", func() {
+	f.Context("create a sequence of pods", framework.WithFlaky(), func() {
 		dTests := []densityTest{
 			{
 				podsNr:   10,
@@ -281,7 +287,7 @@ var _ = SIGDescribe("Density [Serial] [Slow]", func() {
 
 		for _, testArg := range dTests {
 			itArg := testArg
-			desc := fmt.Sprintf("latency/resource should be within limit when create %d pods with %d background pods [Benchmark][NodeSpeicalFeature:Benchmark]", itArg.podsNr, itArg.bgPodsNr)
+			desc := fmt.Sprintf("latency/resource should be within limit when create %d pods with %d background pods [Benchmark]", itArg.podsNr, itArg.bgPodsNr)
 			ginkgo.It(desc, func(ctx context.Context) {
 				itArg.createMethod = "sequence"
 				testInfo := getTestNodeInfo(f, itArg.getTestName(), desc)
@@ -354,16 +360,19 @@ func runDensityBatchTest(ctx context.Context, f *framework.Framework, rc *Resour
 	time.Sleep(sleepBeforeCreatePods)
 
 	rc.Start()
+	ginkgo.DeferCleanup(rc.Stop)
 
 	ginkgo.By("Creating a batch of pods")
 	// It returns a map['pod name']'creation time' containing the creation timestamps
 	createTimes := createBatchPodWithRateControl(ctx, f, pods, testArg.interval)
+	ginkgo.DeferCleanup(deletePodsSync, f, pods)
+	ginkgo.DeferCleanup(deletePodsSync, f, []*v1.Pod{getCadvisorPod()})
 
 	ginkgo.By("Waiting for all Pods to be observed by the watch...")
 
 	gomega.Eventually(ctx, func() bool {
 		return len(watchTimes) == testArg.podsNr
-	}, 10*time.Minute, 10*time.Second).Should(gomega.BeTrue())
+	}, 10*time.Minute, 10*time.Second).Should(gomega.BeTrueBecause("All pods should be observed by the watch."))
 
 	if len(watchTimes) < testArg.podsNr {
 		framework.Failf("Timeout reached waiting for all Pods to be observed by the watch.")
@@ -378,8 +387,8 @@ func runDensityBatchTest(ctx context.Context, f *framework.Framework, rc *Resour
 	)
 
 	for name, create := range createTimes {
-		watch, ok := watchTimes[name]
-		framework.ExpectEqual(ok, true)
+		watch := watchTimes[name]
+		gomega.Expect(watchTimes).To(gomega.HaveKey(name))
 
 		e2eLags = append(e2eLags,
 			e2emetrics.PodLatencyData{Name: name, Latency: watch.Time.Sub(create.Time)})
@@ -400,17 +409,12 @@ func runDensityBatchTest(ctx context.Context, f *framework.Framework, rc *Resour
 	sort.Sort(e2emetrics.LatencySlice(e2eLags))
 	batchLag := lastRunning.Time.Sub(firstCreate.Time)
 
-	rc.Stop()
-	deletePodsSync(ctx, f, pods)
-
 	// Log time series data.
 	if isLogTimeSeries {
 		logDensityTimeSeries(rc, createTimes, watchTimes, testInfo)
 	}
 	// Log throughput data.
 	logPodCreateThroughput(batchLag, e2eLags, testArg.podsNr, testInfo)
-
-	deletePodsSync(ctx, f, []*v1.Pod{getCadvisorPod()})
 
 	return batchLag, e2eLags
 }
@@ -428,21 +432,20 @@ func runDensitySeqTest(ctx context.Context, f *framework.Framework, rc *Resource
 
 	// CreatBatch is synchronized, all pods are running when it returns
 	e2epod.NewPodClient(f).CreateBatch(ctx, bgPods)
+	ginkgo.DeferCleanup(deletePodsSync, f, bgPods)
+	ginkgo.DeferCleanup(deletePodsSync, f, []*v1.Pod{getCadvisorPod()})
 
 	time.Sleep(sleepBeforeCreatePods)
 
 	rc.Start()
+	ginkgo.DeferCleanup(rc.Stop)
 
 	// Create pods sequentially (back-to-back). e2eLags have been sorted.
 	batchlag, e2eLags := createBatchPodSequential(ctx, f, testPods, podType)
-
-	rc.Stop()
-	deletePodsSync(ctx, f, append(bgPods, testPods...))
+	ginkgo.DeferCleanup(deletePodsSync, f, testPods)
 
 	// Log throughput data.
 	logPodCreateThroughput(batchlag, e2eLags, testArg.podsNr, testInfo)
-
-	deletePodsSync(ctx, f, []*v1.Pod{getCadvisorPod()})
 
 	return batchlag, e2eLags
 }
@@ -513,12 +516,16 @@ func newInformerWatchPod(ctx context.Context, f *framework.Framework, mutex *syn
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				p, ok := obj.(*v1.Pod)
-				framework.ExpectEqual(ok, true)
+				if !ok {
+					framework.Failf("Failed to cast object %T to Pod", obj)
+				}
 				go checkPodRunning(p)
 			},
 			UpdateFunc: func(oldObj, newObj interface{}) {
 				p, ok := newObj.(*v1.Pod)
-				framework.ExpectEqual(ok, true)
+				if !ok {
+					framework.Failf("Failed to cast object %T to Pod", newObj)
+				}
 				go checkPodRunning(p)
 			},
 		},
@@ -548,14 +555,14 @@ func createBatchPodSequential(ctx context.Context, f *framework.Framework, pods 
 		create := metav1.Now()
 		createTimes[pod.Name] = create
 		p := e2epod.NewPodClient(f).Create(ctx, pod)
-		framework.ExpectNoError(wait.PollImmediateWithContext(ctx, 2*time.Second, framework.PodStartTimeout, podWatchedRunning(watchTimes, p.Name)))
+		framework.ExpectNoError(wait.PollUntilContextTimeout(ctx, 2*time.Second, framework.PodStartTimeout, true, podWatchedRunning(watchTimes, p.Name)))
 		e2eLags = append(e2eLags,
 			e2emetrics.PodLatencyData{Name: pod.Name, Latency: watchTimes[pod.Name].Time.Sub(create.Time)})
 	}
 
 	for name, create := range createTimes {
-		watch, ok := watchTimes[name]
-		framework.ExpectEqual(ok, true)
+		watch := watchTimes[name]
+		gomega.Expect(watchTimes).To(gomega.HaveKey(name))
 		if !init {
 			if firstCreate.Time.After(create.Time) {
 				firstCreate = create
@@ -635,8 +642,9 @@ func logAndVerifyLatency(ctx context.Context, batchLag time.Duration, e2eLags []
 
 		// check bactch pod creation latency
 		if podBatchStartupLimit > 0 {
-			framework.ExpectEqual(batchLag <= podBatchStartupLimit, true, "Batch creation startup time %v exceed limit %v",
-				batchLag, podBatchStartupLimit)
+			if batchLag > podBatchStartupLimit {
+				framework.Failf("Batch creation startup time %v exceed limit %v", batchLag, podBatchStartupLimit)
+			}
 		}
 	}
 }

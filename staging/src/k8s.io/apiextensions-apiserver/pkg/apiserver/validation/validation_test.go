@@ -26,8 +26,11 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	utilpointer "k8s.io/utils/pointer"
 	kjson "sigs.k8s.io/json"
+
+	"k8s.io/apimachinery/pkg/util/version"
+	"k8s.io/apiserver/pkg/cel/environment"
+	utilpointer "k8s.io/utils/pointer"
 
 	kubeopenapispec "k8s.io/kube-openapi/pkg/validation/spec"
 
@@ -42,6 +45,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/sets"
+	celconfig "k8s.io/apiserver/pkg/apis/cel"
 )
 
 // TestRoundTrip checks the conversion to go-openapi types.
@@ -75,7 +79,7 @@ func TestRoundTrip(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		// fuzz internal types
 		internal := &apiextensions.JSONSchemaProps{}
-		f.Fuzz(internal)
+		f.Fill(internal)
 
 		// internal -> go-openapi
 		openAPITypes := &kubeopenapispec.Schema{}
@@ -157,6 +161,7 @@ type failingObject struct {
 func TestValidateCustomResource(t *testing.T) {
 	tests := []struct {
 		name           string
+		compatVersion  *version.Version
 		schema         apiextensions.JSONSchemaProps
 		objects        []interface{}
 		oldObjects     []interface{}
@@ -593,14 +598,53 @@ func TestValidateCustomResource(t *testing.T) {
 			},
 			failingObjects: []failingObject{
 				{object: map[string]interface{}{"fieldX": "abc"}, expectErrs: []string{
-					`fieldX: Too long: may not be longer than 2`,
+					`fieldX: Too long: may not be more than 2 bytes`,
+				}},
+			},
+		},
+		{name: "k8sLongName",
+			compatVersion: version.MajorMinor(1, 34),
+			schema: apiextensions.JSONSchemaProps{
+				Type: "object",
+				Properties: map[string]apiextensions.JSONSchemaProps{
+					"fieldX": {
+						Type:   "string",
+						Format: "k8s-long-name",
+					},
+				},
+			},
+			failingObjects: []failingObject{
+				{object: map[string]interface{}{"fieldX": "a.-"}, expectErrs: []string{
+					`fieldX: Invalid value: "a.-": fieldX in body must be of type k8s-long-name: "a.-"`,
+				}},
+			},
+		},
+		{name: "k8sShortName",
+			compatVersion: version.MajorMinor(1, 34),
+			schema: apiextensions.JSONSchemaProps{
+				Type: "object",
+				Properties: map[string]apiextensions.JSONSchemaProps{
+					"fieldX": {
+						Type:   "string",
+						Format: "k8s-short-name",
+					},
+				},
+			},
+			failingObjects: []failingObject{
+				{object: map[string]interface{}{"fieldX": "a-"}, expectErrs: []string{
+					`fieldX: Invalid value: "a-": fieldX in body must be of type k8s-short-name: "a-"`,
 				}},
 			},
 		},
 	}
 	for _, tt := range tests {
+		compatVersion := tt.compatVersion
+		if compatVersion == nil {
+			compatVersion = environment.DefaultCompatibilityVersion()
+		}
+
 		t.Run(tt.name, func(t *testing.T) {
-			validator, _, err := NewSchemaValidator(&apiextensions.CustomResourceValidation{OpenAPIV3Schema: &tt.schema})
+			validator, _, err := NewSchemaValidatorForVersion(&tt.schema, compatVersion)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -608,7 +652,7 @@ func TestValidateCustomResource(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			celValidator := cel.NewValidator(structural, false, cel.PerCallLimit)
+			celValidator := cel.NewValidator(structural, false, celconfig.PerCallLimit)
 			for i, obj := range tt.objects {
 				var oldObject interface{}
 				if len(tt.oldObjects) == len(tt.objects) {
@@ -617,14 +661,14 @@ func TestValidateCustomResource(t *testing.T) {
 				if errs := ValidateCustomResource(nil, obj, validator); len(errs) > 0 {
 					t.Errorf("unexpected validation error for %v: %v", obj, errs)
 				}
-				errs, _ := celValidator.Validate(context.TODO(), nil, structural, obj, oldObject, cel.RuntimeCELCostBudget)
+				errs, _ := celValidator.Validate(context.TODO(), nil, structural, obj, oldObject, celconfig.RuntimeCELCostBudget)
 				if len(errs) > 0 {
-					t.Errorf(errs.ToAggregate().Error())
+					t.Error(errs.ToAggregate().Error())
 				}
 			}
 			for i, failingObject := range tt.failingObjects {
 				errs := ValidateCustomResource(nil, failingObject.object, validator)
-				celErrs, _ := celValidator.Validate(context.TODO(), nil, structural, failingObject.object, failingObject.oldObject, cel.RuntimeCELCostBudget)
+				celErrs, _ := celValidator.Validate(context.TODO(), nil, structural, failingObject.object, failingObject.oldObject, celconfig.RuntimeCELCostBudget)
 				errs = append(errs, celErrs...)
 				if len(errs) == 0 {
 					t.Errorf("missing error for %v", failingObject.object)
@@ -688,7 +732,7 @@ func TestItemsProperty(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator, _, err := NewSchemaValidator(&apiextensions.CustomResourceValidation{OpenAPIV3Schema: &tt.args.schema})
+			validator, _, err := NewSchemaValidator(&tt.args.schema)
 			if err != nil {
 				t.Fatal(err)
 			}

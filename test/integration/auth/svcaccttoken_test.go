@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+
 	"io"
 	"net/http"
 	"net/url"
@@ -32,23 +33,31 @@ import (
 	"testing"
 	"time"
 
-	jose "gopkg.in/square/go-jose.v2"
-	"gopkg.in/square/go-jose.v2/jwt"
+	jose "gopkg.in/go-jose/go-jose.v2"
+	"gopkg.in/go-jose/go-jose.v2/jwt"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
 	apiserverserviceaccount "k8s.io/apiserver/pkg/authentication/serviceaccount"
+	"k8s.io/apiserver/pkg/authentication/user"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/kubernetes/cmd/kube-apiserver/app/options"
 	"k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/controlplane"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/serviceaccount"
+	svcacct "k8s.io/kubernetes/plugin/pkg/admission/serviceaccount"
 	"k8s.io/kubernetes/test/integration/framework"
+	"k8s.io/kubernetes/test/utils/ktesting"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -62,6 +71,58 @@ AwEHoUQDQgAEH6cuzP8XuD5wal6wf9M6xDljTOPLX2i8uIp/C/ASqiIGUeeKQtX0
 	tokenExpirationSeconds = 60*60 + 7
 )
 
+func TestServiceAccountAnnotationDeprecation(t *testing.T) {
+	tCtx := ktesting.Init(t)
+	// Start the server
+	kubeClient, kubeConfig, tearDownFn := framework.StartTestServer(tCtx, t, framework.TestServerSetup{})
+	defer tearDownFn()
+
+	ns := framework.CreateNamespaceOrDie(kubeClient, "myns", t)
+	defer framework.DeleteNamespaceOrDie(kubeClient, ns, t)
+
+	warningHandler := &recordingWarningHandler{}
+
+	configWithWarningHandler := rest.CopyConfig(kubeConfig)
+	configWithWarningHandler.WarningHandler = warningHandler
+	cs, err := clientset.NewForConfig(configWithWarningHandler)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	var (
+		saWithAnnotation = &v1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-svcacct",
+				Namespace: ns.Name,
+			},
+		}
+		pod = &v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pod",
+				Namespace: saWithAnnotation.Namespace,
+			},
+			Spec: v1.PodSpec{
+				ServiceAccountName: saWithAnnotation.Name,
+				Containers:         []v1.Container{{Name: "test-container", Image: "nginx"}},
+			},
+		}
+	)
+
+	t.Run("service account with deprecated annotation", func(t *testing.T) {
+		warningHandler.clear()
+		// test warning is emitted when the service account has this deprecated annotation
+		saWithAnnotation.Annotations = map[string]string{svcacct.EnforceMountableSecretsAnnotation: "true"}
+		_, delSvcAcct := createDeleteSvcAcct(t, cs, saWithAnnotation)
+		defer delSvcAcct()
+		warningHandler.assertEqual(t, []string{fmt.Sprintf("metadata.annotations[%s]: deprecated in v1.32+; prefer separate namespaces to isolate access to mounted secrets", svcacct.EnforceMountableSecretsAnnotation)})
+
+		warningHandler.clear()
+		// no warning when a pod is created with a service account that has this deprecated annotation
+		_, delPod := createDeletePod(t, cs, pod)
+		defer delPod()
+		warningHandler.assertEqual(t, nil)
+	})
+}
+
 func TestServiceAccountTokenCreate(t *testing.T) {
 	const iss = "https://foo.bar.example.com"
 	aud := authenticator.Audiences{"api"}
@@ -74,9 +135,11 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 
 	var tokenGenerator serviceaccount.TokenGenerator
 
+	tCtx := ktesting.Init(t)
+
 	// Start the server
 	var serverAddress string
-	kubeClient, kubeConfig, tearDownFn := framework.StartTestServer(t, framework.TestServerSetup{
+	kubeClient, kubeConfig, tearDownFn := framework.StartTestServer(tCtx, t, framework.TestServerSetup{
 		ModifyServerRunOptions: func(opts *options.ServerRunOptions) {
 			// Disable ServiceAccount admission plugin as we don't have serviceaccount controller running.
 			opts.Admission.GenericAdmission.DisablePlugins = []string{"ServiceAccount"}
@@ -91,10 +154,10 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		},
 		ModifyServerConfig: func(config *controlplane.Config) {
 			// extract token generator
-			tokenGenerator = config.ExtraConfig.ServiceAccountIssuer
+			tokenGenerator = config.ControlPlane.Extra.ServiceAccountIssuer
 
-			config.ExtraConfig.ServiceAccountMaxExpiration = maxExpirationDuration
-			config.ExtraConfig.ExtendExpiration = true
+			config.ControlPlane.Extra.ServiceAccountMaxExpiration = maxExpirationDuration
+			config.ControlPlane.Extra.ExtendExpiration = true
 		},
 	})
 	defer tearDownFn()
@@ -124,6 +187,11 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 				Namespace: ns.Name,
 			},
 		}
+		node = &v1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test-node",
+			},
+		}
 		pod = &v1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-pod",
@@ -131,6 +199,17 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 			},
 			Spec: v1.PodSpec{
 				ServiceAccountName: sa.Name,
+				Containers:         []v1.Container{{Name: "test-container", Image: "nginx"}},
+			},
+		}
+		scheduledpod = &v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pod",
+				Namespace: sa.Namespace,
+			},
+			Spec: v1.PodSpec{
+				ServiceAccountName: sa.Name,
+				NodeName:           node.Name,
 				Containers:         []v1.Container{{Name: "test-container", Image: "nginx"}},
 			},
 		}
@@ -150,7 +229,6 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 				Namespace: sa.Namespace,
 			},
 		}
-
 		wrongUID = types.UID("wrong")
 		noUID    = types.UID("")
 	)
@@ -163,7 +241,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		}
 
 		warningHandler.clear()
-		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{}); err == nil {
+		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
 			t.Fatalf("expected err creating token for nonexistant svcacct but got: %#v", resp)
 		}
 		warningHandler.assertEqual(t, nil)
@@ -172,18 +250,18 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 
 		treqWithBadName := treq.DeepCopy()
 		treqWithBadName.Name = "invalid-name"
-		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treqWithBadName, metav1.CreateOptions{}); err == nil || !strings.Contains(err.Error(), "must match the service account name") {
+		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treqWithBadName, metav1.CreateOptions{}); err == nil || !strings.Contains(err.Error(), "must match the service account name") {
 			t.Fatalf("expected err creating token with mismatched name but got: %#v", resp)
 		}
 
 		treqWithBadNamespace := treq.DeepCopy()
 		treqWithBadNamespace.Namespace = "invalid-namespace"
-		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treqWithBadNamespace, metav1.CreateOptions{}); err == nil || !strings.Contains(err.Error(), "does not match the namespace") {
+		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treqWithBadNamespace, metav1.CreateOptions{}); err == nil || !strings.Contains(err.Error(), "does not match the namespace") {
 			t.Fatalf("expected err creating token with mismatched namespace but got: %#v, %v", resp, err)
 		}
 
 		warningHandler.clear()
-		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{})
+		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -207,8 +285,12 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		checkPayload(t, treq.Status.Token, `"test-svcacct"`, "kubernetes.io", "serviceaccount", "name")
 
 		info := doTokenReview(t, cs, treq, false)
+		// we are not testing the credential-id feature, so delete this value from the returned extra info map
 		if info.Extra != nil {
-			t.Fatalf("expected Extra to be nil but got: %#v", info.Extra)
+			delete(info.Extra, user.CredentialIDKey)
+		}
+		if len(info.Extra) > 0 {
+			t.Fatalf("expected Extra to be empty but got: %#v", info.Extra)
 		}
 		delSvcAcct()
 		doTokenReview(t, cs, treq, true)
@@ -227,7 +309,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		}
 
 		warningHandler.clear()
-		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{}); err == nil {
+		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
 			t.Fatalf("expected err creating token for nonexistant svcacct but got: %#v", resp)
 		}
 		warningHandler.assertEqual(t, nil)
@@ -235,7 +317,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		defer del()
 
 		warningHandler.clear()
-		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{}); err == nil {
+		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
 			t.Fatalf("expected err creating token bound to nonexistant pod but got: %#v", resp)
 		}
 		warningHandler.assertEqual(t, nil)
@@ -245,21 +327,21 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		// right uid
 		treq.Spec.BoundObjectRef.UID = pod.UID
 		warningHandler.clear()
-		if _, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{}); err != nil {
+		if _, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err != nil {
 			t.Fatalf("err: %v", err)
 		}
 		warningHandler.assertEqual(t, nil)
 		// wrong uid
 		treq.Spec.BoundObjectRef.UID = wrongUID
 		warningHandler.clear()
-		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{}); err == nil {
+		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
 			t.Fatalf("expected err creating token bound to pod with wrong uid but got: %#v", resp)
 		}
 		warningHandler.assertEqual(t, nil)
 		// no uid
 		treq.Spec.BoundObjectRef.UID = noUID
 		warningHandler.clear()
-		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{})
+		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -271,8 +353,11 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		checkPayload(t, treq.Status.Token, "null", "kubernetes.io", "secret")
 		checkPayload(t, treq.Status.Token, `"myns"`, "kubernetes.io", "namespace")
 		checkPayload(t, treq.Status.Token, `"test-svcacct"`, "kubernetes.io", "serviceaccount", "name")
+		checkPayload(t, treq.Status.Token, "null", "kubernetes.io", "node")
 
 		info := doTokenReview(t, cs, treq, false)
+		// we are not testing the credential-id feature, so delete this value from the returned extra info map
+		delete(info.Extra, user.CredentialIDKey)
 		if len(info.Extra) != 2 {
 			t.Fatalf("expected Extra have length of 2 but was length %d: %#v", len(info.Extra), info.Extra)
 		}
@@ -283,6 +368,199 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 			t.Fatalf("unexpected Extra:\ngot:\t%#v\nwant:\t%#v", info.Extra, expected)
 		}
 		delPod()
+		doTokenReview(t, cs, treq, true)
+	})
+
+	testPodWithAssignedNode := func(node *v1.Node) func(t *testing.T) {
+		return func(t *testing.T) {
+			treq := &authenticationv1.TokenRequest{
+				Spec: authenticationv1.TokenRequestSpec{
+					Audiences: []string{"api"},
+					BoundObjectRef: &authenticationv1.BoundObjectReference{
+						Kind:       "Pod",
+						APIVersion: "v1",
+						Name:       scheduledpod.Name,
+					},
+				},
+			}
+
+			warningHandler.clear()
+			if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
+				t.Fatalf("expected err creating token for nonexistant svcacct but got: %#v", resp)
+			}
+			warningHandler.assertEqual(t, nil)
+			sa, del := createDeleteSvcAcct(t, cs, sa)
+			defer del()
+
+			warningHandler.clear()
+			if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
+				t.Fatalf("expected err creating token bound to nonexistant pod but got: %#v", resp)
+			}
+			warningHandler.assertEqual(t, nil)
+			pod, delPod := createDeletePod(t, cs, scheduledpod)
+			defer delPod()
+
+			if node != nil {
+				var delNode func()
+				node, delNode = createDeleteNode(t, cs, node)
+				defer delNode()
+			}
+
+			// right uid
+			treq.Spec.BoundObjectRef.UID = pod.UID
+			warningHandler.clear()
+			if _, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err != nil {
+				t.Fatalf("err: %v", err)
+			}
+			warningHandler.assertEqual(t, nil)
+			// wrong uid
+			treq.Spec.BoundObjectRef.UID = wrongUID
+			warningHandler.clear()
+			if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
+				t.Fatalf("expected err creating token bound to pod with wrong uid but got: %#v", resp)
+			}
+			warningHandler.assertEqual(t, nil)
+			// no uid
+			treq.Spec.BoundObjectRef.UID = noUID
+			warningHandler.clear()
+			treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{})
+			if err != nil {
+				t.Fatalf("err: %v", err)
+			}
+			warningHandler.assertEqual(t, nil)
+
+			checkPayload(t, treq.Status.Token, `"system:serviceaccount:myns:test-svcacct"`, "sub")
+			checkPayload(t, treq.Status.Token, `["api"]`, "aud")
+			checkPayload(t, treq.Status.Token, `"test-pod"`, "kubernetes.io", "pod", "name")
+			checkPayload(t, treq.Status.Token, "null", "kubernetes.io", "secret")
+			checkPayload(t, treq.Status.Token, `"myns"`, "kubernetes.io", "namespace")
+			checkPayload(t, treq.Status.Token, `"test-svcacct"`, "kubernetes.io", "serviceaccount", "name")
+
+			expectedExtraValues := map[string]authenticationv1.ExtraValue{
+				"authentication.kubernetes.io/pod-name": {pod.ObjectMeta.Name},
+				"authentication.kubernetes.io/pod-uid":  {string(pod.ObjectMeta.UID)},
+			}
+			// If the NodeName is set at all, expect it to be included in the claims
+			if pod.Spec.NodeName != "" {
+				checkPayload(t, treq.Status.Token, fmt.Sprintf(`"%s"`, pod.Spec.NodeName), "kubernetes.io", "node", "name")
+				expectedExtraValues["authentication.kubernetes.io/node-name"] = authenticationv1.ExtraValue{pod.Spec.NodeName}
+			}
+			// If the node is non-nil, we expect the UID to be set too
+			if node != nil {
+				checkPayload(t, treq.Status.Token, fmt.Sprintf(`"%s"`, node.UID), "kubernetes.io", "node", "uid")
+				expectedExtraValues["authentication.kubernetes.io/node-uid"] = authenticationv1.ExtraValue{string(node.ObjectMeta.UID)}
+			}
+
+			info := doTokenReview(t, cs, treq, false)
+			// we are not testing the credential-id feature, so delete this value from the returned extra info map
+			delete(info.Extra, user.CredentialIDKey)
+			if len(info.Extra) != len(expectedExtraValues) {
+				t.Fatalf("expected Extra have length of %d but was length %d: %#v", len(expectedExtraValues), len(info.Extra), info.Extra)
+			}
+			if !reflect.DeepEqual(info.Extra, expectedExtraValues) {
+				t.Fatalf("unexpected Extra:\ngot:\t%#v\nwant:\t%#v", info.Extra, expectedExtraValues)
+			}
+
+			delPod()
+			doTokenReview(t, cs, treq, true)
+		}
+	}
+
+	t.Run("bound to service account and a pod with an assigned nodeName that does not exist", testPodWithAssignedNode(nil))
+	t.Run("bound to service account and a pod with an assigned nodeName", testPodWithAssignedNode(node))
+
+	t.Run("fails to bind to a Node if the feature gate is disabled", func(t *testing.T) {
+		// Disable node binding, emulating 1.32
+		featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParseMajorMinor("1.32"))
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ServiceAccountTokenNodeBinding, false)
+
+		// Create ServiceAccount and Node objects
+		sa, del := createDeleteSvcAcct(t, cs, sa)
+		defer del()
+		node, delNode := createDeleteNode(t, cs, node)
+		defer delNode()
+
+		treq := &authenticationv1.TokenRequest{
+			Spec: authenticationv1.TokenRequestSpec{
+				Audiences: []string{"api"},
+				BoundObjectRef: &authenticationv1.BoundObjectReference{
+					Kind:       "Node",
+					APIVersion: "v1",
+					Name:       node.Name,
+					UID:        node.UID,
+				},
+			},
+		}
+		warningHandler.clear()
+		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
+			t.Fatalf("expected err creating token with featuregate disabled but got: %#v", resp)
+		} else if err.Error() != "cannot bind token to a Node object as the \"ServiceAccountTokenNodeBinding\" feature-gate is disabled" {
+			t.Fatalf("expected error due to feature gate being disabled, but got: %s", err.Error())
+		}
+		warningHandler.assertEqual(t, nil)
+	})
+
+	t.Run("bound to service account and node", func(t *testing.T) {
+		treq := &authenticationv1.TokenRequest{
+			Spec: authenticationv1.TokenRequestSpec{
+				Audiences: []string{"api"},
+				BoundObjectRef: &authenticationv1.BoundObjectReference{
+					Kind:       "Node",
+					APIVersion: "v1",
+					Name:       node.Name,
+					UID:        node.UID,
+				},
+			},
+		}
+
+		warningHandler.clear()
+		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
+			t.Fatalf("expected err creating token for nonexistant svcacct but got: %#v", resp)
+		}
+		warningHandler.assertEqual(t, nil)
+		sa, del := createDeleteSvcAcct(t, cs, sa)
+		defer del()
+
+		warningHandler.clear()
+		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
+			t.Fatalf("expected err creating token bound to nonexistant node but got: %#v", resp)
+		}
+		warningHandler.assertEqual(t, nil)
+		node, delNode := createDeleteNode(t, cs, node)
+		defer delNode()
+
+		// right uid
+		treq.Spec.BoundObjectRef.UID = node.UID
+		warningHandler.clear()
+		if _, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		warningHandler.assertEqual(t, nil)
+		// wrong uid
+		treq.Spec.BoundObjectRef.UID = wrongUID
+		warningHandler.clear()
+		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
+			t.Fatalf("expected err creating token bound to node with wrong uid but got: %#v", resp)
+		}
+		warningHandler.assertEqual(t, nil)
+		// no uid
+		treq.Spec.BoundObjectRef.UID = noUID
+		warningHandler.clear()
+		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		warningHandler.assertEqual(t, nil)
+
+		checkPayload(t, treq.Status.Token, `"system:serviceaccount:myns:test-svcacct"`, "sub")
+		checkPayload(t, treq.Status.Token, `["api"]`, "aud")
+		checkPayload(t, treq.Status.Token, `null`, "kubernetes.io", "pod")
+		checkPayload(t, treq.Status.Token, `"test-node"`, "kubernetes.io", "node", "name")
+		checkPayload(t, treq.Status.Token, `"myns"`, "kubernetes.io", "namespace")
+		checkPayload(t, treq.Status.Token, `"test-svcacct"`, "kubernetes.io", "serviceaccount", "name")
+
+		doTokenReview(t, cs, treq, false)
+		delNode()
 		doTokenReview(t, cs, treq, true)
 	})
 
@@ -300,7 +578,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		}
 
 		warningHandler.clear()
-		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{}); err == nil {
+		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
 			t.Fatalf("expected err creating token for nonexistant svcacct but got: %#v", resp)
 		}
 		warningHandler.assertEqual(t, nil)
@@ -308,7 +586,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		defer del()
 
 		warningHandler.clear()
-		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{}); err == nil {
+		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
 			t.Fatalf("expected err creating token bound to nonexistant secret but got: %#v", resp)
 		}
 		warningHandler.assertEqual(t, nil)
@@ -318,21 +596,21 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		// right uid
 		treq.Spec.BoundObjectRef.UID = secret.UID
 		warningHandler.clear()
-		if _, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{}); err != nil {
+		if _, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err != nil {
 			t.Fatalf("err: %v", err)
 		}
 		warningHandler.assertEqual(t, nil)
 		// wrong uid
 		treq.Spec.BoundObjectRef.UID = wrongUID
 		warningHandler.clear()
-		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{}); err == nil {
+		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
 			t.Fatalf("expected err creating token bound to secret with wrong uid but got: %#v", resp)
 		}
 		warningHandler.assertEqual(t, nil)
 		// no uid
 		treq.Spec.BoundObjectRef.UID = noUID
 		warningHandler.clear()
-		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{})
+		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -368,7 +646,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		defer del()
 
 		warningHandler.clear()
-		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{}); err == nil {
+		if resp, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err == nil {
 			t.Fatalf("expected err but got: %#v", resp)
 		}
 		warningHandler.assertEqual(t, nil)
@@ -385,7 +663,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		defer del()
 
 		warningHandler.clear()
-		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{})
+		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -405,8 +683,11 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		coresa := core.ServiceAccount{
 			ObjectMeta: sa.ObjectMeta,
 		}
-		_, pc := serviceaccount.Claims(coresa, nil, nil, 0, 0, nil)
-		tok, err := tokenGenerator.GenerateToken(sc, pc)
+		_, pc, err := serviceaccount.Claims(coresa, nil, nil, nil, 0, 0, nil)
+		if err != nil {
+			t.Fatalf("err calling Claims: %v", err)
+		}
+		tok, err := tokenGenerator.GenerateToken(context.TODO(), sc, pc)
 		if err != nil {
 			t.Fatalf("err signing expired token: %v", err)
 		}
@@ -436,7 +717,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		treq.Spec.BoundObjectRef.UID = pod.UID
 
 		warningHandler.clear()
-		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{})
+		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -492,7 +773,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		treq.Spec.BoundObjectRef.UID = pod.UID
 
 		warningHandler.clear()
-		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{})
+		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -534,7 +815,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		defer del()
 
 		warningHandler.clear()
-		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{})
+		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -552,7 +833,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 		defer del()
 
 		warningHandler.clear()
-		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{})
+		treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -582,7 +863,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 
 		treq.Spec.BoundObjectRef.UID = originalPod.UID
 		warningHandler.clear()
-		if treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{}); err != nil {
+		if treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err != nil {
 			t.Fatalf("err: %v", err)
 		}
 		warningHandler.assertEqual(t, nil)
@@ -625,7 +906,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 
 		treq.Spec.BoundObjectRef.UID = originalSecret.UID
 		warningHandler.clear()
-		if treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{}); err != nil {
+		if treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err != nil {
 			t.Fatalf("err: %v", err)
 		}
 		warningHandler.assertEqual(t, nil)
@@ -670,7 +951,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 
 		treq.Spec.BoundObjectRef.UID = originalSecret.UID
 		warningHandler.clear()
-		if treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{}); err != nil {
+		if treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err != nil {
 			t.Fatalf("err: %v", err)
 		}
 		warningHandler.assertEqual(t, nil)
@@ -716,7 +997,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 
 		treq.Spec.BoundObjectRef.UID = originalSecret.UID
 		warningHandler.clear()
-		if treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(context.TODO(), sa.Name, treq, metav1.CreateOptions{}); err != nil {
+		if treq, err = cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name, treq, metav1.CreateOptions{}); err != nil {
 			t.Fatalf("err: %v", err)
 		}
 		warningHandler.assertEqual(t, []string{fmt.Sprintf("requested expiration of %d seconds shortened to %d seconds", tooLongExpirationTime, maxExpirationSeconds)})
@@ -745,9 +1026,7 @@ func TestServiceAccountTokenCreate(t *testing.T) {
 
 		t.Log("get token")
 		warningHandler.clear()
-		tokenRequest, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(
-			context.TODO(),
-			sa.Name,
+		tokenRequest, err := cs.CoreV1().ServiceAccounts(sa.Namespace).CreateToken(tCtx, sa.Name,
 			&authenticationv1.TokenRequest{
 				Spec: authenticationv1.TokenRequestSpec{
 					Audiences: []string{"api"},
@@ -982,7 +1261,9 @@ func createDeletePod(t *testing.T, cs clientset.Interface, pod *v1.Pod) (*v1.Pod
 			return
 		}
 		done = true
-		if err := cs.CoreV1().Pods(pod.Namespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{}); err != nil {
+		if err := cs.CoreV1().Pods(pod.Namespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{
+			GracePeriodSeconds: ptr.To(int64(0)),
+		}); err != nil {
 			t.Fatalf("err: %v", err)
 		}
 	}
@@ -1002,6 +1283,25 @@ func createDeleteSecret(t *testing.T, cs clientset.Interface, sec *v1.Secret) (*
 		}
 		done = true
 		if err := cs.CoreV1().Secrets(sec.Namespace).Delete(context.TODO(), sec.Name, metav1.DeleteOptions{}); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+	}
+}
+
+func createDeleteNode(t *testing.T, cs clientset.Interface, node *v1.Node) (*v1.Node, func()) {
+	t.Helper()
+	node, err := cs.CoreV1().Nodes().Create(context.TODO(), node, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	done := false
+	return node, func() {
+		t.Helper()
+		if done {
+			return
+		}
+		done = true
+		if err := cs.CoreV1().Nodes().Delete(context.TODO(), node.Name, metav1.DeleteOptions{}); err != nil {
 			t.Fatalf("err: %v", err)
 		}
 	}

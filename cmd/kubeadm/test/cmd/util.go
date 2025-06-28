@@ -18,12 +18,13 @@ package kubeadm
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"testing"
 
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 // Forked from test/e2e/framework because the e2e framework is quite bloated
@@ -50,8 +51,9 @@ func RunCmd(command string, args ...string) (string, string, int, error) {
 }
 
 // RunSubCommand is a utility function for kubeadm testing that executes a Cobra sub command
-func RunSubCommand(t *testing.T, subCmds []*cobra.Command, command string, args ...string) error {
+func RunSubCommand(t *testing.T, subCmds []*cobra.Command, command string, output io.Writer, args ...string) error {
 	subCmd := getSubCommand(t, subCmds, command)
+	subCmd.SetOut(output)
 	subCmd.SetArgs(args)
 	if err := subCmd.Execute(); err != nil {
 		return err

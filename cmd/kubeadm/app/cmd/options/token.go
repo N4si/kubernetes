@@ -25,14 +25,13 @@ import (
 	bootstrapapi "k8s.io/cluster-bootstrap/token/api"
 
 	bootstraptokenv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/bootstraptoken/v1"
-	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
-	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 )
 
 // NewBootstrapTokenOptions creates a new BootstrapTokenOptions object with the default values
 func NewBootstrapTokenOptions() *BootstrapTokenOptions {
 	bto := &BootstrapTokenOptions{&bootstraptokenv1.BootstrapToken{}, ""}
-	kubeadmapiv1.SetDefaults_BootstrapToken(bto.BootstrapToken)
+	bootstraptokenv1.SetDefaults_BootstrapToken(bto.BootstrapToken)
 	return bto
 }
 
@@ -69,7 +68,7 @@ func (bto *BootstrapTokenOptions) AddTTLFlagWithName(fs *pflag.FlagSet, flagName
 func (bto *BootstrapTokenOptions) AddUsagesFlag(fs *pflag.FlagSet) {
 	fs.StringSliceVar(
 		&bto.Usages, TokenUsages, bto.Usages,
-		fmt.Sprintf("Describes the ways in which this token can be used. You can pass --usages multiple times or provide a comma separated list of options. Valid options: [%s]", strings.Join(kubeadmconstants.DefaultTokenUsages, ",")),
+		fmt.Sprintf("Describes the ways in which this token can be used. You can pass --usages multiple times or provide a comma separated list of options. Valid options: [%s]", strings.Join(bootstraptokenv1.DefaultTokenUsages, ",")),
 	)
 }
 

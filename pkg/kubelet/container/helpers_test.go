@@ -27,6 +27,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 func TestEnvVarsToMap(t *testing.T) {
@@ -657,7 +658,7 @@ func TestHashContainer(t *testing.T) {
 				"echo abc",
 			},
 			containerPort: int32(8001),
-			expectedHash:  uint64(0x3c42280f),
+			expectedHash:  uint64(0x8e45cbd0),
 		},
 	}
 
@@ -680,21 +681,21 @@ func TestShouldRecordEvent(t *testing.T) {
 	}
 
 	_, actual := innerEventRecorder.shouldRecordEvent(nil)
-	assert.Equal(t, false, actual)
+	assert.False(t, actual)
 
 	var obj = &v1.ObjectReference{Namespace: "claimrefns", Name: "claimrefname"}
 
 	_, actual = innerEventRecorder.shouldRecordEvent(obj)
-	assert.Equal(t, true, actual)
+	assert.True(t, actual)
 
 	obj = &v1.ObjectReference{Namespace: "system", Name: "infra", FieldPath: "implicitly required container "}
 
 	_, actual = innerEventRecorder.shouldRecordEvent(obj)
-	assert.Equal(t, false, actual)
+	assert.False(t, actual)
 
 	var nilObj *v1.ObjectReference = nil
 	_, actual = innerEventRecorder.shouldRecordEvent(nilObj)
-	assert.Equal(t, false, actual, "should not panic if the typed nil was used, see https://github.com/kubernetes/kubernetes/issues/95552")
+	assert.False(t, actual, "should not panic if the typed nil was used, see https://github.com/kubernetes/kubernetes/issues/95552")
 }
 
 func TestHasWindowsHostProcessContainer(t *testing.T) {
@@ -905,7 +906,7 @@ func TestHasWindowsHostProcessContainer(t *testing.T) {
 			pod := &v1.Pod{}
 			pod.Spec = *testCase.podSpec
 			result := HasWindowsHostProcessContainer(pod)
-			assert.Equal(t, result, testCase.expectedResult)
+			assert.Equal(t, testCase.expectedResult, result)
 		})
 	}
 }
@@ -915,10 +916,10 @@ func TestHashContainerWithoutResources(t *testing.T) {
 	cpu200m := resource.MustParse("200m")
 	mem100M := resource.MustParse("100Mi")
 	mem200M := resource.MustParse("200Mi")
-	cpuPolicyRestartNotRequired := v1.ContainerResizePolicy{ResourceName: v1.ResourceCPU, Policy: v1.RestartNotRequired}
-	memPolicyRestartNotRequired := v1.ContainerResizePolicy{ResourceName: v1.ResourceMemory, Policy: v1.RestartNotRequired}
-	cpuPolicyRestartRequired := v1.ContainerResizePolicy{ResourceName: v1.ResourceCPU, Policy: v1.RestartRequired}
-	memPolicyRestartRequired := v1.ContainerResizePolicy{ResourceName: v1.ResourceMemory, Policy: v1.RestartRequired}
+	cpuPolicyRestartNotRequired := v1.ContainerResizePolicy{ResourceName: v1.ResourceCPU, RestartPolicy: v1.NotRequired}
+	memPolicyRestartNotRequired := v1.ContainerResizePolicy{ResourceName: v1.ResourceMemory, RestartPolicy: v1.NotRequired}
+	cpuPolicyRestartRequired := v1.ContainerResizePolicy{ResourceName: v1.ResourceCPU, RestartPolicy: v1.RestartContainer}
+	memPolicyRestartRequired := v1.ContainerResizePolicy{ResourceName: v1.ResourceMemory, RestartPolicy: v1.RestartContainer}
 
 	type testCase struct {
 		name         string
@@ -938,7 +939,7 @@ func TestHashContainerWithoutResources(t *testing.T) {
 				},
 				ResizePolicy: []v1.ContainerResizePolicy{cpuPolicyRestartRequired, memPolicyRestartNotRequired},
 			},
-			0x86a4393c,
+			0x11a6d6d6,
 		},
 		{
 			"Burstable pod with memory policy restart required",
@@ -951,7 +952,7 @@ func TestHashContainerWithoutResources(t *testing.T) {
 				},
 				ResizePolicy: []v1.ContainerResizePolicy{cpuPolicyRestartNotRequired, memPolicyRestartRequired},
 			},
-			0x73a18cce,
+			0x11a6d6d6,
 		},
 		{
 			"Guaranteed pod with CPU policy restart required",
@@ -964,7 +965,7 @@ func TestHashContainerWithoutResources(t *testing.T) {
 				},
 				ResizePolicy: []v1.ContainerResizePolicy{cpuPolicyRestartRequired, memPolicyRestartNotRequired},
 			},
-			0x86a4393c,
+			0x11a6d6d6,
 		},
 		{
 			"Guaranteed pod with memory policy restart required",
@@ -977,15 +978,154 @@ func TestHashContainerWithoutResources(t *testing.T) {
 				},
 				ResizePolicy: []v1.ContainerResizePolicy{cpuPolicyRestartNotRequired, memPolicyRestartRequired},
 			},
-			0x73a18cce,
+			0x11a6d6d6,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			containerCopy := tc.container.DeepCopy()
-			hash := HashContainerWithoutResources(tc.container)
+			hash := HashContainer(tc.container)
 			assert.Equal(t, tc.expectedHash, hash, "[%s]", tc.name)
 			assert.Equal(t, containerCopy, tc.container, "[%s]", tc.name)
+		})
+	}
+}
+
+func TestHasAnyActiveRegularContainerStarted(t *testing.T) {
+	testCases := []struct {
+		desc      string
+		spec      *v1.PodSpec
+		podStatus *PodStatus
+		expected  bool
+	}{
+		{
+			desc: "pod has no active container",
+			spec: &v1.PodSpec{
+				InitContainers: []v1.Container{
+					{
+						Name: "init",
+					},
+				},
+				Containers: []v1.Container{
+					{
+						Name: "regular",
+					},
+				},
+			},
+			podStatus: &PodStatus{
+				SandboxStatuses: []*runtimeapi.PodSandboxStatus{
+					{
+						Id:    "old",
+						State: runtimeapi.PodSandboxState_SANDBOX_NOTREADY,
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			desc: "pod is initializing",
+			spec: &v1.PodSpec{
+				InitContainers: []v1.Container{
+					{
+						Name: "init",
+					},
+				},
+				Containers: []v1.Container{
+					{
+						Name: "regular",
+					},
+				},
+			},
+			podStatus: &PodStatus{
+				SandboxStatuses: []*runtimeapi.PodSandboxStatus{
+					{
+						Id:    "current",
+						State: runtimeapi.PodSandboxState_SANDBOX_READY,
+					},
+				},
+				ActiveContainerStatuses: []*Status{
+					{
+						Name:  "init",
+						State: ContainerStateRunning,
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			desc: "pod has initialized",
+			spec: &v1.PodSpec{
+				InitContainers: []v1.Container{
+					{
+						Name: "init",
+					},
+				},
+				Containers: []v1.Container{
+					{
+						Name: "regular",
+					},
+				},
+			},
+			podStatus: &PodStatus{
+				SandboxStatuses: []*runtimeapi.PodSandboxStatus{
+					{
+						Id:    "current",
+						State: runtimeapi.PodSandboxState_SANDBOX_READY,
+					},
+				},
+				ActiveContainerStatuses: []*Status{
+					{
+						Name:  "init",
+						State: ContainerStateExited,
+					},
+					{
+						Name:  "regular",
+						State: ContainerStateRunning,
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			desc: "pod is re-initializing after the sandbox recreation",
+			spec: &v1.PodSpec{
+				InitContainers: []v1.Container{
+					{
+						Name: "init",
+					},
+				},
+				Containers: []v1.Container{
+					{
+						Name: "regular",
+					},
+				},
+			},
+			podStatus: &PodStatus{
+				SandboxStatuses: []*runtimeapi.PodSandboxStatus{
+					{
+						Id:    "current",
+						State: runtimeapi.PodSandboxState_SANDBOX_READY,
+					},
+					{
+						Id:    "old",
+						State: runtimeapi.PodSandboxState_SANDBOX_NOTREADY,
+					},
+				},
+				ActiveContainerStatuses: []*Status{
+					{
+						Name:  "init",
+						State: ContainerStateRunning,
+					},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			actual := HasAnyActiveRegularContainerStarted(tc.spec, tc.podStatus)
+			assert.Equal(t, tc.expected, actual)
 		})
 	}
 }

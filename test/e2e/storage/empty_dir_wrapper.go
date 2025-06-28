@@ -23,8 +23,10 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
@@ -57,7 +59,7 @@ const (
 
 var _ = utils.SIGDescribe("EmptyDir wrapper volumes", func() {
 	f := framework.NewDefaultFramework("emptydir-wrapper")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelBaseline
+	f.NamespacePodSecurityLevel = admissionapi.LevelBaseline
 
 	/*
 		Release: v1.13
@@ -185,7 +187,7 @@ var _ = utils.SIGDescribe("EmptyDir wrapper volumes", func() {
 		Testname: EmptyDir Wrapper Volume, ConfigMap volumes, no race
 		Description: Create 50 ConfigMaps Volumes and 5 replicas of pod with these ConfigMapvolumes mounted. Pod MUST NOT fail waiting for Volumes.
 	*/
-	framework.ConformanceIt("should not cause race condition when used for configmaps [Serial]", func(ctx context.Context) {
+	framework.ConformanceIt("should not cause race condition when used for configmaps", f.WithSerial(), func(ctx context.Context) {
 		configMapNames := createConfigmapsForRace(ctx, f)
 		ginkgo.DeferCleanup(deleteConfigMaps, f, configMapNames)
 		volumes, volumeMounts := makeConfigMapVolumes(configMapNames)
@@ -198,7 +200,7 @@ var _ = utils.SIGDescribe("EmptyDir wrapper volumes", func() {
 	// This test uses deprecated GitRepo VolumeSource so it MUST not be promoted to Conformance.
 	// To provision a container with a git repo, mount an EmptyDir into an InitContainer that clones the repo using git, then mount the EmptyDir into the Pod's container.
 	// This projected volume maps approach can also be tested with secrets and downwardapi VolumeSource but are less prone to the race problem.
-	ginkgo.It("should not cause race condition when used for git_repo [Serial] [Slow]", func(ctx context.Context) {
+	f.It("should not cause race condition when used for git_repo", f.WithFeatureGate(features.GitRepoVolumeDriver), f.WithSerial(), f.WithSlow(), func(ctx context.Context) {
 		gitURL, gitRepo, cleanup := createGitServer(ctx, f)
 		defer cleanup()
 		volumes, volumeMounts := makeGitRepoVolumes(gitURL, gitRepo)
@@ -211,7 +213,7 @@ var _ = utils.SIGDescribe("EmptyDir wrapper volumes", func() {
 func createGitServer(ctx context.Context, f *framework.Framework) (gitURL string, gitRepo string, cleanup func()) {
 	var err error
 	gitServerPodName := "git-server-" + string(uuid.NewUUID())
-	containerPort := 8000
+	containerPort := int32(8000)
 
 	labels := map[string]string{"name": gitServerPodName}
 
@@ -232,7 +234,7 @@ func createGitServer(ctx context.Context, f *framework.Framework) (gitURL string
 				{
 					Name:       "http-portal",
 					Port:       int32(httpPort),
-					TargetPort: intstr.FromInt(containerPort),
+					TargetPort: intstr.FromInt32(containerPort),
 				},
 			},
 		},
@@ -333,6 +335,9 @@ func testNoWrappedVolumeRace(ctx context.Context, f *framework.Framework, volume
 	const nodeHostnameLabelKey = "kubernetes.io/hostname"
 
 	rcName := wrappedVolumeRaceRCNamePrefix + string(uuid.NewUUID())
+	rcLabels := map[string]string{
+		"name": rcName,
+	}
 	targetNode, err := e2enode.GetRandomReadySchedulableNode(ctx, f.ClientSet)
 	framework.ExpectNoError(err)
 
@@ -361,12 +366,10 @@ func testNoWrappedVolumeRace(ctx context.Context, f *framework.Framework, volume
 		},
 		Spec: v1.ReplicationControllerSpec{
 			Replicas: &podCount,
-			Selector: map[string]string{
-				"name": rcName,
-			},
+			Selector: rcLabels,
 			Template: &v1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"name": rcName},
+					Labels: rcLabels,
 				},
 				Spec: v1.PodSpec{
 					Containers: []v1.Container{
@@ -388,7 +391,7 @@ func testNoWrappedVolumeRace(ctx context.Context, f *framework.Framework, volume
 
 	ginkgo.DeferCleanup(e2erc.DeleteRCAndWaitForGC, f.ClientSet, f.Namespace.Name, rcName)
 
-	pods, err := e2epod.PodsCreated(ctx, f.ClientSet, f.Namespace.Name, rcName, podCount)
+	pods, err := e2epod.PodsCreatedByLabel(ctx, f.ClientSet, f.Namespace.Name, rcName, podCount, labels.SelectorFromSet(rcLabels))
 	framework.ExpectNoError(err, "error creating pods")
 
 	ginkgo.By("Ensuring each pod is running")

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -312,7 +313,7 @@ func TestValidateReservedMemory(t *testing.T) {
 			err := validateReservedMemory(tc.machineInfo, tc.nodeAllocatableReservation, tc.systemReservedMemory)
 			if strings.TrimSpace(tc.expectedError) != "" {
 				assert.Error(t, err)
-				assert.Equal(t, err.Error(), tc.expectedError)
+				assert.Equal(t, tc.expectedError, err.Error())
 			}
 		})
 	}
@@ -1896,6 +1897,13 @@ func TestRemoveContainer(t *testing.T) {
 	}
 }
 
+func getPolicyNameForOs() policyType {
+	if goruntime.GOOS == "windows" {
+		return policyTypeBestEffort
+	}
+	return policyTypeStatic
+}
+
 func TestNewManager(t *testing.T) {
 	machineInfo := returnMachineInfo()
 	expectedReserved := systemReservedMemory{
@@ -1909,7 +1917,7 @@ func TestNewManager(t *testing.T) {
 	testCases := []testMemoryManager{
 		{
 			description:                "Successful creation of Memory Manager instance",
-			policyName:                 policyTypeStatic,
+			policyName:                 getPolicyNameForOs(),
 			machineInfo:                machineInfo,
 			nodeAllocatableReservation: v1.ResourceList{v1.ResourceMemory: *resource.NewQuantity(2*gb, resource.BinarySI)},
 			systemReservedMemory: []kubeletconfig.MemoryReservation{
@@ -1928,7 +1936,7 @@ func TestNewManager(t *testing.T) {
 		},
 		{
 			description:                "Should return an error when systemReservedMemory (configured with kubelet flag) does not comply with Node Allocatable feature values",
-			policyName:                 policyTypeStatic,
+			policyName:                 getPolicyNameForOs(),
 			machineInfo:                machineInfo,
 			nodeAllocatableReservation: v1.ResourceList{v1.ResourceMemory: *resource.NewQuantity(2*gb, resource.BinarySI)},
 			systemReservedMemory: []kubeletconfig.MemoryReservation{
@@ -1951,7 +1959,7 @@ func TestNewManager(t *testing.T) {
 		},
 		{
 			description:                "Should return an error when memory reserved for system is empty (systemReservedMemory)",
-			policyName:                 policyTypeStatic,
+			policyName:                 getPolicyNameForOs(),
 			machineInfo:                machineInfo,
 			nodeAllocatableReservation: v1.ResourceList{},
 			systemReservedMemory:       []kubeletconfig.MemoryReservation{},
@@ -2112,129 +2120,6 @@ func TestGetTopologyHints(t *testing.T) {
 						NUMANodeAffinity: newNUMAAffinity(1),
 						Preferred:        true,
 					},
-				},
-				string(hugepages1Gi): {
-					{
-						NUMANodeAffinity: newNUMAAffinity(0),
-						Preferred:        true,
-					},
-					{
-						NUMANodeAffinity: newNUMAAffinity(1),
-						Preferred:        true,
-					},
-				},
-			},
-			activePods: []*v1.Pod{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						UID: "fakePod1",
-					},
-					Spec: v1.PodSpec{
-						Containers: []v1.Container{
-							{
-								Name: "fakeContainer1",
-							},
-							{
-								Name: "fakeContainer2",
-							},
-						},
-					},
-				},
-			},
-		},
-		{
-			description: "Successful hint generation",
-			policyName:  policyTypeStatic,
-			machineInfo: returnMachineInfo(),
-			reserved: systemReservedMemory{
-				0: map[v1.ResourceName]uint64{
-					v1.ResourceMemory: 1 * gb,
-				},
-				1: map[v1.ResourceName]uint64{
-					v1.ResourceMemory: 1 * gb,
-				},
-			},
-			assignments: state.ContainerMemoryAssignments{
-				"fakePod1": map[string][]state.Block{
-					"fakeContainer1": {
-						{
-							NUMAAffinity: []int{0},
-							Type:         v1.ResourceMemory,
-							Size:         1 * gb,
-						},
-						{
-							NUMAAffinity: []int{0},
-							Type:         hugepages1Gi,
-							Size:         1 * gb,
-						},
-					},
-					"fakeContainer2": {
-						{
-							NUMAAffinity: []int{0},
-							Type:         v1.ResourceMemory,
-							Size:         1 * gb,
-						},
-						{
-							NUMAAffinity: []int{0},
-							Type:         hugepages1Gi,
-							Size:         1 * gb,
-						},
-					},
-				},
-			},
-			machineState: state.NUMANodeMap{
-				0: &state.NUMANodeState{
-					Cells:               []int{0},
-					NumberOfAssignments: 4,
-					MemoryMap: map[v1.ResourceName]*state.MemoryTable{
-						v1.ResourceMemory: {
-							Allocatable:    9 * gb,
-							Free:           7 * gb,
-							Reserved:       2 * gb,
-							SystemReserved: 1 * gb,
-							TotalMemSize:   10 * gb,
-						},
-						hugepages1Gi: {
-							Allocatable:    5 * gb,
-							Free:           3 * gb,
-							Reserved:       2 * gb,
-							SystemReserved: 0 * gb,
-							TotalMemSize:   5 * gb,
-						},
-					},
-				},
-				1: &state.NUMANodeState{
-					Cells:               []int{1},
-					NumberOfAssignments: 0,
-					MemoryMap: map[v1.ResourceName]*state.MemoryTable{
-						v1.ResourceMemory: {
-							Allocatable:    9 * gb,
-							Free:           9 * gb,
-							Reserved:       0 * gb,
-							SystemReserved: 1 * gb,
-							TotalMemSize:   10 * gb,
-						},
-						hugepages1Gi: {
-							Allocatable:    5 * gb,
-							Free:           5 * gb,
-							Reserved:       0,
-							SystemReserved: 0,
-							TotalMemSize:   5 * gb,
-						},
-					},
-				},
-			},
-			expectedError: nil,
-			expectedHints: map[string][]topologymanager.TopologyHint{
-				string(v1.ResourceMemory): {
-					{
-						NUMANodeAffinity: newNUMAAffinity(0),
-						Preferred:        true,
-					},
-					{
-						NUMANodeAffinity: newNUMAAffinity(1),
-						Preferred:        true,
-					},
 					{
 						NUMANodeAffinity: newNUMAAffinity(0, 1),
 						Preferred:        false,
@@ -2255,7 +2140,6 @@ func TestGetTopologyHints(t *testing.T) {
 					},
 				},
 			},
-			activePods: []*v1.Pod{},
 		},
 	}
 
@@ -2268,14 +2152,14 @@ func TestGetTopologyHints(t *testing.T) {
 				containerRuntime: mockRuntimeService{
 					err: nil,
 				},
-				activePods:        func() []*v1.Pod { return testCase.activePods },
+				activePods:        func() []*v1.Pod { return nil },
 				podStatusProvider: mockPodStatusProvider{},
 			}
 			mgr.sourcesReady = &sourcesReadyStub{}
 			mgr.state.SetMachineState(testCase.machineState.Clone())
 			mgr.state.SetMemoryAssignments(testCase.assignments.Clone())
 
-			pod := getPod("fakePod2", "fakeContainer1", requirementsGuaranteed)
+			pod := getPod("fakePod1", "fakeContainer1", requirementsGuaranteed)
 			container := &pod.Spec.Containers[0]
 			hints := mgr.GetTopologyHints(pod, container)
 			if !reflect.DeepEqual(hints, testCase.expectedHints) {

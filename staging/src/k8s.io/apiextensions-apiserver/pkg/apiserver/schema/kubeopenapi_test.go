@@ -22,22 +22,22 @@ import (
 	"testing"
 	"time"
 
-	fuzz "github.com/google/gofuzz"
+	"github.com/google/go-cmp/cmp"
+	"sigs.k8s.io/randfill"
 
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
-	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/apimachinery/pkg/util/json"
 )
 
 func TestStructuralKubeOpenAPIRoundtrip(t *testing.T) {
-	f := fuzz.New()
+	f := randfill.New()
 	seed := time.Now().UnixNano()
 	t.Logf("seed = %v", seed)
 	//seed = int64(1549012506261785182)
 	f.RandSource(rand.New(rand.NewSource(seed)))
 	f.Funcs(
-		func(s *JSON, c fuzz.Continue) {
+		func(s *JSON, c randfill.Continue) {
 			switch c.Intn(7) {
 			case 0:
 				s.Object = float64(42.2)
@@ -61,7 +61,7 @@ func TestStructuralKubeOpenAPIRoundtrip(t *testing.T) {
 
 	for i := 0; i < 10000; i++ {
 		orig := &Structural{}
-		f.Fuzz(orig)
+		f.Fill(orig)
 
 		// normalize Structural.ValueValidation to zero values if it was nil before
 		normalizer := Visitor{
@@ -96,7 +96,7 @@ func TestStructuralKubeOpenAPIRoundtrip(t *testing.T) {
 		}
 
 		if !reflect.DeepEqual(orig, s) {
-			t.Fatalf("original and result differ: %v", diff.ObjectGoPrintDiff(orig, s))
+			t.Fatalf("original and result differ: %v", cmp.Diff(orig, s))
 		}
 	}
 }

@@ -18,46 +18,95 @@ package endpointslice
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/version"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/kubernetes/pkg/apis/discovery"
 	"k8s.io/kubernetes/pkg/features"
-	utilpointer "k8s.io/utils/pointer"
+	ptr "k8s.io/utils/ptr"
 )
 
 func Test_dropDisabledFieldsOnCreate(t *testing.T) {
 	testcases := []struct {
-		name             string
-		hintsGateEnabled bool
-		eps              *discovery.EndpointSlice
-		expectedEPS      *discovery.EndpointSlice
+		name              string
+		preferSameEnabled bool
+		eps               *discovery.EndpointSlice
+		expectedEPS       *discovery.EndpointSlice
 	}{
 		{
-			name: "node name gate enabled, field should be allowed",
+			name:              "PreferSameTrafficDistribution gate enabled, ForNodes should be allowed",
+			preferSameEnabled: true,
 			eps: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						NodeName: utilpointer.String("node-1"),
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-1"}},
+						},
 					},
 					{
-						NodeName: utilpointer.String("node-2"),
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-2"}},
+						},
 					},
 				},
 			},
 			expectedEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						NodeName: utilpointer.String("node-1"),
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-1"}},
+						},
 					},
 					{
-						NodeName: utilpointer.String("node-2"),
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-2"}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:              "PreferSameTrafficDistribution gate disabled, ForNodes should not be allowed",
+			preferSameEnabled: false,
+			eps: &discovery.EndpointSlice{
+				Endpoints: []discovery.Endpoint{
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-1"}},
+						},
+					},
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-2"}},
+						},
+					},
+				},
+			},
+			expectedEPS: &discovery.EndpointSlice{
+				Endpoints: []discovery.Endpoint{
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+						},
+					},
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+						},
 					},
 				},
 			},
@@ -66,7 +115,7 @@ func Test_dropDisabledFieldsOnCreate(t *testing.T) {
 
 	for _, testcase := range testcases {
 		t.Run(testcase.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.TopologyAwareHints, testcase.hintsGateEnabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PreferSameTrafficDistribution, testcase.preferSameEnabled)
 
 			dropDisabledFieldsOnCreate(testcase.eps)
 			if !apiequality.Semantic.DeepEqual(testcase.eps, testcase.expectedEPS) {
@@ -80,78 +129,13 @@ func Test_dropDisabledFieldsOnCreate(t *testing.T) {
 
 func Test_dropDisabledFieldsOnUpdate(t *testing.T) {
 	testcases := []struct {
-		name             string
-		hintsGateEnabled bool
-		oldEPS           *discovery.EndpointSlice
-		newEPS           *discovery.EndpointSlice
-		expectedEPS      *discovery.EndpointSlice
+		name              string
+		hintsGateEnabled  bool
+		preferSameEnabled bool
+		oldEPS            *discovery.EndpointSlice
+		newEPS            *discovery.EndpointSlice
+		expectedEPS       *discovery.EndpointSlice
 	}{
-		{
-			name: "node name gate enabled, set on new EPS",
-			oldEPS: &discovery.EndpointSlice{
-				Endpoints: []discovery.Endpoint{
-					{
-						NodeName: nil,
-					},
-					{
-						NodeName: nil,
-					},
-				},
-			},
-			newEPS: &discovery.EndpointSlice{
-				Endpoints: []discovery.Endpoint{
-					{
-						NodeName: utilpointer.String("node-1"),
-					},
-					{
-						NodeName: utilpointer.String("node-2"),
-					},
-				},
-			},
-			expectedEPS: &discovery.EndpointSlice{
-				Endpoints: []discovery.Endpoint{
-					{
-						NodeName: utilpointer.String("node-1"),
-					},
-					{
-						NodeName: utilpointer.String("node-2"),
-					},
-				},
-			},
-		},
-		{
-			name: "node name gate disabled, set on old and updated EPS",
-			oldEPS: &discovery.EndpointSlice{
-				Endpoints: []discovery.Endpoint{
-					{
-						NodeName: utilpointer.String("node-1-old"),
-					},
-					{
-						NodeName: utilpointer.String("node-2-old"),
-					},
-				},
-			},
-			newEPS: &discovery.EndpointSlice{
-				Endpoints: []discovery.Endpoint{
-					{
-						NodeName: utilpointer.String("node-1"),
-					},
-					{
-						NodeName: utilpointer.String("node-2"),
-					},
-				},
-			},
-			expectedEPS: &discovery.EndpointSlice{
-				Endpoints: []discovery.Endpoint{
-					{
-						NodeName: utilpointer.String("node-1"),
-					},
-					{
-						NodeName: utilpointer.String("node-2"),
-					},
-				},
-			},
-		},
 		{
 			name:             "hints gate enabled, set on new EPS",
 			hintsGateEnabled: true,
@@ -278,11 +262,162 @@ func Test_dropDisabledFieldsOnUpdate(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:              "PreferSameTrafficDistribution gate enabled, set on new EPS",
+			hintsGateEnabled:  true,
+			preferSameEnabled: true,
+			oldEPS: &discovery.EndpointSlice{
+				Endpoints: []discovery.Endpoint{
+					{
+						Hints: nil,
+					},
+					{
+						Hints: nil,
+					},
+				},
+			},
+			newEPS: &discovery.EndpointSlice{
+				Endpoints: []discovery.Endpoint{
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-1"}},
+						},
+					},
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-2"}},
+						},
+					},
+				},
+			},
+			expectedEPS: &discovery.EndpointSlice{
+				Endpoints: []discovery.Endpoint{
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-1"}},
+						},
+					},
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-2"}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:              "PreferSameTrafficDistribution gate disabled, set on new EPS",
+			hintsGateEnabled:  true,
+			preferSameEnabled: false,
+			oldEPS: &discovery.EndpointSlice{
+				Endpoints: []discovery.Endpoint{
+					{
+						Hints: nil,
+					},
+					{
+						Hints: nil,
+					},
+				},
+			},
+			newEPS: &discovery.EndpointSlice{
+				Endpoints: []discovery.Endpoint{
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-1"}},
+						},
+					},
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-2"}},
+						},
+					},
+				},
+			},
+			expectedEPS: &discovery.EndpointSlice{
+				Endpoints: []discovery.Endpoint{
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+						},
+					},
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:              "PreferSameTrafficDiscovery gate disabled, set on new and old EPS",
+			hintsGateEnabled:  true,
+			preferSameEnabled: false,
+			oldEPS: &discovery.EndpointSlice{
+				Endpoints: []discovery.Endpoint{
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a-old"}},
+							ForNodes: []discovery.ForNode{{Name: "node-1-old"}},
+						},
+					},
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a-old"}},
+							ForNodes: []discovery.ForNode{{Name: "node-2-old"}},
+						},
+					},
+				},
+			},
+			newEPS: &discovery.EndpointSlice{
+				Endpoints: []discovery.Endpoint{
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-1"}},
+						},
+					},
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-2"}},
+						},
+					},
+				},
+			},
+			expectedEPS: &discovery.EndpointSlice{
+				Endpoints: []discovery.Endpoint{
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-1"}},
+						},
+					},
+					{
+						Hints: &discovery.EndpointHints{
+							ForZones: []discovery.ForZone{{Name: "zone-a"}},
+							ForNodes: []discovery.ForNode{{Name: "node-2"}},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, testcase := range testcases {
 		t.Run(testcase.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.TopologyAwareHints, testcase.hintsGateEnabled)()
+			if !testcase.hintsGateEnabled {
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.32"))
+			}
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.TopologyAwareHints, testcase.hintsGateEnabled)
+			if testcase.hintsGateEnabled {
+				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PreferSameTrafficDistribution, testcase.preferSameEnabled)
+			}
 
 			dropDisabledFieldsOnUpdate(testcase.oldEPS, testcase.newEPS)
 			if !apiequality.Semantic.DeepEqual(testcase.newEPS, testcase.expectedEPS) {
@@ -398,14 +533,14 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			v1Request: true,
 			newEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
-					{Hostname: utilpointer.String("hostname-1")},
-					{Hostname: utilpointer.String("hostname-1")},
+					{Hostname: ptr.To("hostname-1")},
+					{Hostname: ptr.To("hostname-1")},
 				},
 			},
 			expectedEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
-					{Hostname: utilpointer.String("hostname-1")},
-					{Hostname: utilpointer.String("hostname-1")},
+					{Hostname: ptr.To("hostname-1")},
+					{Hostname: ptr.To("hostname-1")},
 				},
 			},
 		},
@@ -413,14 +548,14 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			name: "v1beta1 request, without deprecated topology",
 			newEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
-					{Hostname: utilpointer.String("hostname-1")},
-					{Hostname: utilpointer.String("hostname-1")},
+					{Hostname: ptr.To("hostname-1")},
+					{Hostname: ptr.To("hostname-1")},
 				},
 			},
 			expectedEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
-					{Hostname: utilpointer.String("hostname-1")},
-					{Hostname: utilpointer.String("hostname-1")},
+					{Hostname: ptr.To("hostname-1")},
+					{Hostname: ptr.To("hostname-1")},
 				},
 			},
 		},
@@ -458,11 +593,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			originalEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						NodeName:           utilpointer.String("node-1"),
+						NodeName:           ptr.To("node-1"),
 						DeprecatedTopology: map[string]string{"key": "value"},
 					},
 					{
-						NodeName:           utilpointer.String("node-1"),
+						NodeName:           ptr.To("node-1"),
 						DeprecatedTopology: map[string]string{"key": "value"},
 					},
 				},
@@ -473,11 +608,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 				},
 				Endpoints: []discovery.Endpoint{
 					{
-						NodeName:           utilpointer.String("node-1"),
+						NodeName:           ptr.To("node-1"),
 						DeprecatedTopology: map[string]string{"key": "value"},
 					},
 					{
-						NodeName:           utilpointer.String("node-1"),
+						NodeName:           ptr.To("node-1"),
 						DeprecatedTopology: map[string]string{"key": "value"},
 					},
 				},
@@ -488,11 +623,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 				},
 				Endpoints: []discovery.Endpoint{
 					{
-						NodeName:           utilpointer.String("node-1"),
+						NodeName:           ptr.To("node-1"),
 						DeprecatedTopology: map[string]string{"key": "value"},
 					},
 					{
-						NodeName:           utilpointer.String("node-1"),
+						NodeName:           ptr.To("node-1"),
 						DeprecatedTopology: map[string]string{"key": "value"},
 					},
 				},
@@ -503,11 +638,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			originalEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						NodeName:           utilpointer.String("node-1"),
+						NodeName:           ptr.To("node-1"),
 						DeprecatedTopology: map[string]string{"key": "value"},
 					},
 					{
-						NodeName:           utilpointer.String("node-1"),
+						NodeName:           ptr.To("node-1"),
 						DeprecatedTopology: map[string]string{"key": "value"},
 					},
 				},
@@ -518,11 +653,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 				},
 				Endpoints: []discovery.Endpoint{
 					{
-						NodeName:           utilpointer.String("node-1"),
+						NodeName:           ptr.To("node-1"),
 						DeprecatedTopology: map[string]string{"key": "value"},
 					},
 					{
-						NodeName:           utilpointer.String("node-1"),
+						NodeName:           ptr.To("node-1"),
 						DeprecatedTopology: map[string]string{"key": "value"},
 					},
 				},
@@ -533,11 +668,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 				},
 				Endpoints: []discovery.Endpoint{
 					{
-						NodeName:           utilpointer.String("node-1"),
+						NodeName:           ptr.To("node-1"),
 						DeprecatedTopology: map[string]string{"key": "value"},
 					},
 					{
-						NodeName:           utilpointer.String("node-1"),
+						NodeName:           ptr.To("node-1"),
 						DeprecatedTopology: map[string]string{"key": "value"},
 					},
 				},
@@ -555,19 +690,19 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			newEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 				},
 			},
 			expectedEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
-					{Hostname: utilpointer.String("hostname-1")},
-					{Hostname: utilpointer.String("hostname-1")},
+					{Hostname: ptr.To("hostname-1")},
+					{Hostname: ptr.To("hostname-1")},
 				},
 			},
 		},
@@ -582,11 +717,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			newEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 				},
@@ -594,11 +729,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			expectedEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 				},
@@ -610,11 +745,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			originalEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1", "other": "value"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1", "foo": "bar"},
 					},
 				},
@@ -622,11 +757,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			newEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1a"),
+						Hostname:           ptr.To("hostname-1a"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1", "other": "value"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1b"),
+						Hostname:           ptr.To("hostname-1b"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1", "foo": "bar"},
 					},
 				},
@@ -634,12 +769,12 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			expectedEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname: utilpointer.String("hostname-1a"),
-						NodeName: utilpointer.String("node-1"),
+						Hostname: ptr.To("hostname-1a"),
+						NodeName: ptr.To("node-1"),
 					},
 					{
-						Hostname: utilpointer.String("hostname-1b"),
-						NodeName: utilpointer.String("node-1"),
+						Hostname: ptr.To("hostname-1b"),
+						NodeName: ptr.To("node-1"),
 					},
 				},
 			},
@@ -650,11 +785,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			originalEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 				},
@@ -662,11 +797,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			newEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1a"),
+						Hostname:           ptr.To("hostname-1a"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1b"),
+						Hostname:           ptr.To("hostname-1b"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 				},
@@ -674,12 +809,12 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			expectedEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname: utilpointer.String("hostname-1a"),
-						NodeName: utilpointer.String("node-1"),
+						Hostname: ptr.To("hostname-1a"),
+						NodeName: ptr.To("node-1"),
 					},
 					{
-						Hostname: utilpointer.String("hostname-1b"),
-						NodeName: utilpointer.String("node-1"),
+						Hostname: ptr.To("hostname-1b"),
+						NodeName: ptr.To("node-1"),
 					},
 				},
 			},
@@ -690,11 +825,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			originalEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-2"},
 					},
 				},
@@ -702,11 +837,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			newEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1a"),
+						Hostname:           ptr.To("hostname-1a"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-2"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1b"),
+						Hostname:           ptr.To("hostname-1b"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 				},
@@ -714,12 +849,12 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			expectedEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname: utilpointer.String("hostname-1a"),
-						NodeName: utilpointer.String("node-2"),
+						Hostname: ptr.To("hostname-1a"),
+						NodeName: ptr.To("node-2"),
 					},
 					{
-						Hostname: utilpointer.String("hostname-1b"),
-						NodeName: utilpointer.String("node-1"),
+						Hostname: ptr.To("hostname-1b"),
+						NodeName: ptr.To("node-1"),
 					},
 				},
 			},
@@ -730,11 +865,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			originalEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-2"},
 					},
 				},
@@ -742,12 +877,12 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			newEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname: utilpointer.String("hostname-1a"),
+						Hostname: ptr.To("hostname-1a"),
 						// Invalid node name because it did not exist in previous version of EndpointSlice
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-3"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1b"),
+						Hostname:           ptr.To("hostname-1b"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 				},
@@ -755,11 +890,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			expectedEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname: utilpointer.String("hostname-1a"),
+						Hostname: ptr.To("hostname-1a"),
 					},
 					{
-						Hostname: utilpointer.String("hostname-1b"),
-						NodeName: utilpointer.String("node-1"),
+						Hostname: ptr.To("hostname-1b"),
+						NodeName: ptr.To("node-1"),
 					},
 				},
 			},
@@ -770,11 +905,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			originalEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 				},
@@ -782,12 +917,12 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			newEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1a"),
+						Hostname:           ptr.To("hostname-1a"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1b"),
-						NodeName:           utilpointer.String("node-2"),
+						Hostname:           ptr.To("hostname-1b"),
+						NodeName:           ptr.To("node-2"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 				},
@@ -795,12 +930,12 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			expectedEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname: utilpointer.String("hostname-1a"),
-						NodeName: utilpointer.String("node-1"),
+						Hostname: ptr.To("hostname-1a"),
+						NodeName: ptr.To("node-1"),
 					},
 					{
-						Hostname: utilpointer.String("hostname-1b"),
-						NodeName: utilpointer.String("node-2"),
+						Hostname: ptr.To("hostname-1b"),
+						NodeName: ptr.To("node-2"),
 					},
 				},
 			},
@@ -811,11 +946,11 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			originalEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 				},
@@ -823,13 +958,13 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			newEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1a"),
+						Hostname:           ptr.To("hostname-1a"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
-						NodeName:           utilpointer.String("node-1"),
+						NodeName:           ptr.To("node-1"),
 					},
 					{
-						Hostname:           utilpointer.String("hostname-1b"),
-						NodeName:           utilpointer.String("node-2"),
+						Hostname:           ptr.To("hostname-1b"),
+						NodeName:           ptr.To("node-2"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "node-1"},
 					},
 				},
@@ -837,12 +972,12 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			expectedEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname: utilpointer.String("hostname-1a"),
-						NodeName: utilpointer.String("node-1"),
+						Hostname: ptr.To("hostname-1a"),
+						NodeName: ptr.To("node-1"),
 					},
 					{
-						Hostname: utilpointer.String("hostname-1b"),
-						NodeName: utilpointer.String("node-2"),
+						Hostname: ptr.To("hostname-1b"),
+						NodeName: ptr.To("node-2"),
 					},
 				},
 			},
@@ -853,19 +988,19 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			originalEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "valid-node-1"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-2"),
+						Hostname:           ptr.To("hostname-2"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "invalid node-2"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-3"),
+						Hostname:           ptr.To("hostname-3"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "valid-node-3"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-4"),
+						Hostname:           ptr.To("hostname-4"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "invalid node-4"},
 					},
 				},
@@ -873,39 +1008,39 @@ func Test_dropTopologyOnV1(t *testing.T) {
 			newEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname:           utilpointer.String("hostname-1"),
+						Hostname:           ptr.To("hostname-1"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "valid-node-1"},
 					},
 					{
-						Hostname:           utilpointer.String("hostname-2"),
+						Hostname:           ptr.To("hostname-2"),
 						DeprecatedTopology: map[string]string{corev1.LabelHostname: "invalid node-2"},
 					},
 					{
-						Hostname: utilpointer.String("hostname-3"),
-						NodeName: utilpointer.String("node-3"),
+						Hostname: ptr.To("hostname-3"),
+						NodeName: ptr.To("node-3"),
 					},
 					{
-						Hostname: utilpointer.String("hostname-4"),
-						NodeName: utilpointer.String("node-4"),
+						Hostname: ptr.To("hostname-4"),
+						NodeName: ptr.To("node-4"),
 					},
 				},
 			},
 			expectedEPS: &discovery.EndpointSlice{
 				Endpoints: []discovery.Endpoint{
 					{
-						Hostname: utilpointer.String("hostname-1"),
-						NodeName: utilpointer.String("valid-node-1"),
+						Hostname: ptr.To("hostname-1"),
+						NodeName: ptr.To("valid-node-1"),
 					},
 					{
-						Hostname: utilpointer.String("hostname-2"),
+						Hostname: ptr.To("hostname-2"),
 					},
 					{
-						Hostname: utilpointer.String("hostname-3"),
-						NodeName: utilpointer.String("node-3"),
+						Hostname: ptr.To("hostname-3"),
+						NodeName: ptr.To("node-3"),
 					},
 					{
-						Hostname: utilpointer.String("hostname-4"),
-						NodeName: utilpointer.String("node-4"),
+						Hostname: ptr.To("hostname-4"),
+						NodeName: ptr.To("node-4"),
 					},
 				},
 			},
@@ -1010,6 +1145,89 @@ func TestWarningsOnEndpointSliceAddressType(t *testing.T) {
 				t.Fatal("Failed warning was not returned")
 			} else if !tc.wantWarning && len(got) != 0 {
 				t.Fatalf("Failed warning  was returned (%v)", got)
+			}
+		})
+	}
+}
+
+func Test_warnOnBadIPs(t *testing.T) {
+	tests := []struct {
+		name     string
+		slice    *discovery.EndpointSlice
+		warnings []string
+	}{
+		{
+			name:     "empty EndpointSlice",
+			slice:    &discovery.EndpointSlice{},
+			warnings: nil,
+		},
+		{
+			name: "valid EndpointSlice",
+			slice: &discovery.EndpointSlice{
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"1.2.3.4",
+							"fd00::1234",
+						},
+					},
+				},
+			},
+			warnings: nil,
+		},
+		{
+			name: "bad EndpointSlice",
+			slice: &discovery.EndpointSlice{
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"fd00::1234",
+							"01.02.03.04",
+						},
+					},
+					{
+						Addresses: []string{
+							"::ffff:1.2.3.4",
+						},
+					},
+				},
+			},
+			warnings: []string{
+				"endpoints[0].addresses[1]",
+				"endpoints[1].addresses[0]",
+			},
+		},
+		{
+			name: "bad EndpointSlice ignored because of label",
+			slice: &discovery.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"endpointslice.kubernetes.io/managed-by": "endpointslice-controller.k8s.io",
+					},
+				},
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"fd00::1234",
+							"01.02.03.04",
+						},
+					},
+				},
+			},
+			warnings: nil,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			warnings := warnOnBadIPs(test.slice)
+			if len(warnings) != len(test.warnings) {
+				t.Fatalf("Expected warnings %v, got %v", test.warnings, warnings)
+			}
+			for i := range warnings {
+				if !strings.HasPrefix(warnings[i], test.warnings[i]) {
+					t.Fatalf("Expected warnings %v, got %v", test.warnings, warnings)
+				}
 			}
 		})
 	}

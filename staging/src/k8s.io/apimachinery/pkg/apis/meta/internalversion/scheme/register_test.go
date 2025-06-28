@@ -21,9 +21,9 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/diff"
 )
 
 func TestListOptions(t *testing.T) {
@@ -37,15 +37,15 @@ func TestListOptions(t *testing.T) {
 		Watch:           true,
 	}
 	out := &metainternalversion.ListOptions{}
-	if err := scheme.Convert(in, out, nil); err != nil {
+	if err := Scheme.Convert(in, out, nil); err != nil {
 		t.Fatal(err)
 	}
 	actual := &metav1.ListOptions{}
-	if err := scheme.Convert(out, actual, nil); err != nil {
+	if err := Scheme.Convert(out, actual, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(in, actual) {
-		t.Errorf("unexpected: %s", diff.ObjectReflectDiff(in, actual))
+		t.Errorf("unexpected: %s", cmp.Diff(in, actual))
 	}
 
 	// verify failing conversion
@@ -54,16 +54,16 @@ func TestListOptions(t *testing.T) {
 		{FieldSelector: "a!!!"},
 	} {
 		out = &metainternalversion.ListOptions{}
-		if err := scheme.Convert(failingObject, out, nil); err == nil {
+		if err := Scheme.Convert(failingObject, out, nil); err == nil {
 			t.Errorf("%d: unexpected conversion: %#v", i, out)
 		}
 	}
 
 	// verify kind registration
-	if gvks, unversioned, err := scheme.ObjectKinds(in); err != nil || unversioned || gvks[0] != metav1.SchemeGroupVersion.WithKind("ListOptions") {
+	if gvks, unversioned, err := Scheme.ObjectKinds(in); err != nil || unversioned || gvks[0] != metav1.SchemeGroupVersion.WithKind("ListOptions") {
 		t.Errorf("unexpected: %v %v %v", gvks[0], unversioned, err)
 	}
-	if gvks, unversioned, err := scheme.ObjectKinds(out); err != nil || unversioned || gvks[0] != metainternalversion.SchemeGroupVersion.WithKind("ListOptions") {
+	if gvks, unversioned, err := Scheme.ObjectKinds(out); err != nil || unversioned || gvks[0] != metainternalversion.SchemeGroupVersion.WithKind("ListOptions") {
 		t.Errorf("unexpected: %v %v %v", gvks[0], unversioned, err)
 	}
 
@@ -85,6 +85,6 @@ func TestListOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(in, actual) {
-		t.Errorf("unexpected: %s", diff.ObjectReflectDiff(in, actual))
+		t.Errorf("unexpected: %s", cmp.Diff(in, actual))
 	}
 }

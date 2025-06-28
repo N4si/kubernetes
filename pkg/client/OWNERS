@@ -3,12 +3,11 @@
 approvers:
   - caesarxuchao
   - deads2k
-  - lavalamp
   - liggitt
   - smarterclayton
+  - jpbetz
 reviewers:
   - thockin
-  - lavalamp
   - smarterclayton
   - wojtek-t
   - deads2k
@@ -23,10 +22,13 @@ reviewers:
   - luxas
   - janetkuo
   - justinsb
-  - ncdc
   - mwielgus
   - feiskyer
   - soltysh
   - jsafrane
+  - jpbetz
 emeritus_approvers:
   - krousey
+  - lavalamp
+emeritus_reviewers:
+  - ncdc

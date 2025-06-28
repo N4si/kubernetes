@@ -24,6 +24,7 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/ginkgo/v2/reporters"
+	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -36,8 +37,7 @@ import (
 // Be careful when moving it around or changing the import statements above.
 // Here are some intentionally blank lines that can be removed to compensate
 // for future additional import statements.
-//
-// This must be line #39.
+// This must be line #40.
 
 // This is included in a stack backtrace.
 func failHelper(msg string) {
@@ -50,7 +50,7 @@ var _ = ginkgo.Describe("log", func() {
 	})
 	ginkgo.AfterEach(func() {
 		framework.Logf("after")
-		framework.ExpectEqual(true, false, "true is never false either")
+		gomega.Expect(true).To(gomega.BeFalseBecause("artificial assertion failure"))
 	})
 	ginkgo.It("fails", func() {
 		func() {
@@ -58,14 +58,14 @@ var _ = ginkgo.Describe("log", func() {
 		}()
 	})
 	ginkgo.It("asserts", func() {
-		framework.ExpectEqual(false, true, "false is never true")
+		gomega.Expect(false).To(gomega.BeTrueBecause("artificial assertion failure"))
 	})
 	ginkgo.It("error", func() {
 		err := errors.New("an error with a long, useless description")
 		framework.ExpectNoError(err, "hard-coded error")
 	})
 	ginkgo.It("equal", func() {
-		framework.ExpectEqual(0, 1, "of course it's not equal...")
+		gomega.Expect(0).To(gomega.Equal(1), "of course it's not equal...")
 	})
 	ginkgo.It("fails with helper", func() {
 		failHelper("I'm failing with helper.")
@@ -98,19 +98,15 @@ There were additional failures detected after the initial failure. These are vis
 `,
 					},
 					SystemErr: `> Enter [BeforeEach] log - log_test.go:48 <time>
-INFO: before
+<klog> log_test.go:49] before
 < Exit [BeforeEach] log - log_test.go:48 <time>
 > Enter [It] fails - log_test.go:55 <time>
 [FAILED] I'm failing.
 In [It] at: log_test.go:57 <time>
 < Exit [It] fails - log_test.go:55 <time>
 > Enter [AfterEach] log - log_test.go:51 <time>
-INFO: after
-[FAILED] true is never false either
-Expected
-    <bool>: true
-to equal
-    <bool>: false
+<klog> log_test.go:52] after
+[FAILED] artificial assertion failure
 In [AfterEach] at: log_test.go:53 <time>
 < Exit [AfterEach] log - log_test.go:51 <time>
 `,
@@ -120,34 +116,22 @@ In [AfterEach] at: log_test.go:53 <time>
 					Status: "failed",
 					Failure: &reporters.JUnitFailure{
 						Type: "failed",
-						Description: `[FAILED] false is never true
-Expected
-    <bool>: false
-to equal
-    <bool>: true
+						Description: `[FAILED] artificial assertion failure
 In [It] at: log_test.go:61 <time>
 
 There were additional failures detected after the initial failure. These are visible in the timeline
 `,
 					},
 					SystemErr: `> Enter [BeforeEach] log - log_test.go:48 <time>
-INFO: before
+<klog> log_test.go:49] before
 < Exit [BeforeEach] log - log_test.go:48 <time>
 > Enter [It] asserts - log_test.go:60 <time>
-[FAILED] false is never true
-Expected
-    <bool>: false
-to equal
-    <bool>: true
+[FAILED] artificial assertion failure
 In [It] at: log_test.go:61 <time>
 < Exit [It] asserts - log_test.go:60 <time>
 > Enter [AfterEach] log - log_test.go:51 <time>
-INFO: after
-[FAILED] true is never false either
-Expected
-    <bool>: true
-to equal
-    <bool>: false
+<klog> log_test.go:52] after
+[FAILED] artificial assertion failure
 In [AfterEach] at: log_test.go:53 <time>
 < Exit [AfterEach] log - log_test.go:51 <time>
 `,
@@ -164,23 +148,21 @@ There were additional failures detected after the initial failure. These are vis
 `,
 					},
 					SystemErr: `> Enter [BeforeEach] log - log_test.go:48 <time>
-INFO: before
+<klog> log_test.go:49] before
 < Exit [BeforeEach] log - log_test.go:48 <time>
 > Enter [It] error - log_test.go:63 <time>
-INFO: Unexpected error: hard-coded error: 
-    <*errors.errorString>: {
+<klog> log_test.go:65] Unexpected error: hard-coded error: 
+    <*errors.errorString>: 
+    an error with a long, useless description
+    {
         s: "an error with a long, useless description",
     }
 [FAILED] hard-coded error: an error with a long, useless description
 In [It] at: log_test.go:65 <time>
 < Exit [It] error - log_test.go:63 <time>
 > Enter [AfterEach] log - log_test.go:51 <time>
-INFO: after
-[FAILED] true is never false either
-Expected
-    <bool>: true
-to equal
-    <bool>: false
+<klog> log_test.go:52] after
+[FAILED] artificial assertion failure
 In [AfterEach] at: log_test.go:53 <time>
 < Exit [AfterEach] log - log_test.go:51 <time>
 `,
@@ -201,7 +183,7 @@ There were additional failures detected after the initial failure. These are vis
 `,
 					},
 					SystemErr: `> Enter [BeforeEach] log - log_test.go:48 <time>
-INFO: before
+<klog> log_test.go:49] before
 < Exit [BeforeEach] log - log_test.go:48 <time>
 > Enter [It] equal - log_test.go:67 <time>
 [FAILED] of course it's not equal...
@@ -212,12 +194,8 @@ to equal
 In [It] at: log_test.go:68 <time>
 < Exit [It] equal - log_test.go:67 <time>
 > Enter [AfterEach] log - log_test.go:51 <time>
-INFO: after
-[FAILED] true is never false either
-Expected
-    <bool>: true
-to equal
-    <bool>: false
+<klog> log_test.go:52] after
+[FAILED] artificial assertion failure
 In [AfterEach] at: log_test.go:53 <time>
 < Exit [AfterEach] log - log_test.go:51 <time>
 `,
@@ -234,19 +212,15 @@ There were additional failures detected after the initial failure. These are vis
 `,
 					},
 					SystemErr: `> Enter [BeforeEach] log - log_test.go:48 <time>
-INFO: before
+<klog> log_test.go:49] before
 < Exit [BeforeEach] log - log_test.go:48 <time>
 > Enter [It] fails with helper - log_test.go:70 <time>
 [FAILED] I'm failing with helper.
 In [It] at: log_test.go:44 <time>
 < Exit [It] fails with helper - log_test.go:70 <time>
 > Enter [AfterEach] log - log_test.go:51 <time>
-INFO: after
-[FAILED] true is never false either
-Expected
-    <bool>: true
-to equal
-    <bool>: false
+<klog> log_test.go:52] after
+[FAILED] artificial assertion failure
 In [AfterEach] at: log_test.go:53 <time>
 < Exit [AfterEach] log - log_test.go:51 <time>
 `,
@@ -256,28 +230,20 @@ In [AfterEach] at: log_test.go:53 <time>
 					Status: "failed",
 					Failure: &reporters.JUnitFailure{
 						Type: "failed",
-						Description: `[FAILED] true is never false either
-Expected
-    <bool>: true
-to equal
-    <bool>: false
+						Description: `[FAILED] artificial assertion failure
 In [AfterEach] at: log_test.go:53 <time>
 `,
 					},
 					SystemErr: `> Enter [BeforeEach] log - log_test.go:48 <time>
-INFO: before
+<klog> log_test.go:49] before
 < Exit [BeforeEach] log - log_test.go:48 <time>
 > Enter [It] redirects klog - log_test.go:73 <time>
 <klog> log_test.go:74] hello world
 <klog> log_test.go:75] <nil>not really an error
 < Exit [It] redirects klog - log_test.go:73 <time>
 > Enter [AfterEach] log - log_test.go:51 <time>
-INFO: after
-[FAILED] true is never false either
-Expected
-    <bool>: true
-to equal
-    <bool>: false
+<klog> log_test.go:52] after
+[FAILED] artificial assertion failure
 In [AfterEach] at: log_test.go:53 <time>
 < Exit [AfterEach] log - log_test.go:51 <time>
 `,

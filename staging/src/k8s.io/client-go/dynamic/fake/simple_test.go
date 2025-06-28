@@ -22,13 +22,13 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/diff"
 )
 
 const (
@@ -80,7 +80,7 @@ func TestGet(t *testing.T) {
 		},
 	}
 	if !equality.Semantic.DeepEqual(get, expected) {
-		t.Fatal(diff.ObjectGoPrintDiff(expected, get))
+		t.Fatal(cmp.Diff(expected, get))
 	}
 }
 
@@ -99,7 +99,7 @@ func TestListDecoding(t *testing.T) {
 		Items: []unstructured.Unstructured{},
 	}
 	if !equality.Semantic.DeepEqual(list, expectedList) {
-		t.Fatal(diff.ObjectGoPrintDiff(expectedList, list))
+		t.Fatal(cmp.Diff(expectedList, list))
 	}
 }
 
@@ -117,7 +117,7 @@ func TestGetDecoding(t *testing.T) {
 		},
 	}
 	if !equality.Semantic.DeepEqual(get, expectedObj) {
-		t.Fatal(diff.ObjectGoPrintDiff(expectedObj, get))
+		t.Fatal(cmp.Diff(expectedObj, get))
 	}
 }
 
@@ -145,7 +145,7 @@ func TestList(t *testing.T) {
 		*newUnstructured("group/version", "TheKind", "ns-foo", "name-foo"),
 	}
 	if !equality.Semantic.DeepEqual(listFirst.Items, expected) {
-		t.Fatal(diff.ObjectGoPrintDiff(expected, listFirst.Items))
+		t.Fatal(cmp.Diff(expected, listFirst.Items))
 	}
 }
 
@@ -189,7 +189,7 @@ func Test_ListKind(t *testing.T) {
 		},
 	}
 	if !equality.Semantic.DeepEqual(listFirst, expectedList) {
-		t.Fatal(diff.ObjectGoPrintDiff(expectedList, listFirst))
+		t.Fatal(cmp.Diff(expectedList, listFirst))
 	}
 }
 
@@ -242,7 +242,7 @@ func (tc *patchTestCase) verifyResult(result *unstructured.Unstructured) error {
 		return nil
 	}
 	if !equality.Semantic.DeepEqual(result, tc.expectedPatchedObject) {
-		return fmt.Errorf("unexpected diff in received object: %s", diff.ObjectGoPrintDiff(tc.expectedPatchedObject, result))
+		return fmt.Errorf("unexpected diff in received object: %s", cmp.Diff(tc.expectedPatchedObject, result))
 	}
 	return nil
 }
@@ -422,8 +422,6 @@ func TestListWithTypedFixtures(t *testing.T) {
 	u.SetGroupVersionKind(r.GetObjectKind().GroupVersionKind())
 	u.SetName(r.GetName())
 	u.SetNamespace(r.GetNamespace())
-	// Needed see: https://github.com/kubernetes/kubernetes/issues/67610
-	unstructured.SetNestedField(u.Object, nil, "metadata", "creationTimestamp")
 
 	typedScheme := runtime.NewScheme()
 	typedScheme.AddKnownTypeWithName(gvk, &mockResource{})

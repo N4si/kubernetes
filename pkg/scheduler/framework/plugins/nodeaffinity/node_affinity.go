@@ -25,18 +25,23 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
+	"k8s.io/klog/v2"
+	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config/validation"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/feature"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/helper"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
+	"k8s.io/kubernetes/pkg/scheduler/util"
 )
 
 // NodeAffinity is a plugin that checks if a pod node selector matches the node label.
 type NodeAffinity struct {
-	handle              framework.Handle
-	addedNodeSelector   *nodeaffinity.NodeSelector
-	addedPrefSchedTerms *nodeaffinity.PreferredSchedulingTerms
+	handle                    framework.Handle
+	addedNodeSelector         *nodeaffinity.NodeSelector
+	addedPrefSchedTerms       *nodeaffinity.PreferredSchedulingTerms
+	enableSchedulingQueueHint bool
 }
 
 var _ framework.PreFilterPlugin = &NodeAffinity{}
@@ -75,20 +80,71 @@ type preFilterState struct {
 }
 
 // Clone just returns the same state because it is not affected by pod additions or deletions.
-func (s *preFilterState) Clone() framework.StateData {
+func (s *preFilterState) Clone() fwk.StateData {
 	return s
 }
 
 // EventsToRegister returns the possible events that may make a Pod
 // failed by this plugin schedulable.
-func (pl *NodeAffinity) EventsToRegister() []framework.ClusterEvent {
-	return []framework.ClusterEvent{
-		{Resource: framework.Node, ActionType: framework.Add | framework.Update},
+func (pl *NodeAffinity) EventsToRegister(_ context.Context) ([]fwk.ClusterEventWithHint, error) {
+	// A note about UpdateNodeTaint event:
+	// Ideally, it's supposed to register only Add | UpdateNodeLabel because UpdateNodeTaint will never change the result from this plugin.
+	// But, we may miss Node/Add event due to preCheck, and we decided to register UpdateNodeTaint | UpdateNodeLabel for all plugins registering Node/Add.
+	// See: https://github.com/kubernetes/kubernetes/issues/109437
+	nodeActionType := fwk.Add | fwk.UpdateNodeLabel | fwk.UpdateNodeTaint
+	if pl.enableSchedulingQueueHint {
+		// preCheck is not used when QHint is enabled, and hence we can use UpdateNodeLabel instead of Update.
+		nodeActionType = fwk.Add | fwk.UpdateNodeLabel
 	}
+
+	return []fwk.ClusterEventWithHint{
+		{Event: fwk.ClusterEvent{Resource: fwk.Node, ActionType: nodeActionType}, QueueingHintFn: pl.isSchedulableAfterNodeChange},
+	}, nil
+}
+
+// isSchedulableAfterNodeChange is invoked whenever a node changed. It checks whether
+// that change made a previously unschedulable pod schedulable.
+func (pl *NodeAffinity) isSchedulableAfterNodeChange(logger klog.Logger, pod *v1.Pod, oldObj, newObj interface{}) (fwk.QueueingHint, error) {
+	originalNode, modifiedNode, err := util.As[*v1.Node](oldObj, newObj)
+	if err != nil {
+		return fwk.Queue, err
+	}
+
+	if pl.addedNodeSelector != nil && !pl.addedNodeSelector.Match(modifiedNode) {
+		logger.V(4).Info("added or modified node didn't match scheduler-enforced node affinity and this event won't make the Pod schedulable", "pod", klog.KObj(pod), "node", klog.KObj(modifiedNode))
+		return fwk.QueueSkip, nil
+	}
+
+	requiredNodeAffinity := nodeaffinity.GetRequiredNodeAffinity(pod)
+	isMatched, err := requiredNodeAffinity.Match(modifiedNode)
+	if err != nil {
+		return fwk.Queue, err
+	}
+	if !isMatched {
+		logger.V(5).Info("node was created or updated, but the pod's NodeAffinity doesn't match", "pod", klog.KObj(pod), "node", klog.KObj(modifiedNode))
+		return fwk.QueueSkip, nil
+	}
+	// Since the node was added and it matches the pod's affinity criteria, we can unblock it.
+	if originalNode == nil {
+		logger.V(5).Info("node was created, and matches with the pod's NodeAffinity", "pod", klog.KObj(pod), "node", klog.KObj(modifiedNode))
+		return fwk.Queue, nil
+	}
+	// At this point we know the operation is update so we can narrow down the criteria to unmatch -> match changes only
+	// (necessary affinity label was added to the node in this case).
+	wasMatched, err := requiredNodeAffinity.Match(originalNode)
+	if err != nil {
+		return fwk.Queue, err
+	}
+	if wasMatched {
+		logger.V(5).Info("node updated, but the pod's NodeAffinity hasn't changed", "pod", klog.KObj(pod), "node", klog.KObj(modifiedNode))
+		return fwk.QueueSkip, nil
+	}
+	logger.V(5).Info("node was updated and the pod's NodeAffinity changed to matched", "pod", klog.KObj(pod), "node", klog.KObj(modifiedNode))
+	return fwk.Queue, nil
 }
 
 // PreFilter builds and writes cycle state used by Filter.
-func (pl *NodeAffinity) PreFilter(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
+func (pl *NodeAffinity) PreFilter(ctx context.Context, cycleState fwk.CycleState, pod *v1.Pod, nodes []*framework.NodeInfo) (*framework.PreFilterResult, *framework.Status) {
 	affinity := pod.Spec.Affinity
 	noNodeAffinity := (affinity == nil ||
 		affinity.NodeAffinity == nil ||
@@ -107,14 +163,14 @@ func (pl *NodeAffinity) PreFilter(ctx context.Context, cycleState *framework.Cyc
 
 	// Check if there is affinity to a specific node and return it.
 	terms := affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
-	var nodeNames sets.String
+	var nodeNames sets.Set[string]
 	for _, t := range terms {
-		var termNodeNames sets.String
+		var termNodeNames sets.Set[string]
 		for _, r := range t.MatchFields {
 			if r.Key == metav1.ObjectNameField && r.Operator == v1.NodeSelectorOpIn {
 				// The requirements represent ANDed constraints, and so we need to
 				// find the intersection of nodes.
-				s := sets.NewString(r.Values...)
+				s := sets.New(r.Values...)
 				if termNodeNames == nil {
 					termNodeNames = s
 				} else {
@@ -127,14 +183,13 @@ func (pl *NodeAffinity) PreFilter(ctx context.Context, cycleState *framework.Cyc
 			// then all nodes are eligible because the terms are ORed.
 			return nil, nil
 		}
-		// If the set is empty, it means the terms had affinity to different
-		// sets of nodes, and since they are ANDed, then the pod will not match any node.
-		if len(termNodeNames) == 0 {
-			return nil, framework.NewStatus(framework.UnschedulableAndUnresolvable, errReasonConflict)
-		}
 		nodeNames = nodeNames.Union(termNodeNames)
 	}
-	if nodeNames != nil {
+	// If nodeNames is not nil, but length is 0, it means each term have conflicting affinity to node.Name;
+	// therefore, pod will not match any node.
+	if nodeNames != nil && len(nodeNames) == 0 {
+		return nil, framework.NewStatus(framework.UnschedulableAndUnresolvable, errReasonConflict)
+	} else if len(nodeNames) > 0 {
 		return &framework.PreFilterResult{NodeNames: nodeNames}, nil
 	}
 	return nil, nil
@@ -148,11 +203,9 @@ func (pl *NodeAffinity) PreFilterExtensions() framework.PreFilterExtensions {
 
 // Filter checks if the Node matches the Pod .spec.affinity.nodeAffinity and
 // the plugin's added affinity.
-func (pl *NodeAffinity) Filter(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeInfo *framework.NodeInfo) *framework.Status {
+func (pl *NodeAffinity) Filter(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeInfo *framework.NodeInfo) *framework.Status {
 	node := nodeInfo.Node()
-	if node == nil {
-		return framework.NewStatus(framework.Error, "node not found")
-	}
+
 	if pl.addedNodeSelector != nil && !pl.addedNodeSelector.Match(node) {
 		return framework.NewStatus(framework.UnschedulableAndUnresolvable, errReasonEnforced)
 	}
@@ -180,18 +233,19 @@ type preScoreState struct {
 
 // Clone implements the mandatory Clone interface. We don't really copy the data since
 // there is no need for that.
-func (s *preScoreState) Clone() framework.StateData {
+func (s *preScoreState) Clone() fwk.StateData {
 	return s
 }
 
 // PreScore builds and writes cycle state used by Score and NormalizeScore.
-func (pl *NodeAffinity) PreScore(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod, nodes []*v1.Node) *framework.Status {
-	if len(nodes) == 0 {
-		return nil
-	}
+func (pl *NodeAffinity) PreScore(ctx context.Context, cycleState fwk.CycleState, pod *v1.Pod, nodes []*framework.NodeInfo) *framework.Status {
 	preferredNodeAffinity, err := getPodPreferredNodeAffinity(pod)
 	if err != nil {
 		return framework.AsStatus(err)
+	}
+	if preferredNodeAffinity == nil && pl.addedPrefSchedTerms == nil {
+		// NodeAffinity Score has nothing to do with the Pod.
+		return framework.NewStatus(framework.Skip)
 	}
 	state := &preScoreState{
 		preferredNodeAffinity: preferredNodeAffinity,
@@ -203,12 +257,7 @@ func (pl *NodeAffinity) PreScore(ctx context.Context, cycleState *framework.Cycl
 // Score returns the sum of the weights of the terms that match the Node.
 // Terms came from the Pod .spec.affinity.nodeAffinity and from the plugin's
 // default affinity.
-func (pl *NodeAffinity) Score(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) (int64, *framework.Status) {
-	nodeInfo, err := pl.handle.SnapshotSharedLister().NodeInfos().Get(nodeName)
-	if err != nil {
-		return 0, framework.AsStatus(fmt.Errorf("getting node %q from Snapshot: %w", nodeName, err))
-	}
-
+func (pl *NodeAffinity) Score(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeInfo *framework.NodeInfo) (int64, *framework.Status) {
 	node := nodeInfo.Node()
 
 	var count int64
@@ -236,7 +285,7 @@ func (pl *NodeAffinity) Score(ctx context.Context, state *framework.CycleState, 
 }
 
 // NormalizeScore invoked after scoring all nodes.
-func (pl *NodeAffinity) NormalizeScore(ctx context.Context, state *framework.CycleState, pod *v1.Pod, scores framework.NodeScoreList) *framework.Status {
+func (pl *NodeAffinity) NormalizeScore(ctx context.Context, state fwk.CycleState, pod *v1.Pod, scores framework.NodeScoreList) *framework.Status {
 	return helper.DefaultNormalizeScore(framework.MaxNodeScore, false, scores)
 }
 
@@ -246,13 +295,14 @@ func (pl *NodeAffinity) ScoreExtensions() framework.ScoreExtensions {
 }
 
 // New initializes a new plugin and returns it.
-func New(plArgs runtime.Object, h framework.Handle) (framework.Plugin, error) {
+func New(_ context.Context, plArgs runtime.Object, h framework.Handle, fts feature.Features) (framework.Plugin, error) {
 	args, err := getArgs(plArgs)
 	if err != nil {
 		return nil, err
 	}
 	pl := &NodeAffinity{
-		handle: h,
+		handle:                    h,
+		enableSchedulingQueueHint: fts.EnableSchedulingQueueHint,
 	}
 	if args.AddedAffinity != nil {
 		if ns := args.AddedAffinity.RequiredDuringSchedulingIgnoredDuringExecution; ns != nil {
@@ -288,7 +338,7 @@ func getPodPreferredNodeAffinity(pod *v1.Pod) (*nodeaffinity.PreferredScheduling
 	return nil, nil
 }
 
-func getPreScoreState(cycleState *framework.CycleState) (*preScoreState, error) {
+func getPreScoreState(cycleState fwk.CycleState) (*preScoreState, error) {
 	c, err := cycleState.Read(preScoreStateKey)
 	if err != nil {
 		return nil, fmt.Errorf("reading %q from cycleState: %w", preScoreStateKey, err)
@@ -301,7 +351,7 @@ func getPreScoreState(cycleState *framework.CycleState) (*preScoreState, error) 
 	return s, nil
 }
 
-func getPreFilterState(cycleState *framework.CycleState) (*preFilterState, error) {
+func getPreFilterState(cycleState fwk.CycleState) (*preFilterState, error) {
 	c, err := cycleState.Read(preFilterStateKey)
 	if err != nil {
 		return nil, fmt.Errorf("reading %q from cycleState: %v", preFilterStateKey, err)

@@ -124,6 +124,10 @@ spec:
                   - valuesValue
                 matchLabels:
                   matchLabelsKey: matchLabelsValue
+              matchLabelKeys:
+              - matchLabelKeysValue
+              mismatchLabelKeys:
+              - mismatchLabelKeysValue
               namespaceSelector:
                 matchExpressions:
                 - key: keyValue
@@ -145,6 +149,10 @@ spec:
                 - valuesValue
               matchLabels:
                 matchLabelsKey: matchLabelsValue
+            matchLabelKeys:
+            - matchLabelKeysValue
+            mismatchLabelKeys:
+            - mismatchLabelKeysValue
             namespaceSelector:
               matchExpressions:
               - key: keyValue
@@ -167,6 +175,10 @@ spec:
                   - valuesValue
                 matchLabels:
                   matchLabelsKey: matchLabelsValue
+              matchLabelKeys:
+              - matchLabelKeysValue
+              mismatchLabelKeys:
+              - mismatchLabelKeysValue
               namespaceSelector:
                 matchExpressions:
                 - key: keyValue
@@ -188,6 +200,10 @@ spec:
                 - valuesValue
               matchLabels:
                 matchLabelsKey: matchLabelsValue
+            matchLabelKeys:
+            - matchLabelKeysValue
+            mismatchLabelKeys:
+            - mismatchLabelKeysValue
             namespaceSelector:
               matchExpressions:
               - key: keyValue
@@ -247,6 +263,8 @@ spec:
               path: pathValue
               port: portValue
               scheme: schemeValue
+            sleep:
+              seconds: 1
             tcpSocket:
               host: hostValue
               port: portValue
@@ -262,9 +280,12 @@ spec:
               path: pathValue
               port: portValue
               scheme: schemeValue
+            sleep:
+              seconds: 1
             tcpSocket:
               host: hostValue
               port: portValue
+          stopSignal: stopSignalValue
         livenessProbe:
           exec:
             command:
@@ -321,17 +342,22 @@ spec:
           terminationGracePeriodSeconds: 7
           timeoutSeconds: 3
         resizePolicy:
-        - policy: policyValue
-          resourceName: resourceNameValue
+        - resourceName: resourceNameValue
+          restartPolicy: restartPolicyValue
         resources:
           claims:
           - name: nameValue
+            request: requestValue
           limits:
             limitsKey: "0"
           requests:
             requestsKey: "0"
+        restartPolicy: restartPolicyValue
         securityContext:
           allowPrivilegeEscalation: true
+          appArmorProfile:
+            localhostProfile: localhostProfileValue
+            type: typeValue
           capabilities:
             add:
             - addValue
@@ -393,6 +419,7 @@ spec:
           mountPropagation: mountPropagationValue
           name: nameValue
           readOnly: true
+          recursiveReadOnly: recursiveReadOnlyValue
           subPath: subPathValue
           subPathExpr: subPathExprValue
         workingDir: workingDirValue
@@ -453,6 +480,8 @@ spec:
               path: pathValue
               port: portValue
               scheme: schemeValue
+            sleep:
+              seconds: 1
             tcpSocket:
               host: hostValue
               port: portValue
@@ -468,9 +497,12 @@ spec:
               path: pathValue
               port: portValue
               scheme: schemeValue
+            sleep:
+              seconds: 1
             tcpSocket:
               host: hostValue
               port: portValue
+          stopSignal: stopSignalValue
         livenessProbe:
           exec:
             command:
@@ -527,17 +559,22 @@ spec:
           terminationGracePeriodSeconds: 7
           timeoutSeconds: 3
         resizePolicy:
-        - policy: policyValue
-          resourceName: resourceNameValue
+        - resourceName: resourceNameValue
+          restartPolicy: restartPolicyValue
         resources:
           claims:
           - name: nameValue
+            request: requestValue
           limits:
             limitsKey: "0"
           requests:
             requestsKey: "0"
+        restartPolicy: restartPolicyValue
         securityContext:
           allowPrivilegeEscalation: true
+          appArmorProfile:
+            localhostProfile: localhostProfileValue
+            type: typeValue
           capabilities:
             add:
             - addValue
@@ -600,6 +637,7 @@ spec:
           mountPropagation: mountPropagationValue
           name: nameValue
           readOnly: true
+          recursiveReadOnly: recursiveReadOnlyValue
           subPath: subPathValue
           subPathExpr: subPathExprValue
         workingDir: workingDirValue
@@ -661,6 +699,8 @@ spec:
               path: pathValue
               port: portValue
               scheme: schemeValue
+            sleep:
+              seconds: 1
             tcpSocket:
               host: hostValue
               port: portValue
@@ -676,9 +716,12 @@ spec:
               path: pathValue
               port: portValue
               scheme: schemeValue
+            sleep:
+              seconds: 1
             tcpSocket:
               host: hostValue
               port: portValue
+          stopSignal: stopSignalValue
         livenessProbe:
           exec:
             command:
@@ -735,17 +778,22 @@ spec:
           terminationGracePeriodSeconds: 7
           timeoutSeconds: 3
         resizePolicy:
-        - policy: policyValue
-          resourceName: resourceNameValue
+        - resourceName: resourceNameValue
+          restartPolicy: restartPolicyValue
         resources:
           claims:
           - name: nameValue
+            request: requestValue
           limits:
             limitsKey: "0"
           requests:
             requestsKey: "0"
+        restartPolicy: restartPolicyValue
         securityContext:
           allowPrivilegeEscalation: true
+          appArmorProfile:
+            localhostProfile: localhostProfileValue
+            type: typeValue
           capabilities:
             add:
             - addValue
@@ -807,6 +855,7 @@ spec:
           mountPropagation: mountPropagationValue
           name: nameValue
           readOnly: true
+          recursiveReadOnly: recursiveReadOnlyValue
           subPath: subPathValue
           subPathExpr: subPathExprValue
         workingDir: workingDirValue
@@ -824,20 +873,31 @@ spec:
       - conditionType: conditionTypeValue
       resourceClaims:
       - name: nameValue
-        source:
-          resourceClaimName: resourceClaimNameValue
-          resourceClaimTemplateName: resourceClaimTemplateNameValue
+        resourceClaimName: resourceClaimNameValue
+        resourceClaimTemplateName: resourceClaimTemplateNameValue
+      resources:
+        claims:
+        - name: nameValue
+          request: requestValue
+        limits:
+          limitsKey: "0"
+        requests:
+          requestsKey: "0"
       restartPolicy: restartPolicyValue
       runtimeClassName: runtimeClassNameValue
       schedulerName: schedulerNameValue
       schedulingGates:
       - name: nameValue
       securityContext:
+        appArmorProfile:
+          localhostProfile: localhostProfileValue
+          type: typeValue
         fsGroup: 5
         fsGroupChangePolicy: fsGroupChangePolicyValue
         runAsGroup: 6
         runAsNonRoot: true
         runAsUser: 2
+        seLinuxChangePolicy: seLinuxChangePolicyValue
         seLinuxOptions:
           level: levelValue
           role: roleValue
@@ -848,6 +908,7 @@ spec:
           type: typeValue
         supplementalGroups:
         - 4
+        supplementalGroupsPolicy: supplementalGroupsPolicyValue
         sysctls:
         - name: nameValue
           value: valueValue
@@ -995,8 +1056,6 @@ spec:
                 name: nameValue
                 namespace: namespaceValue
               resources:
-                claims:
-                - name: nameValue
                 limits:
                   limitsKey: "0"
                 requests:
@@ -1010,6 +1069,7 @@ spec:
                 matchLabels:
                   matchLabelsKey: matchLabelsValue
               storageClassName: storageClassNameValue
+              volumeAttributesClassName: volumeAttributesClassNameValue
               volumeMode: volumeModeValue
               volumeName: volumeNameValue
         fc:
@@ -1047,6 +1107,9 @@ spec:
         hostPath:
           path: pathValue
           type: typeValue
+        image:
+          pullPolicy: pullPolicyValue
+          reference: referenceValue
         iscsi:
           chapAuthDiscovery: true
           chapAuthSession: true
@@ -1079,7 +1142,20 @@ spec:
         projected:
           defaultMode: 2
           sources:
-          - configMap:
+          - clusterTrustBundle:
+              labelSelector:
+                matchExpressions:
+                - key: keyValue
+                  operator: operatorValue
+                  values:
+                  - valuesValue
+                matchLabels:
+                  matchLabelsKey: matchLabelsValue
+              name: nameValue
+              optional: true
+              path: pathValue
+              signerName: signerNameValue
+            configMap:
               items:
               - key: keyValue
                 mode: 3
@@ -1171,5 +1247,6 @@ status:
   observedGeneration: 1
   readyReplicas: 7
   replicas: 2
+  terminatingReplicas: 9
   unavailableReplicas: 5
   updatedReplicas: 3

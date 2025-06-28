@@ -33,9 +33,10 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/klog/v2/ktesting"
 	kubeapiservertesting "k8s.io/kubernetes/cmd/kube-apiserver/app/testing"
 	"k8s.io/kubernetes/pkg/controller/storageversiongc"
-	"k8s.io/kubernetes/pkg/controlplane"
+	controlplaneapiserver "k8s.io/kubernetes/pkg/controlplane/apiserver"
 	"k8s.io/kubernetes/test/integration/framework"
 	"k8s.io/utils/pointer"
 )
@@ -48,9 +49,11 @@ const (
 )
 
 func TestStorageVersionGarbageCollection(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.APIServerIdentity, true)()
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StorageVersionAPI, true)()
-	result := kubeapiservertesting.StartTestServerOrDie(t, nil, nil, framework.SharedEtcd())
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.APIServerIdentity, true)
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StorageVersionAPI, true)
+	flags := framework.DefaultTestServerFlags()
+	flags = append(flags, fmt.Sprintf("--runtime-config=%s=true", apiserverinternalv1alpha1.SchemeGroupVersion))
+	result := kubeapiservertesting.StartTestServerOrDie(t, nil, flags, framework.SharedEtcd())
 	defer result.TearDownFn()
 
 	kubeclient, err := kubernetes.NewForConfig(result.ClientConfig)
@@ -62,7 +65,8 @@ func TestStorageVersionGarbageCollection(t *testing.T) {
 	leaseInformer := informers.Coordination().V1().Leases()
 	storageVersionInformer := informers.Internal().V1alpha1().StorageVersions()
 
-	controller := storageversiongc.NewStorageVersionGC(kubeclient, leaseInformer, storageVersionInformer)
+	_, ctx := ktesting.NewTestContext(t)
+	controller := storageversiongc.NewStorageVersionGC(ctx, kubeclient, leaseInformer, storageVersionInformer)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -172,7 +176,7 @@ func createTestAPIServerIdentityLease(t *testing.T, client kubernetes.Interface,
 			Name:      name,
 			Namespace: metav1.NamespaceSystem,
 			Labels: map[string]string{
-				controlplane.IdentityLeaseComponentLabelKey: controlplane.KubeAPIServer,
+				controlplaneapiserver.IdentityLeaseComponentLabelKey: controlplaneapiserver.KubeAPIServer,
 			},
 		},
 		Spec: coordinationv1.LeaseSpec{

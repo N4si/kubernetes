@@ -21,10 +21,15 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/kubernetes/pkg/features"
 
 	cadvisorapi "github.com/google/cadvisor/info/v1"
 	v1 "k8s.io/api/core/v1"
@@ -36,8 +41,8 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/cm/containermap"
 	"k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/state"
 	"k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/topology"
-	"k8s.io/kubernetes/pkg/kubelet/cm/cpuset"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager"
+	"k8s.io/utils/cpuset"
 )
 
 type mockState struct {
@@ -214,7 +219,59 @@ func makeMultiContainerPod(initCPUs, appCPUs []struct{ request, limit string }) 
 	return pod
 }
 
+func makeMultiContainerPodWithOptions(initCPUs, appCPUs []*containerOptions) *v1.Pod {
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pod",
+			UID:  "podUID",
+		},
+		Spec: v1.PodSpec{
+			InitContainers: []v1.Container{},
+			Containers:     []v1.Container{},
+		},
+	}
+
+	for i, cpu := range initCPUs {
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, v1.Container{
+			Name: "initContainer-" + strconv.Itoa(i),
+			Resources: v1.ResourceRequirements{
+				Requests: v1.ResourceList{
+					v1.ResourceName(v1.ResourceCPU):    resource.MustParse(cpu.request),
+					v1.ResourceName(v1.ResourceMemory): resource.MustParse("1G"),
+				},
+				Limits: v1.ResourceList{
+					v1.ResourceName(v1.ResourceCPU):    resource.MustParse(cpu.limit),
+					v1.ResourceName(v1.ResourceMemory): resource.MustParse("1G"),
+				},
+			},
+			RestartPolicy: &cpu.restartPolicy,
+		})
+	}
+
+	for i, cpu := range appCPUs {
+		pod.Spec.Containers = append(pod.Spec.Containers, v1.Container{
+			Name: "appContainer-" + strconv.Itoa(i),
+			Resources: v1.ResourceRequirements{
+				Requests: v1.ResourceList{
+					v1.ResourceName(v1.ResourceCPU):    resource.MustParse(cpu.request),
+					v1.ResourceName(v1.ResourceMemory): resource.MustParse("1G"),
+				},
+				Limits: v1.ResourceList{
+					v1.ResourceName(v1.ResourceCPU):    resource.MustParse(cpu.limit),
+					v1.ResourceName(v1.ResourceMemory): resource.MustParse("1G"),
+				},
+			},
+		})
+	}
+
+	return pod
+}
+
 func TestCPUManagerAdd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.WindowsCPUAndMemoryAffinity, true)
+	}
+
 	testPolicy, _ := NewStaticPolicy(
 		&topology.CPUTopology{
 			NumCPUs:    4,
@@ -277,7 +334,7 @@ func TestCPUManagerAdd(t *testing.T) {
 
 		pod := makePod("fakePod", "fakeContainer", "2", "2")
 		container := &pod.Spec.Containers[0]
-		mgr.activePods = func() []*v1.Pod { return nil }
+		mgr.activePods = func() []*v1.Pod { return []*v1.Pod{pod} }
 
 		err := mgr.Allocate(pod, container)
 		if !reflect.DeepEqual(err, testCase.expAllocateErr) {
@@ -299,6 +356,10 @@ func TestCPUManagerAdd(t *testing.T) {
 }
 
 func TestCPUManagerAddWithInitContainers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.WindowsCPUAndMemoryAffinity, true)
+	}
+
 	testCases := []struct {
 		description      string
 		topo             *topology.CPUTopology
@@ -550,6 +611,10 @@ func TestCPUManagerAddWithInitContainers(t *testing.T) {
 }
 
 func TestCPUManagerGenerate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.WindowsCPUAndMemoryAffinity, true)
+	}
+
 	testCases := []struct {
 		description                string
 		cpuPolicyName              string
@@ -603,20 +668,24 @@ func TestCPUManagerGenerate(t *testing.T) {
 			{
 				Cores: []cadvisorapi.Core{
 					{
-						Id:      0,
-						Threads: []int{0},
+						Id:           0,
+						Threads:      []int{0},
+						UncoreCaches: []cadvisorapi.Cache{{Id: 1}},
 					},
 					{
-						Id:      1,
-						Threads: []int{1},
+						Id:           1,
+						Threads:      []int{1},
+						UncoreCaches: []cadvisorapi.Cache{{Id: 1}},
 					},
 					{
-						Id:      2,
-						Threads: []int{2},
+						Id:           2,
+						Threads:      []int{2},
+						UncoreCaches: []cadvisorapi.Cache{{Id: 1}},
 					},
 					{
-						Id:      3,
-						Threads: []int{3},
+						Id:           3,
+						Threads:      []int{3},
+						UncoreCaches: []cadvisorapi.Cache{{Id: 1}},
 					},
 				},
 			},
@@ -645,15 +714,8 @@ func TestCPUManagerGenerate(t *testing.T) {
 				if rawMgr.policy.Name() != testCase.expectedPolicy {
 					t.Errorf("Unexpected policy name. Have: %q wants %q", rawMgr.policy.Name(), testCase.expectedPolicy)
 				}
-				if rawMgr.policy.Name() == string(PolicyNone) {
-					if rawMgr.topology != nil {
-						t.Errorf("Expected topology to be nil for 'none' policy. Have: %q", rawMgr.topology)
-					}
-				}
-				if rawMgr.policy.Name() != string(PolicyNone) {
-					if rawMgr.topology == nil {
-						t.Errorf("Expected topology to be non-nil for policy '%v'. Have: %q", rawMgr.policy.Name(), rawMgr.topology)
-					}
+				if rawMgr.topology == nil {
+					t.Errorf("Expected topology to be non-nil for policy '%v'. Have: %q", rawMgr.policy.Name(), rawMgr.topology)
 				}
 			}
 		})
@@ -662,6 +724,10 @@ func TestCPUManagerGenerate(t *testing.T) {
 }
 
 func TestCPUManagerRemove(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.WindowsCPUAndMemoryAffinity, true)
+	}
+
 	containerID := "fakeID"
 	containerMap := containermap.NewContainerMap()
 
@@ -705,6 +771,10 @@ func TestCPUManagerRemove(t *testing.T) {
 }
 
 func TestReconcileState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.WindowsCPUAndMemoryAffinity, true)
+	}
+
 	testPolicy, _ := NewStaticPolicy(
 		&topology.CPUTopology{
 			NumCPUs:    8,
@@ -1228,6 +1298,10 @@ func TestReconcileState(t *testing.T) {
 // above test cases are without kubelet --reserved-cpus cmd option
 // the following tests are with --reserved-cpus configured
 func TestCPUManagerAddWithResvList(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.WindowsCPUAndMemoryAffinity, true)
+	}
+
 	testPolicy, _ := NewStaticPolicy(
 		&topology.CPUTopology{
 			NumCPUs:    4,
@@ -1280,7 +1354,7 @@ func TestCPUManagerAddWithResvList(t *testing.T) {
 
 		pod := makePod("fakePod", "fakeContainer", "2", "2")
 		container := &pod.Spec.Containers[0]
-		mgr.activePods = func() []*v1.Pod { return nil }
+		mgr.activePods = func() []*v1.Pod { return []*v1.Pod{pod} }
 
 		err := mgr.Allocate(pod, container)
 		if !reflect.DeepEqual(err, testCase.expAllocateErr) {
@@ -1302,6 +1376,10 @@ func TestCPUManagerAddWithResvList(t *testing.T) {
 }
 
 func TestCPUManagerHandlePolicyOptions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.WindowsCPUAndMemoryAffinity, true)
+	}
+
 	testCases := []struct {
 		description      string
 		cpuPolicyName    string
@@ -1368,6 +1446,10 @@ func TestCPUManagerHandlePolicyOptions(t *testing.T) {
 }
 
 func TestCPUManagerGetAllocatableCPUs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.WindowsCPUAndMemoryAffinity, true)
+	}
+
 	nonePolicy, _ := NewNonePolicy(nil)
 	staticPolicy, _ := NewStaticPolicy(
 		&topology.CPUTopology{

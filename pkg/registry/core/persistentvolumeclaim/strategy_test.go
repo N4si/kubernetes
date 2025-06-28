@@ -21,7 +21,8 @@ import (
 	"reflect"
 	"testing"
 
-	"k8s.io/apimachinery/pkg/util/diff"
+	"github.com/google/go-cmp/cmp"
+	"k8s.io/apimachinery/pkg/util/version"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
@@ -86,19 +87,19 @@ func TestDropConditions(t *testing.T) {
 
 				// old pvc should never be changed
 				if !reflect.DeepEqual(oldPvc, oldPvcInfo.pvc()) {
-					t.Errorf("old pvc changed: %v", diff.ObjectReflectDiff(oldPvc, oldPvcInfo.pvc()))
+					t.Errorf("old pvc changed: %v", cmp.Diff(oldPvc, oldPvcInfo.pvc()))
 				}
 
 				switch {
 				case oldPvcHasConditins || newPvcHasConditions:
 					// new pvc should not be changed if the feature is enabled, or if the old pvc had Conditions
 					if !reflect.DeepEqual(newPvc, newPvcInfo.pvc()) {
-						t.Errorf("new pvc changed: %v", diff.ObjectReflectDiff(newPvc, newPvcInfo.pvc()))
+						t.Errorf("new pvc changed: %v", cmp.Diff(newPvc, newPvcInfo.pvc()))
 					}
 				default:
 					// new pvc should not need to be changed
 					if !reflect.DeepEqual(newPvc, newPvcInfo.pvc()) {
-						t.Errorf("new pvc changed: %v", diff.ObjectReflectDiff(newPvc, newPvcInfo.pvc()))
+						t.Errorf("new pvc changed: %v", cmp.Diff(newPvc, newPvcInfo.pvc()))
 					}
 				}
 			})
@@ -343,8 +344,10 @@ func TestPrepareForCreate(t *testing.T) {
 
 	for testName, test := range tests {
 		t.Run(testName, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.AnyVolumeDataSource, test.anyEnabled)()
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.CrossNamespaceVolumeDataSource, test.xnsEnabled)()
+			// TODO: this will be removed in 1.36
+			featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.32"))
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.AnyVolumeDataSource, test.anyEnabled)
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.CrossNamespaceVolumeDataSource, test.xnsEnabled)
 			pvc := api.PersistentVolumeClaim{
 				Spec: api.PersistentVolumeClaimSpec{
 					DataSource:    test.dataSource,

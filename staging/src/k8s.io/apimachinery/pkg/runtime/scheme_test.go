@@ -17,18 +17,26 @@ limitations under the License.
 package runtime_test
 
 import (
+	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+
+	"k8s.io/apimachinery/pkg/api/operation"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/conversion"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	runtimetesting "k8s.io/apimachinery/pkg/runtime/testing"
+	runtimetestingv1 "k8s.io/apimachinery/pkg/runtime/testing/v1"
 	"k8s.io/apimachinery/pkg/util/diff"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 type testConversions struct {
@@ -856,17 +864,17 @@ func TestConvertToVersion(t *testing.T) {
 
 			if test.same {
 				if !reflect.DeepEqual(original, test.in) {
-					t.Fatalf("unexpected mutation of input: %s", diff.ObjectReflectDiff(original, test.in))
+					t.Fatalf("unexpected mutation of input: %s", cmp.Diff(original, test.in))
 				}
 				if !reflect.DeepEqual(out, test.out) {
-					t.Fatalf("unexpected out: %s", diff.ObjectReflectDiff(out, test.out))
+					t.Fatalf("unexpected out: %s", cmp.Diff(out, test.out))
 				}
 				unsafe, err := test.scheme.UnsafeConvertToVersion(test.in, test.gv)
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
 				}
 				if !reflect.DeepEqual(unsafe, test.out) {
-					t.Fatalf("unexpected unsafe: %s", diff.ObjectReflectDiff(unsafe, test.out))
+					t.Fatalf("unexpected unsafe: %s", cmp.Diff(unsafe, test.out))
 				}
 				if unsafe != test.in {
 					t.Fatalf("UnsafeConvertToVersion should return same object: %#v", unsafe)
@@ -874,7 +882,7 @@ func TestConvertToVersion(t *testing.T) {
 				return
 			}
 			if !reflect.DeepEqual(out, test.out) {
-				t.Fatalf("unexpected out: %s", diff.ObjectReflectDiff(out, test.out))
+				t.Fatalf("unexpected out: %s", cmp.Diff(out, test.out))
 			}
 		})
 	}
@@ -917,7 +925,7 @@ func TestConvert(t *testing.T) {
 			}
 
 			if !reflect.DeepEqual(test.into, test.out) {
-				t.Fatalf("unexpected out: %s", diff.ObjectReflectDiff(test.into, test.out))
+				t.Fatalf("unexpected out: %s", cmp.Diff(test.into, test.out))
 			}
 		})
 	}
@@ -1006,5 +1014,173 @@ func TestMetaValuesUnregisteredConvert(t *testing.T) {
 	// Verify that our conversion handler got called.
 	if e, a := 1, internalToExternalCalls; e != a {
 		t.Errorf("Expected %v, got %v", e, a)
+	}
+}
+
+func TestRegisterValidate(t *testing.T) {
+	invalidValue := field.Invalid(field.NewPath("testString"), "", "Invalid value").WithOrigin("invalid-value")
+	invalidLength := field.Invalid(field.NewPath("testString"), "", "Invalid length").WithOrigin("invalid-length")
+	invalidStatusErr := field.Invalid(field.NewPath("testString"), "", "Invalid condition").WithOrigin("invalid-condition")
+	invalidIfOptionErr := field.Invalid(field.NewPath("testString"), "", "Invalid when option is set").WithOrigin("invalid-when-option-set")
+
+	testCases := []struct {
+		name        string
+		object      runtime.Object
+		oldObject   runtime.Object
+		subresource []string
+		options     []string
+		expected    field.ErrorList
+	}{
+		{
+			name:     "single error",
+			object:   &TestType1{},
+			expected: field.ErrorList{invalidValue},
+		},
+		{
+			name:     "multiple errors",
+			object:   &TestType2{},
+			expected: field.ErrorList{invalidValue, invalidLength},
+		},
+		{
+			name:      "update error",
+			object:    &TestType2{},
+			oldObject: &TestType2{},
+			expected:  field.ErrorList{invalidLength},
+		},
+		{
+			name:     "options error",
+			object:   &TestType1{},
+			options:  []string{"option1"},
+			expected: field.ErrorList{invalidIfOptionErr},
+		},
+		{
+			name:        "subresource error",
+			object:      &TestType1{},
+			subresource: []string{"status"},
+			expected:    field.ErrorList{invalidStatusErr},
+		},
+	}
+
+	s := runtime.NewScheme()
+	ctx := context.Background()
+
+	// register multiple types for testing to ensure registration is working as expected
+	s.AddValidationFunc(&TestType1{}, func(ctx context.Context, op operation.Operation, object, oldObject interface{}) field.ErrorList {
+		if op.HasOption("option1") {
+			return field.ErrorList{invalidIfOptionErr}
+		}
+		if slices.Equal(op.Request.Subresources, []string{"status"}) {
+			return field.ErrorList{invalidStatusErr}
+		}
+		return field.ErrorList{invalidValue}
+	})
+
+	s.AddValidationFunc(&TestType2{}, func(ctx context.Context, op operation.Operation, object, oldObject interface{}) field.ErrorList {
+		if oldObject != nil {
+			return field.ErrorList{invalidLength}
+		}
+		return field.ErrorList{invalidValue, invalidLength}
+	})
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var results field.ErrorList
+			if tc.oldObject == nil {
+				results = s.Validate(ctx, tc.options, tc.object, tc.subresource...)
+			} else {
+				results = s.ValidateUpdate(ctx, tc.options, tc.object, tc.oldObject, tc.subresource...)
+			}
+			matcher := field.ErrorMatcher{}.ByType().ByField().ByOrigin()
+			matcher.Test(t, tc.expected, results)
+		})
+	}
+}
+
+type TestType1 struct {
+	Version    string `json:"apiVersion,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	TestString string `json:"testString"`
+}
+
+func (TestType1) GetObjectKind() schema.ObjectKind { return schema.EmptyObjectKind }
+
+func (TestType1) DeepCopyObject() runtime.Object { return nil }
+
+type TestType2 struct {
+	Version    string `json:"apiVersion,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	TestString string `json:"testString"`
+}
+
+func (TestType2) GetObjectKind() schema.ObjectKind { return schema.EmptyObjectKind }
+
+func (TestType2) DeepCopyObject() runtime.Object { return nil }
+
+func TestToOpenAPIDefinitionName(t *testing.T) {
+	testCases := []struct {
+		name        string
+		registerGvk *schema.GroupVersionKind // defaults to gvk unless set
+		registerObj runtime.Object
+		gvk         schema.GroupVersionKind
+		out         string
+		wantErr     error
+	}{
+		{
+			name:        "built-registerObj type",
+			registerObj: &runtimetestingv1.ExternalSimple{},
+			gvk:         schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Simple"},
+			out:         "io.k8s.apimachinery.pkg.runtime.testing.v1.ExternalSimple",
+		},
+		{
+			name:        "unstructured type",
+			registerObj: &unstructured.Unstructured{},
+			gvk:         schema.GroupVersionKind{Group: "stable.example.com", Version: "v1", Kind: "CronTab"},
+			out:         "com.example.stable.v1.CronTab",
+		},
+		{
+			name:        "unregistered type: empty group",
+			registerObj: &unstructured.Unstructured{},
+			gvk:         schema.GroupVersionKind{Version: "v1", Kind: "CronTab"},
+			wantErr:     fmt.Errorf("unable to convert GroupVersionKind with empty fields to unstructured type to an OpenAPI definition name: %v", schema.GroupVersionKind{Version: "v1", Kind: "CronTab"}),
+		},
+		{
+			name:        "unregistered type: empty version",
+			registerObj: &unstructured.Unstructured{},
+			registerGvk: &schema.GroupVersionKind{Group: "stable.example.com", Version: "v1", Kind: "CronTab"},
+			gvk:         schema.GroupVersionKind{Group: "stable.example.com", Kind: "CronTab"},
+			wantErr:     fmt.Errorf("version is required on all types: %v", schema.GroupVersionKind{Group: "stable.example.com", Kind: "CronTab"}),
+		},
+		{
+			name:        "unregistered type: empty kind",
+			registerObj: &unstructured.Unstructured{},
+			gvk:         schema.GroupVersionKind{Group: "stable.example.com", Version: "v1"},
+			wantErr:     fmt.Errorf("unable to convert GroupVersionKind with empty fields to unstructured type to an OpenAPI definition name: %v", schema.GroupVersionKind{Group: "stable.example.com", Version: "v1"}),
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.name, func(t *testing.T) {
+			if test.registerGvk == nil {
+				test.registerGvk = &test.gvk
+			}
+
+			scheme := runtime.NewScheme()
+			scheme.AddKnownTypeWithName(*test.registerGvk, test.registerObj)
+			utilruntime.Must(runtimetesting.RegisterConversions(scheme))
+
+			out, err := scheme.ToOpenAPIDefinitionName(test.gvk)
+			if test.wantErr != nil {
+				if err == nil || err.Error() != test.wantErr.Error() {
+					t.Errorf("expected error: %v but got %v", test.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if out != test.out {
+				t.Errorf("expected %s, got %s", test.out, out)
+			}
+		})
 	}
 }

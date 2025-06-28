@@ -32,7 +32,10 @@ e2e_test=$(kube::util::find-binary "e2e.test")
 # --- Setup some env vars.
 
 GINKGO_PARALLEL=${GINKGO_PARALLEL:-n} # set to 'y' to run tests in parallel
+GINKGO_SILENCE_SKIPS=${GINKGO_SILENCE_SKIPS:-y} # set to 'n' to see S character for each skipped test
+GINKGO_FORCE_NEWLINES=${GINKGO_FORCE_NEWLINES:-$( if [ "${CI:-false}" = "true" ]; then echo "y"; else echo "n"; fi )} # set to 'y' to print a newline after each S or o character
 CLOUD_CONFIG=${CLOUD_CONFIG:-""}
+
 
 # If 'y', Ginkgo's reporter will not use escape sequence to color output.
 #
@@ -40,9 +43,6 @@ CLOUD_CONFIG=${CLOUD_CONFIG:-""}
 # a terminal. That is the right choice for all Prow jobs (Spyglass doesn't
 # render them properly).
 GINKGO_NO_COLOR=${GINKGO_NO_COLOR:-$(if [ -t 2 ]; then echo n; else echo y; fi)}
-
-# If 'y', will rerun failed tests once to give them a second chance.
-GINKGO_TOLERATE_FLAKES=${GINKGO_TOLERATE_FLAKES:-n}
 
 # If set, the command executed will be:
 # - `dlv exec` if set to "delve"
@@ -134,8 +134,8 @@ fi
 # Some arguments (like --nodes) are only supported when using the CLI.
 # Those get set below when choosing the program.
 ginkgo_args=(
-  "--poll-progress-after=${GINKGO_POLL_PROGRESS_AFTER:-300s}"
-  "--poll-progress-interval=${GINKGO_POLL_PROGRESS_INTERVAL:-20s}"
+  "--poll-progress-after=${GINKGO_POLL_PROGRESS_AFTER:-60m}"
+  "--poll-progress-interval=${GINKGO_POLL_PROGRESS_INTERVAL:-5m}"
   "--source-root=${KUBE_ROOT}"
 )
 
@@ -149,14 +149,16 @@ if [[ -n "${CONFORMANCE_TEST_SKIP_REGEX:-}" ]]; then
 fi
 
 if [[ "${GINKGO_UNTIL_IT_FAILS:-}" == true ]]; then
-  ginkgo_args+=("--untilItFails=true")
+  ginkgo_args+=("--until-it-fails=true")
 fi
 
-FLAKE_ATTEMPTS=1
-if [[ "${GINKGO_TOLERATE_FLAKES}" == "y" ]]; then
-  FLAKE_ATTEMPTS=2
+if [[ "${GINKGO_SILENCE_SKIPS}" == "y" ]]; then
+  ginkgo_args+=("--silence-skips")
 fi
-ginkgo_args+=("--flake-attempts=${FLAKE_ATTEMPTS}")
+
+if [[ "${GINKGO_FORCE_NEWLINES}" == "y" ]]; then
+  ginkgo_args+=("--force-newlines")
+fi
 
 if [[ "${GINKGO_NO_COLOR}" == "y" ]]; then
   ginkgo_args+=("--no-color")
@@ -202,6 +204,49 @@ fi
 # is not used.
 suite_args+=(--report-complete-ginkgo --report-complete-junit)
 
+# When SIGTERM doesn't reach the E2E test suite binaries, ginkgo will exit
+# without collecting information from about the currently running and
+# potentially stuck tests. This seems to happen when Prow shuts down a test
+# job because of a timeout.
+#
+# It's useful to print one final progress report in that case,
+# so GINKGO_PROGRESS_REPORT_ON_SIGTERM (enabled by default when CI=true)
+# catches SIGTERM and forwards it to all processes spawned by ginkgo.
+#
+# Manual invocations can trigger a similar report with `killall -USR1 e2e.test`
+# without having to kill the test run.
+GINKGO_CLI_PID=
+signal_handler() {
+  if [ -n "${GINKGO_CLI_PID}" ]; then
+    cat <<EOF
+
+*** $0: received $1 signal -> asking Ginkgo to stop.
+***
+*** Beware that a timeout may have been caused by some earlier test,
+*** not necessarily the one which gets interrupted now.
+*** See the "Spec runtime" for information about how long the
+*** interrupted test was running.
+
+EOF
+    # This goes to the process group, which is important because we
+    # need to reach the e2e.test processes forked by the Ginkgo CLI.
+    kill -TERM "-${GINKGO_CLI_PID}" || true
+
+    echo "Waiting for Ginkgo with pid ${GINKGO_CLI_PID}..."
+    wait "${GINKGO_CLI_PID}"
+    echo "Ginkgo terminated."
+  fi
+}
+case "${GINKGO_PROGRESS_REPORT_ON_SIGTERM:-${CI:-no}}" in
+  y|yes|true)
+    kube::util::trap_add "signal_handler INT" INT
+    kube::util::trap_add "signal_handler TERM" TERM
+    # Job control is needed to make the Ginkgo CLI and all workers run
+    # in their own process group.
+    set -m
+    ;;
+esac
+
 # The following invocation is fairly complex. Let's dump it to simplify
 # determining what the final options are. Enabled by default in CI
 # environments like Prow.
@@ -234,4 +279,8 @@ case "${GINKGO_SHOW_COMMAND:-${CI:-no}}" in y|yes|true) set -x ;; esac
   ${E2E_REPORT_DIR:+"--report-dir=${E2E_REPORT_DIR}"} \
   ${E2E_REPORT_PREFIX:+"--report-prefix=${E2E_REPORT_PREFIX}"} \
   "${suite_args[@]:+${suite_args[@]}}" \
-  "${@}"
+  "${@}" &
+
+set +x
+GINKGO_CLI_PID=$!
+wait "${GINKGO_CLI_PID}"

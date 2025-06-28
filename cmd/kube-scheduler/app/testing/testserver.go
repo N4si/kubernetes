@@ -26,15 +26,25 @@ import (
 	"github.com/spf13/pflag"
 
 	"k8s.io/apimachinery/pkg/util/wait"
+	utilcompatibility "k8s.io/apiserver/pkg/util/compatibility"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
+	"k8s.io/component-base/compatibility"
 	"k8s.io/component-base/configz"
+	logsapi "k8s.io/component-base/logs/api/v1"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/cmd/kube-scheduler/app"
 	kubeschedulerconfig "k8s.io/kubernetes/cmd/kube-scheduler/app/config"
 	"k8s.io/kubernetes/cmd/kube-scheduler/app/options"
-
-	"k8s.io/klog/v2"
 )
+
+func init() {
+	// If instantiated more than once or together with other servers, the
+	// servers would try to modify the global logging state. This must get
+	// ignored during testing.
+	logsapi.ReapplyHandling = logsapi.ReapplyHandlingIgnoreUnchanged
+}
 
 // TearDownFunc is to be called to tear down a test server.
 type TearDownFunc func()
@@ -90,11 +100,38 @@ func StartTestServer(ctx context.Context, customFlags []string) (result TestServ
 	fs := pflag.NewFlagSet("test", pflag.PanicOnError)
 
 	opts := options.NewOptions()
+	// set up new instance of ComponentGlobalsRegistry instead of using the DefaultComponentGlobalsRegistry to avoid contention in parallel tests.
+	featureGate := utilfeature.DefaultMutableFeatureGate.DeepCopy()
+	effectiveVersion := utilcompatibility.DefaultKubeEffectiveVersionForTest()
+	effectiveVersion.SetEmulationVersion(featureGate.EmulationVersion())
+	componentGlobalsRegistry := compatibility.NewComponentGlobalsRegistry()
+	if err := componentGlobalsRegistry.Register(compatibility.DefaultKubeComponent, effectiveVersion, featureGate); err != nil {
+		return result, err
+	}
+	opts.ComponentGlobalsRegistry = componentGlobalsRegistry
+
 	nfs := opts.Flags
 	for _, f := range nfs.FlagSets {
 		fs.AddFlagSet(f)
 	}
 	fs.Parse(customFlags)
+	if err := opts.ComponentGlobalsRegistry.Set(); err != nil {
+		return result, err
+	}
+	// If the local ComponentGlobalsRegistry is changed by the flags,
+	// we need to copy the new feature values back to the DefaultFeatureGate because most feature checks still use the DefaultFeatureGate.
+	if !featureGate.EmulationVersion().EqualTo(utilfeature.DefaultMutableFeatureGate.EmulationVersion()) {
+		if err := utilfeature.DefaultMutableFeatureGate.SetEmulationVersion(effectiveVersion.EmulationVersion()); err != nil {
+			return result, err
+		}
+	}
+	for f := range utilfeature.DefaultMutableFeatureGate.GetAll() {
+		if featureGate.Enabled(f) != utilfeature.DefaultFeatureGate.Enabled(f) {
+			if err := utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=%v", f, featureGate.Enabled(f))); err != nil {
+				return result, err
+			}
+		}
+	}
 
 	if opts.SecureServing.BindPort != 0 {
 		opts.SecureServing.Listener, opts.SecureServing.BindPort, err = createListenerOnFreePort()
@@ -124,14 +161,14 @@ func StartTestServer(ctx context.Context, customFlags []string) (result TestServ
 	if err != nil {
 		return result, fmt.Errorf("failed to create a client: %v", err)
 	}
-	err = wait.Poll(100*time.Millisecond, 30*time.Second, func() (bool, error) {
+	err = wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 30*time.Second, false, func(ctx context.Context) (bool, error) {
 		select {
 		case err := <-errCh:
 			return false, err
 		default:
 		}
 
-		result := client.CoreV1().RESTClient().Get().AbsPath("/healthz").Do(context.TODO())
+		result := client.CoreV1().RESTClient().Get().AbsPath("/healthz").Do(ctx)
 		status := 0
 		result.StatusCode(&status)
 		if status == 200 {

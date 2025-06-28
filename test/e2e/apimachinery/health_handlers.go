@@ -24,6 +24,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	apiserverfeatures "k8s.io/apiserver/pkg/features"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	clientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/kubernetes/test/e2e/framework"
@@ -37,17 +39,20 @@ var (
 		"[+]ping ok",
 		"[+]log ok",
 		"[+]etcd ok",
-		"[+]poststarthook/start-kube-apiserver-admission-initializer ok",
+		"[+]poststarthook/start-apiserver-admission-initializer ok",
 		"[+]poststarthook/generic-apiserver-start-informers ok",
 		"[+]poststarthook/start-apiextensions-informers ok",
 		"[+]poststarthook/start-apiextensions-controllers ok",
 		"[+]poststarthook/crd-informer-synced ok",
 		"[+]poststarthook/bootstrap-controller ok",
+		"[+]poststarthook/start-system-namespaces-controller ok",
+		"[+]poststarthook/start-service-ip-repair-controllers ok",
 		"[+]poststarthook/scheduling/bootstrap-system-priority-classes ok",
 		"[+]poststarthook/start-cluster-authentication-info-controller ok",
 		"[+]poststarthook/start-kube-aggregator-informers ok",
 		"[+]poststarthook/apiservice-registration-controller ok",
-		"[+]poststarthook/apiservice-status-available-controller ok",
+		"[+]poststarthook/apiservice-status-local-available-controller ok",
+		"[+]poststarthook/apiservice-status-remote-available-controller ok",
 		"[+]poststarthook/kube-apiserver-autoregistration ok",
 		"[+]autoregister-completion ok",
 		"[+]poststarthook/apiservice-openapi-controller ok",
@@ -56,17 +61,20 @@ var (
 		"[+]ping ok",
 		"[+]log ok",
 		"[+]etcd ok",
-		"[+]poststarthook/start-kube-apiserver-admission-initializer ok",
+		"[+]poststarthook/start-apiserver-admission-initializer ok",
 		"[+]poststarthook/generic-apiserver-start-informers ok",
 		"[+]poststarthook/start-apiextensions-informers ok",
 		"[+]poststarthook/start-apiextensions-controllers ok",
 		"[+]poststarthook/crd-informer-synced ok",
 		"[+]poststarthook/bootstrap-controller ok",
+		"[+]poststarthook/start-system-namespaces-controller ok",
+		"[+]poststarthook/start-service-ip-repair-controllers ok",
 		"[+]poststarthook/scheduling/bootstrap-system-priority-classes ok",
 		"[+]poststarthook/start-cluster-authentication-info-controller ok",
 		"[+]poststarthook/start-kube-aggregator-informers ok",
 		"[+]poststarthook/apiservice-registration-controller ok",
-		"[+]poststarthook/apiservice-status-available-controller ok",
+		"[+]poststarthook/apiservice-status-local-available-controller ok",
+		"[+]poststarthook/apiservice-status-remote-available-controller ok",
 		"[+]poststarthook/kube-apiserver-autoregistration ok",
 		"[+]autoregister-completion ok",
 		"[+]poststarthook/apiservice-openapi-controller ok",
@@ -76,17 +84,20 @@ var (
 		"[+]log ok",
 		"[+]etcd ok",
 		"[+]informer-sync ok",
-		"[+]poststarthook/start-kube-apiserver-admission-initializer ok",
+		"[+]poststarthook/start-apiserver-admission-initializer ok",
 		"[+]poststarthook/generic-apiserver-start-informers ok",
 		"[+]poststarthook/start-apiextensions-informers ok",
 		"[+]poststarthook/start-apiextensions-controllers ok",
 		"[+]poststarthook/crd-informer-synced ok",
 		"[+]poststarthook/bootstrap-controller ok",
+		"[+]poststarthook/start-system-namespaces-controller ok",
+		"[+]poststarthook/start-service-ip-repair-controllers ok",
 		"[+]poststarthook/scheduling/bootstrap-system-priority-classes ok",
 		"[+]poststarthook/start-cluster-authentication-info-controller ok",
 		"[+]poststarthook/start-kube-aggregator-informers ok",
 		"[+]poststarthook/apiservice-registration-controller ok",
-		"[+]poststarthook/apiservice-status-available-controller ok",
+		"[+]poststarthook/apiservice-status-local-available-controller ok",
+		"[+]poststarthook/apiservice-status-remote-available-controller ok",
 		"[+]poststarthook/kube-apiserver-autoregistration ok",
 		"[+]autoregister-completion ok",
 		"[+]poststarthook/apiservice-openapi-controller ok",
@@ -117,9 +128,16 @@ func testPath(ctx context.Context, client clientset.Interface, path string, requ
 
 var _ = SIGDescribe("health handlers", func() {
 	f := framework.NewDefaultFramework("health")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.It("should contain necessary checks", func(ctx context.Context) {
+		if utilfeature.DefaultFeatureGate.Enabled(apiserverfeatures.WatchCacheInitializationPostStartHook) {
+			storageReadinessCheck := "[+]poststarthook/storage-readiness ok"
+			requiredHealthzChecks.Insert(storageReadinessCheck)
+			requiredLivezChecks.Insert(storageReadinessCheck)
+			requiredReadyzChecks.Insert(storageReadinessCheck)
+		}
+
 		ginkgo.By("/health")
 		err := testPath(ctx, f.ClientSet, "/healthz?verbose=1", requiredHealthzChecks)
 		framework.ExpectNoError(err)

@@ -24,10 +24,12 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
 	api "k8s.io/api/core/v1"
 	storage "k8s.io/api/storage/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	utilversion "k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
@@ -142,7 +144,7 @@ func newTestPluginWithVolumeHost(t *testing.T, client *fakeclient.Clientset, hos
 }
 
 func registerFakePlugin(pluginName, endpoint string, versions []string, t *testing.T) {
-	highestSupportedVersions, err := highestSupportedVersion(versions)
+	highestSupportedVersions, err := utilversion.HighestSupportedVersion(versions)
 	if err != nil {
 		t.Fatalf("unexpected error parsing versions (%v) for pluginName %q endpoint %q: %#v", versions, pluginName, endpoint, err)
 	}
@@ -369,13 +371,11 @@ func TestPluginConstructVolumeSpec(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ReadWriteOncePod, tc.seLinuxMountEnabled)()
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SELinuxMountReadWriteOncePod, tc.seLinuxMountEnabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SELinuxMountReadWriteOncePod, tc.seLinuxMountEnabled)
 
 			mounter, err := plug.NewMounter(
 				tc.originSpec,
 				&api.Pod{ObjectMeta: meta.ObjectMeta{UID: tc.podUID, Namespace: testns}},
-				volume.VolumeOptions{},
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -509,7 +509,6 @@ func TestPluginConstructVolumeSpecWithInline(t *testing.T) {
 			mounter, err := plug.NewMounter(
 				tc.originSpec,
 				&api.Pod{ObjectMeta: meta.ObjectMeta{UID: tc.podUID, Namespace: testns}},
-				volume.VolumeOptions{},
 			)
 			if tc.shouldFail && err != nil {
 				t.Log(err)
@@ -616,7 +615,6 @@ func TestPluginNewMounter(t *testing.T) {
 			mounter, err := plug.NewMounter(
 				test.spec,
 				&api.Pod{ObjectMeta: meta.ObjectMeta{UID: test.podUID, Namespace: test.namespace}},
-				volume.VolumeOptions{},
 			)
 			if test.shouldFail != (err != nil) {
 				t.Fatal("Unexpected error:", err)
@@ -719,7 +717,6 @@ func TestPluginNewMounterWithInline(t *testing.T) {
 				mounter, err := plug.NewMounter(
 					test.spec,
 					&api.Pod{ObjectMeta: meta.ObjectMeta{UID: test.podUID, Namespace: test.namespace}},
-					volume.VolumeOptions{},
 				)
 
 				// Some test cases are meant to fail because their input data is broken.
@@ -1113,7 +1110,6 @@ func TestPluginNewBlockMapper(t *testing.T) {
 	mounter, err := plug.NewBlockVolumeMapper(
 		volume.NewSpecFromPersistentVolume(pv, pv.Spec.PersistentVolumeSource.CSI.ReadOnly),
 		&api.Pod{ObjectMeta: meta.ObjectMeta{UID: testPodUID, Namespace: testns}},
-		volume.VolumeOptions{},
 	)
 	if err != nil {
 		t.Fatalf("Failed to make a new BlockMapper: %v", err)
@@ -1411,7 +1407,7 @@ func TestValidatePluginExistingDriver(t *testing.T) {
 
 	for _, tc := range testCases {
 		// Arrange & Act
-		highestSupportedVersions1, err := highestSupportedVersion(tc.versions1)
+		highestSupportedVersions1, err := utilversion.HighestSupportedVersion(tc.versions1)
 		if err != nil {
 			t.Fatalf("unexpected error parsing version for testcase: %#v: %v", tc, err)
 		}
@@ -1435,108 +1431,117 @@ func TestValidatePluginExistingDriver(t *testing.T) {
 	}
 }
 
-func TestHighestSupportedVersion(t *testing.T) {
-	testCases := []struct {
-		versions                        []string
-		expectedHighestSupportedVersion string
-		shouldFail                      bool
+func TestGetNodeAllocatableUpdatePeriod(t *testing.T) {
+	tests := []struct {
+		name     string
+		driver   *storage.CSIDriver
+		expected time.Duration
 	}{
 		{
-			versions:                        []string{"v1.0.0"},
-			expectedHighestSupportedVersion: "1.0.0",
-			shouldFail:                      false,
+			name:     "nil driver",
+			driver:   nil,
+			expected: 0,
 		},
 		{
-			versions:   []string{"0.3.0"},
-			shouldFail: true,
+			name: "nil NodeAllocatableUpdatePeriodSeconds",
+			driver: &storage.CSIDriver{
+				Spec: storage.CSIDriverSpec{
+					NodeAllocatableUpdatePeriodSeconds: nil,
+				},
+			},
+			expected: 0,
 		},
 		{
-			versions:   []string{"0.2.0"},
-			shouldFail: true,
-		},
-		{
-			versions:                        []string{"1.0.0"},
-			expectedHighestSupportedVersion: "1.0.0",
-			shouldFail:                      false,
-		},
-		{
-			versions:   []string{"v0.3.0"},
-			shouldFail: true,
-		},
-		{
-			versions:   []string{"0.2.0"},
-			shouldFail: true,
-		},
-		{
-			versions:   []string{"0.2.0", "v0.3.0"},
-			shouldFail: true,
-		},
-		{
-			versions:                        []string{"0.2.0", "v1.0.0"},
-			expectedHighestSupportedVersion: "1.0.0",
-			shouldFail:                      false,
-		},
-		{
-			versions:                        []string{"0.2.0", "v1.2.3"},
-			expectedHighestSupportedVersion: "1.2.3",
-			shouldFail:                      false,
-		},
-		{
-			versions:                        []string{"v1.2.3", "v0.3.0"},
-			expectedHighestSupportedVersion: "1.2.3",
-			shouldFail:                      false,
-		},
-		{
-			versions:                        []string{"v1.2.3", "v0.3.0", "2.0.1"},
-			expectedHighestSupportedVersion: "1.2.3",
-			shouldFail:                      false,
-		},
-		{
-			versions:                        []string{"v1.2.3", "4.9.12", "v0.3.0", "2.0.1"},
-			expectedHighestSupportedVersion: "1.2.3",
-			shouldFail:                      false,
-		},
-		{
-			versions:                        []string{"4.9.12", "2.0.1"},
-			expectedHighestSupportedVersion: "",
-			shouldFail:                      true,
-		},
-		{
-			versions:                        []string{"v1.2.3", "boo", "v0.3.0", "2.0.1"},
-			expectedHighestSupportedVersion: "1.2.3",
-			shouldFail:                      false,
-		},
-		{
-			versions:                        []string{},
-			expectedHighestSupportedVersion: "",
-			shouldFail:                      true,
-		},
-		{
-			versions:                        []string{"var", "boo", "foo"},
-			expectedHighestSupportedVersion: "",
-			shouldFail:                      true,
+			name: "NodeAllocatableUpdatePeriodSeconds set to 60",
+			driver: &storage.CSIDriver{
+				Spec: storage.CSIDriverSpec{
+					NodeAllocatableUpdatePeriodSeconds: &[]int64{60}[0],
+				},
+			},
+			expected: 60 * time.Second,
 		},
 	}
 
-	for _, tc := range testCases {
-		// Arrange & Act
-		actual, err := highestSupportedVersion(tc.versions)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := getNodeAllocatableUpdatePeriod(tc.driver)
+			if actual != tc.expected {
+				t.Errorf("Expected %v, got %v", tc.expected, actual)
+			}
+		})
+	}
+}
 
-		// Assert
-		if tc.shouldFail && err == nil {
-			t.Fatalf("expecting highestSupportedVersion to fail, but got nil error for testcase: %#v", tc)
-		}
-		if !tc.shouldFail && err != nil {
-			t.Fatalf("unexpected error during ValidatePlugin for testcase: %#v\r\n err:%v", tc, err)
-		}
-		if tc.expectedHighestSupportedVersion != "" {
-			result, err := actual.Compare(tc.expectedHighestSupportedVersion)
-			if err != nil {
-				t.Fatalf("comparison failed with %v for testcase %#v", err, tc)
+func TestIsResourceExhaustError(t *testing.T) {
+	tests := []struct {
+		name       string
+		attachment *storage.VolumeAttachment
+		expected   bool
+	}{
+		{
+			name:       "nil attachment",
+			attachment: nil,
+			expected:   false,
+		},
+		{
+			name: "nil AttachError",
+			attachment: &storage.VolumeAttachment{
+				Status: storage.VolumeAttachmentStatus{
+					AttachError: nil,
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "nil ErrorCode",
+			attachment: &storage.VolumeAttachment{
+				Status: storage.VolumeAttachmentStatus{
+					AttachError: &storage.VolumeError{
+						Message:   "an error occurred",
+						ErrorCode: nil,
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "non-resource exhausted error code",
+			attachment: &storage.VolumeAttachment{
+				Status: storage.VolumeAttachmentStatus{
+					AttachError: &storage.VolumeError{
+						Message: "volume not found",
+						ErrorCode: func() *int32 {
+							code := int32(codes.NotFound)
+							return &code
+						}(),
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "resource exhausted error code",
+			attachment: &storage.VolumeAttachment{
+				Status: storage.VolumeAttachmentStatus{
+					AttachError: &storage.VolumeError{
+						Message: "resource exhausted",
+						ErrorCode: func() *int32 {
+							code := int32(codes.ResourceExhausted)
+							return &code
+						}(),
+					},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := isResourceExhaustError(tc.attachment)
+			if actual != tc.expected {
+				t.Errorf("Expected isResourceExhaustError to return %v, but got %v", tc.expected, actual)
 			}
-			if result != 0 {
-				t.Fatalf("expectedHighestSupportedVersion %v, but got %v for tc: %#v", tc.expectedHighestSupportedVersion, actual, tc)
-			}
-		}
+		})
 	}
 }

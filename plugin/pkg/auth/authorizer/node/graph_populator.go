@@ -22,11 +22,14 @@ import (
 	"k8s.io/klog/v2"
 
 	corev1 "k8s.io/api/core/v1"
+	resourceapi "k8s.io/api/resource/v1beta1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	corev1informers "k8s.io/client-go/informers/core/v1"
+	resourceinformers "k8s.io/client-go/informers/resource/v1beta1"
 	storageinformers "k8s.io/client-go/informers/storage/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/dynamic-resource-allocation/resourceclaim"
 )
 
 type graphPopulator struct {
@@ -39,6 +42,7 @@ func AddGraphEventHandlers(
 	pods corev1informers.PodInformer,
 	pvs corev1informers.PersistentVolumeInformer,
 	attachments storageinformers.VolumeAttachmentInformer,
+	slices resourceinformers.ResourceSliceInformer,
 ) {
 	g := &graphPopulator{
 		graph: graph,
@@ -62,8 +66,20 @@ func AddGraphEventHandlers(
 		DeleteFunc: g.deleteVolumeAttachment,
 	})
 
-	go cache.WaitForNamedCacheSync("node_authorizer", wait.NeverStop,
-		podHandler.HasSynced, pvsHandler.HasSynced, attachHandler.HasSynced)
+	synced := []cache.InformerSynced{
+		podHandler.HasSynced, pvsHandler.HasSynced, attachHandler.HasSynced,
+	}
+
+	if slices != nil {
+		sliceHandler, _ := slices.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    g.addResourceSlice,
+			UpdateFunc: nil, // Not needed, NodeName is immutable.
+			DeleteFunc: g.deleteResourceSlice,
+		})
+		synced = append(synced, sliceHandler.HasSynced)
+	}
+
+	go cache.WaitForNamedCacheSync("node_authorizer", wait.NeverStop, synced...)
 }
 
 func (g *graphPopulator) addPod(obj interface{}) {
@@ -78,8 +94,12 @@ func (g *graphPopulator) updatePod(oldObj, obj interface{}) {
 		return
 	}
 	if oldPod, ok := oldObj.(*corev1.Pod); ok && oldPod != nil {
-		if (pod.Spec.NodeName == oldPod.Spec.NodeName) && (pod.UID == oldPod.UID) {
-			// Node and uid are unchanged, all object references in the pod spec are immutable
+		// Ephemeral containers can add new secret or config map references to the pod.
+		hasNewEphemeralContainers := len(pod.Spec.EphemeralContainers) > len(oldPod.Spec.EphemeralContainers)
+		if (pod.Spec.NodeName == oldPod.Spec.NodeName) && (pod.UID == oldPod.UID) &&
+			!hasNewEphemeralContainers &&
+			resourceclaim.PodStatusEqual(oldPod.Status.ResourceClaimStatuses, pod.Status.ResourceClaimStatuses) {
+			// Node and uid are unchanged, all object references in the pod spec are immutable respectively unmodified (claim statuses).
 			klog.V(5).Infof("updatePod %s/%s, node unchanged", pod.Namespace, pod.Name)
 			return
 		}
@@ -159,4 +179,25 @@ func (g *graphPopulator) deleteVolumeAttachment(obj interface{}) {
 		return
 	}
 	g.graph.DeleteVolumeAttachment(attachment.Name)
+}
+
+func (g *graphPopulator) addResourceSlice(obj interface{}) {
+	slice, ok := obj.(*resourceapi.ResourceSlice)
+	if !ok {
+		klog.Infof("unexpected type %T", obj)
+		return
+	}
+	g.graph.AddResourceSlice(slice.Name, slice.Spec.NodeName)
+}
+
+func (g *graphPopulator) deleteResourceSlice(obj interface{}) {
+	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = tombstone.Obj
+	}
+	slice, ok := obj.(*resourceapi.ResourceSlice)
+	if !ok {
+		klog.Infof("unexpected type %T", obj)
+		return
+	}
+	g.graph.DeleteResourceSlice(slice.Name)
 }

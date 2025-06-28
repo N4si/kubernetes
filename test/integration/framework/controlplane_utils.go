@@ -27,6 +27,7 @@ import (
 	"k8s.io/apiserver/pkg/storage/storagebackend"
 	utilopenapi "k8s.io/apiserver/pkg/util/openapi"
 	openapicommon "k8s.io/kube-openapi/pkg/common"
+	"k8s.io/kube-openapi/pkg/spec3"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/generated/openapi"
@@ -35,13 +36,6 @@ import (
 const (
 	UnprivilegedUserToken = "unprivileged-user"
 )
-
-// MinVerbosity determines the minimum klog verbosity when running tests that
-// involve the apiserver.  This overrides the -v value from the command line,
-// i.e. -v=0 has no effect when MinVerbosity is 4 (the default).  Tests can opt
-// out of this by setting MinVerbosity to zero before starting the control
-// plane or choose some different minimum verbosity.
-var MinVerbosity = 4
 
 // DefaultOpenAPIConfig returns an openapicommon.Config initialized to default values.
 func DefaultOpenAPIConfig() *openapicommon.Config {
@@ -63,7 +57,7 @@ func DefaultOpenAPIConfig() *openapicommon.Config {
 }
 
 // DefaultOpenAPIV3Config returns an openapicommon.Config initialized to default values.
-func DefaultOpenAPIV3Config() *openapicommon.Config {
+func DefaultOpenAPIV3Config() *openapicommon.OpenAPIV3Config {
 	openAPIConfig := genericapiserver.DefaultOpenAPIV3Config(openapi.GetOpenAPIDefinitions, openapinamer.NewDefinitionNamer(legacyscheme.Scheme))
 	openAPIConfig.Info = &spec.Info{
 		InfoProps: spec.InfoProps{
@@ -71,8 +65,8 @@ func DefaultOpenAPIV3Config() *openapicommon.Config {
 			Version: "unversioned",
 		},
 	}
-	openAPIConfig.DefaultResponse = &spec.Response{
-		ResponseProps: spec.ResponseProps{
+	openAPIConfig.DefaultResponse = &spec3.Response{
+		ResponseProps: spec3.ResponseProps{
 			Description: "Default Response.",
 		},
 	}
@@ -92,8 +86,22 @@ func DefaultEtcdOptions() *options.EtcdOptions {
 }
 
 // SharedEtcd creates a storage config for a shared etcd instance, with a unique prefix.
+//
+// The transport CertFile/KeyFile/TrustedCAFile will be empty for insecure connections.
+// In that case, *no* TLS config should be used because etcd would try to use
+// it for Unix Domain sockets (https://github.com/etcd-io/etcd/blob/5a8fba466087686fc15815f5bc041fb7eb1f23ea/client/v3/internal/endpoint/endpoint.go#L61-L66)
+// and fail to connect because the TLS config is insufficient. It works
+// for TCP because http disables using TLS.
 func SharedEtcd() *storagebackend.Config {
 	cfg := storagebackend.NewDefaultConfig(path.Join(uuid.New().String(), "registry"), nil)
 	cfg.Transport.ServerList = []string{GetEtcdURL()}
 	return cfg
+}
+
+// DefaultAPIServerFlags returns the default flags used to run kube-apiserver on tests
+func DefaultTestServerFlags() []string {
+	return []string{
+		"--endpoint-reconciler-type=none",            // Disable Endpoints Reconciler so it does not keep failing trying to use 127.0.0.1 as a valid Endpoint.
+		"--disable-admission-plugins=ServiceAccount", // Disable ServiceAccount admission plugin as we don't have serviceaccount controller running.
+	}
 }

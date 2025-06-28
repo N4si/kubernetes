@@ -19,25 +19,26 @@ package stats
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
 	cadvisorapiv1 "github.com/google/cadvisor/info/v1"
 	cadvisorapiv2 "github.com/google/cadvisor/info/v2"
-	fuzz "github.com/google/gofuzz"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/randfill"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	statsapi "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
+	"k8s.io/kubernetes/pkg/features"
 	cadvisortest "k8s.io/kubernetes/pkg/kubelet/cadvisor/testing"
-	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	kubecontainertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
 	kubepodtest "k8s.io/kubernetes/pkg/kubelet/pod/testing"
 	serverstats "k8s.io/kubernetes/pkg/kubelet/server/stats"
-	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/volume"
 )
 
@@ -63,6 +64,8 @@ const (
 	offsetFsBaseUsageBytes
 	offsetFsInodeUsage
 	offsetAcceleratorDutyCycle
+	offsetMemSwapUsageBytes
+	offsetPSIDataTotal
 )
 
 var (
@@ -77,11 +80,8 @@ func TestGetCgroupStats(t *testing.T) {
 		updateStats       = false
 	)
 
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
 	var (
-		mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
+		mockCadvisor     = cadvisortest.NewMockInterface(t)
 		mockPodManager   = new(kubepodtest.MockManager)
 		mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
 
@@ -101,6 +101,7 @@ func TestGetCgroupStats(t *testing.T) {
 	checkCPUStats(t, "", containerInfoSeed, cs.CPU)
 	checkMemoryStats(t, "", containerInfoSeed, containerInfo, cs.Memory)
 	checkNetworkStats(t, "", containerInfoSeed, ns)
+	checkSwapStats(t, "", containerInfoSeed, containerInfo, cs.Swap)
 
 	assert.Equal(cgroupName, cs.Name)
 	assert.Equal(metav1.NewTime(containerInfo.Spec.CreationTime), cs.StartTime)
@@ -113,11 +114,8 @@ func TestGetCgroupCPUAndMemoryStats(t *testing.T) {
 		updateStats       = false
 	)
 
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
 	var (
-		mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
+		mockCadvisor     = cadvisortest.NewMockInterface(t)
 		mockPodManager   = new(kubepodtest.MockManager)
 		mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
 
@@ -147,11 +145,8 @@ func TestRootFsStats(t *testing.T) {
 		containerInfoSeed = 2000
 	)
 
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
 	var (
-		mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
+		mockCadvisor     = cadvisortest.NewMockInterface(t)
 		mockPodManager   = new(kubepodtest.MockManager)
 		mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
 
@@ -177,272 +172,51 @@ func TestRootFsStats(t *testing.T) {
 	assert.Equal(*rootFsInfo.Inodes-*rootFsInfo.InodesFree, *stats.InodesUsed)
 }
 
-func TestGetContainerInfo(t *testing.T) {
-	ctx := context.Background()
-	cadvisorAPIFailure := fmt.Errorf("cAdvisor failure")
-	runtimeError := fmt.Errorf("List containers error")
-	tests := []struct {
-		name                      string
-		containerID               string
-		containerPath             string
-		cadvisorContainerInfo     cadvisorapiv1.ContainerInfo
-		runtimeError              error
-		podList                   []*kubecontainer.Pod
-		requestedPodFullName      string
-		requestedPodUID           types.UID
-		requestedContainerName    string
-		expectDockerContainerCall bool
-		mockError                 error
-		expectedError             error
-		expectStats               bool
-	}{
-		{
-			name:          "get container info",
-			containerID:   "ab2cdf",
-			containerPath: "/docker/ab2cdf",
-			cadvisorContainerInfo: cadvisorapiv1.ContainerInfo{
-				ContainerReference: cadvisorapiv1.ContainerReference{
-					Name: "/docker/ab2cdf",
-				},
-			},
-			runtimeError: nil,
-			podList: []*kubecontainer.Pod{
-				{
-					ID:        "12345678",
-					Name:      "qux",
-					Namespace: "ns",
-					Containers: []*kubecontainer.Container{
-						{
-							Name: "foo",
-							ID:   kubecontainer.ContainerID{Type: "test", ID: "ab2cdf"},
-						},
-					},
-				},
-			},
-			requestedPodFullName:      "qux_ns",
-			requestedPodUID:           "",
-			requestedContainerName:    "foo",
-			expectDockerContainerCall: true,
-			mockError:                 nil,
-			expectedError:             nil,
-			expectStats:               true,
-		},
-		{
-			name:                  "get container info when cadvisor failed",
-			containerID:           "ab2cdf",
-			containerPath:         "/docker/ab2cdf",
-			cadvisorContainerInfo: cadvisorapiv1.ContainerInfo{},
-			runtimeError:          nil,
-			podList: []*kubecontainer.Pod{
-				{
-					ID:        "uuid",
-					Name:      "qux",
-					Namespace: "ns",
-					Containers: []*kubecontainer.Container{
-						{
-							Name: "foo",
-							ID:   kubecontainer.ContainerID{Type: "test", ID: "ab2cdf"},
-						},
-					},
-				},
-			},
-			requestedPodFullName:      "qux_ns",
-			requestedPodUID:           "uuid",
-			requestedContainerName:    "foo",
-			expectDockerContainerCall: true,
-			mockError:                 cadvisorAPIFailure,
-			expectedError:             cadvisorAPIFailure,
-			expectStats:               false,
-		},
-		{
-			name:                      "get container info on non-existent container",
-			containerID:               "",
-			containerPath:             "",
-			cadvisorContainerInfo:     cadvisorapiv1.ContainerInfo{},
-			runtimeError:              nil,
-			podList:                   []*kubecontainer.Pod{},
-			requestedPodFullName:      "qux",
-			requestedPodUID:           "",
-			requestedContainerName:    "foo",
-			expectDockerContainerCall: false,
-			mockError:                 nil,
-			expectedError:             kubecontainer.ErrContainerNotFound,
-			expectStats:               false,
-		},
-		{
-			name:                   "get container info when container runtime failed",
-			containerID:            "",
-			containerPath:          "",
-			cadvisorContainerInfo:  cadvisorapiv1.ContainerInfo{},
-			runtimeError:           runtimeError,
-			podList:                []*kubecontainer.Pod{},
-			requestedPodFullName:   "qux",
-			requestedPodUID:        "",
-			requestedContainerName: "foo",
-			mockError:              nil,
-			expectedError:          runtimeError,
-			expectStats:            false,
-		},
-		{
-			name:                   "get container info with no containers",
-			containerID:            "",
-			containerPath:          "",
-			cadvisorContainerInfo:  cadvisorapiv1.ContainerInfo{},
-			runtimeError:           nil,
-			podList:                []*kubecontainer.Pod{},
-			requestedPodFullName:   "qux_ns",
-			requestedPodUID:        "",
-			requestedContainerName: "foo",
-			mockError:              nil,
-			expectedError:          kubecontainer.ErrContainerNotFound,
-			expectStats:            false,
-		},
-		{
-			name:                  "get container info with no matching containers",
-			containerID:           "",
-			containerPath:         "",
-			cadvisorContainerInfo: cadvisorapiv1.ContainerInfo{},
-			runtimeError:          nil,
-			podList: []*kubecontainer.Pod{
-				{
-					ID:        "12345678",
-					Name:      "qux",
-					Namespace: "ns",
-					Containers: []*kubecontainer.Container{
-						{
-							Name: "bar",
-							ID:   kubecontainer.ContainerID{Type: "test", ID: "fakeID"},
-						},
-					},
-				},
-			},
-			requestedPodFullName:   "qux_ns",
-			requestedPodUID:        "",
-			requestedContainerName: "foo",
-			mockError:              nil,
-			expectedError:          kubecontainer.ErrContainerNotFound,
-			expectStats:            false,
-		},
-	}
-
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
-	for _, tc := range tests {
-		var (
-			mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
-			mockPodManager   = kubepodtest.NewMockManager(mockCtrl)
-			mockRuntimeCache = kubecontainertest.NewMockRuntimeCache(mockCtrl)
-
-			cadvisorReq = &cadvisorapiv1.ContainerInfoRequest{}
-		)
-
-		mockPodManager.EXPECT().TranslatePodUID(tc.requestedPodUID).Return(kubetypes.ResolvedPodUID(tc.requestedPodUID))
-		mockRuntimeCache.EXPECT().GetPods(ctx).Return(tc.podList, tc.runtimeError)
-		if tc.expectDockerContainerCall {
-			mockCadvisor.EXPECT().DockerContainer(tc.containerID, cadvisorReq).Return(tc.cadvisorContainerInfo, tc.mockError)
-		}
-
-		provider := newStatsProvider(mockCadvisor, mockPodManager, mockRuntimeCache, fakeContainerStatsProvider{})
-		stats, err := provider.GetContainerInfo(ctx, tc.requestedPodFullName, tc.requestedPodUID, tc.requestedContainerName, cadvisorReq)
-		assert.Equal(t, tc.expectedError, err)
-
-		if tc.expectStats {
-			require.NotNil(t, stats)
-		}
-	}
-}
-
-func TestGetRawContainerInfoRoot(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
-	var (
-		mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
-		mockPodManager   = new(kubepodtest.MockManager)
-		mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
-
-		cadvisorReq   = &cadvisorapiv1.ContainerInfoRequest{}
-		containerPath = "/"
-		containerInfo = &cadvisorapiv1.ContainerInfo{
-			ContainerReference: cadvisorapiv1.ContainerReference{
-				Name: containerPath,
-			},
-		}
-	)
-
-	mockCadvisor.EXPECT().ContainerInfo(containerPath, cadvisorReq).Return(containerInfo, nil)
-
-	provider := newStatsProvider(mockCadvisor, mockPodManager, mockRuntimeCache, fakeContainerStatsProvider{})
-	_, err := provider.GetRawContainerInfo(containerPath, cadvisorReq, false)
-	assert.NoError(t, err)
-}
-
-func TestGetRawContainerInfoSubcontainers(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
-	var (
-		mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
-		mockPodManager   = new(kubepodtest.MockManager)
-		mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
-
-		cadvisorReq   = &cadvisorapiv1.ContainerInfoRequest{}
-		containerPath = "/kubelet"
-		containerInfo = map[string]*cadvisorapiv1.ContainerInfo{
-			containerPath: {
-				ContainerReference: cadvisorapiv1.ContainerReference{
-					Name: containerPath,
-				},
-			},
-			"/kubelet/sub": {
-				ContainerReference: cadvisorapiv1.ContainerReference{
-					Name: "/kubelet/sub",
-				},
-			},
-		}
-	)
-
-	mockCadvisor.EXPECT().SubcontainerInfo(containerPath, cadvisorReq).Return(containerInfo, nil)
-
-	provider := newStatsProvider(mockCadvisor, mockPodManager, mockRuntimeCache, fakeContainerStatsProvider{})
-	result, err := provider.GetRawContainerInfo(containerPath, cadvisorReq, true)
-	assert.NoError(t, err)
-	assert.Len(t, result, 2)
-}
-
 func TestHasDedicatedImageFs(t *testing.T) {
 	ctx := context.Background()
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
+	imageStatsExpected := &statsapi.FsStats{AvailableBytes: uint64Ptr(1)}
 
 	for desc, test := range map[string]struct {
-		rootfsDevice  string
-		imagefsDevice string
-		dedicated     bool
+		rootfsDevice     string
+		imagefsDevice    string
+		dedicated        bool
+		imageFsStats     *statsapi.FsStats
+		containerFsStats *statsapi.FsStats
 	}{
 		"dedicated device for image filesystem": {
 			rootfsDevice:  "root/device",
 			imagefsDevice: "image/device",
 			dedicated:     true,
+			imageFsStats:  imageStatsExpected,
 		},
 		"shared device for image filesystem": {
-			rootfsDevice:  "share/device",
-			imagefsDevice: "share/device",
-			dedicated:     false,
+			rootfsDevice:     "share/device",
+			imagefsDevice:    "share/device",
+			dedicated:        false,
+			imageFsStats:     imageStatsExpected,
+			containerFsStats: imageStatsExpected,
+		},
+		"split filesystem for images": {
+			rootfsDevice:     "root/device",
+			imagefsDevice:    "root/device",
+			dedicated:        true,
+			imageFsStats:     &statsapi.FsStats{AvailableBytes: uint64Ptr(1)},
+			containerFsStats: &statsapi.FsStats{AvailableBytes: uint64Ptr(2)},
 		},
 	} {
 		t.Logf("TestCase %q", desc)
 		var (
-			mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
+			mockCadvisor     = cadvisortest.NewMockInterface(t)
 			mockPodManager   = new(kubepodtest.MockManager)
 			mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
 		)
 		mockCadvisor.EXPECT().RootFsInfo().Return(cadvisorapiv2.FsInfo{Device: test.rootfsDevice}, nil)
-
 		provider := newStatsProvider(mockCadvisor, mockPodManager, mockRuntimeCache, fakeContainerStatsProvider{
-			device: test.imagefsDevice,
+			device:      test.imagefsDevice,
+			imageFs:     test.imageFsStats,
+			containerFs: test.containerFsStats,
 		})
+
 		dedicated, err := provider.HasDedicatedImageFs(ctx)
 		assert.NoError(t, err)
 		assert.Equal(t, test.dedicated, dedicated)
@@ -494,10 +268,12 @@ func getTestContainerInfo(seed int, podName string, podNamespace string, contain
 		CreationTime: testTime(creationTime, seed),
 		HasCpu:       true,
 		HasMemory:    true,
+		HasDiskIo:    true,
 		HasNetwork:   true,
 		Labels:       labels,
 		Memory: cadvisorapiv2.MemorySpec{
-			Limit: unlimitedMemory,
+			Limit:     unlimitedMemory,
+			SwapLimit: unlimitedMemory,
 		},
 		CustomMetrics: generateCustomMetricSpec(),
 	}
@@ -508,8 +284,10 @@ func getTestContainerInfo(seed int, podName string, podNamespace string, contain
 
 	stats := cadvisorapiv2.ContainerStats{
 		Timestamp: testTime(timestamp, seed),
-		Cpu:       &cadvisorapiv1.CpuStats{},
-		CpuInst:   &cadvisorapiv2.CpuInstStats{},
+		Cpu: &cadvisorapiv1.CpuStats{
+			PSI: getTestPSIStats(seed),
+		},
+		CpuInst: &cadvisorapiv2.CpuInstStats{},
 		Memory: &cadvisorapiv1.MemoryStats{
 			Usage:      uint64(seed + offsetMemUsageBytes),
 			WorkingSet: uint64(seed + offsetMemWorkingSetBytes),
@@ -518,6 +296,8 @@ func getTestContainerInfo(seed int, podName string, podNamespace string, contain
 				Pgfault:    uint64(seed + offsetMemPageFaults),
 				Pgmajfault: uint64(seed + offsetMemMajorPageFaults),
 			},
+			Swap: uint64(seed + offsetMemSwapUsageBytes),
+			PSI:  getTestPSIStats(seed),
 		},
 		Network: &cadvisorapiv2.NetworkStats{
 			Interfaces: []cadvisorapiv1.InterfaceStats{{
@@ -550,12 +330,31 @@ func getTestContainerInfo(seed int, podName string, podNamespace string, contain
 				DutyCycle:   uint64(seed + offsetAcceleratorDutyCycle),
 			},
 		},
+		DiskIo: &cadvisorapiv1.DiskIoStats{
+			PSI: getTestPSIStats(seed),
+		},
 	}
 	stats.Cpu.Usage.Total = uint64(seed + offsetCPUUsageCoreSeconds)
 	stats.CpuInst.Usage.Total = uint64(seed + offsetCPUUsageCores)
 	return cadvisorapiv2.ContainerInfo{
 		Spec:  spec,
 		Stats: []*cadvisorapiv2.ContainerStats{&stats},
+	}
+}
+
+func getTestPSIStats(seed int) cadvisorapiv1.PSIStats {
+	return cadvisorapiv1.PSIStats{
+		Full: getTestPSIData(seed),
+		Some: getTestPSIData(seed),
+	}
+}
+
+func getTestPSIData(seed int) cadvisorapiv1.PSIData {
+	return cadvisorapiv1.PSIData{
+		Total:  uint64(seed + offsetPSIDataTotal),
+		Avg10:  float64(10),
+		Avg60:  float64(10),
+		Avg300: float64(10),
 	}
 }
 
@@ -567,6 +366,23 @@ func getTestFsInfo(seed int) cadvisorapiv2.FsInfo {
 	return cadvisorapiv2.FsInfo{
 		Timestamp:  time.Now(),
 		Device:     "test-device",
+		Mountpoint: "test-mount-point",
+		Capacity:   uint64(seed + offsetFsCapacity),
+		Available:  uint64(seed + offsetFsAvailable),
+		Usage:      uint64(seed + offsetFsUsage),
+		Inodes:     &inodes,
+		InodesFree: &inodesFree,
+	}
+}
+
+func getTestFsInfoWithDifferentMount(seed int, device string) cadvisorapiv2.FsInfo {
+	var (
+		inodes     = uint64(seed + offsetFsInodes)
+		inodesFree = uint64(seed + offsetFsInodesFree)
+	)
+	return cadvisorapiv2.FsInfo{
+		Timestamp:  time.Now(),
+		Device:     device,
 		Mountpoint: "test-mount-point",
 		Capacity:   uint64(seed + offsetFsCapacity),
 		Available:  uint64(seed + offsetFsAvailable),
@@ -599,9 +415,9 @@ func getPodVolumeStats(seed int, volumeName string) statsapi.VolumeStats {
 }
 
 func generateCustomMetricSpec() []cadvisorapiv1.MetricSpec {
-	f := fuzz.New().NilChance(0).Funcs(
-		func(e *cadvisorapiv1.MetricSpec, c fuzz.Continue) {
-			c.Fuzz(&e.Name)
+	f := randfill.New().NilChance(0).Funcs(
+		func(e *cadvisorapiv1.MetricSpec, c randfill.Continue) {
+			c.Fill(&e.Name)
 			switch c.Intn(3) {
 			case 0:
 				e.Type = cadvisorapiv1.MetricGauge
@@ -616,28 +432,28 @@ func generateCustomMetricSpec() []cadvisorapiv1.MetricSpec {
 			case 1:
 				e.Format = cadvisorapiv1.FloatType
 			}
-			c.Fuzz(&e.Units)
+			c.Fill(&e.Units)
 		})
 	var ret []cadvisorapiv1.MetricSpec
-	f.Fuzz(&ret)
+	f.Fill(&ret)
 	return ret
 }
 
 func generateCustomMetrics(spec []cadvisorapiv1.MetricSpec) map[string][]cadvisorapiv1.MetricVal {
 	ret := map[string][]cadvisorapiv1.MetricVal{}
 	for _, metricSpec := range spec {
-		f := fuzz.New().NilChance(0).Funcs(
-			func(e *cadvisorapiv1.MetricVal, c fuzz.Continue) {
+		f := randfill.New().NilChance(0).Funcs(
+			func(e *cadvisorapiv1.MetricVal, c randfill.Continue) {
 				switch metricSpec.Format {
 				case cadvisorapiv1.IntType:
-					c.Fuzz(&e.IntValue)
+					c.Fill(&e.IntValue)
 				case cadvisorapiv1.FloatType:
-					c.Fuzz(&e.FloatValue)
+					c.Fill(&e.FloatValue)
 				}
 			})
 
 		var metrics []cadvisorapiv1.MetricVal
-		f.Fuzz(&metrics)
+		f.Fill(&metrics)
 		ret[metricSpec.Name] = metrics
 	}
 	return ret
@@ -656,7 +472,7 @@ func checkNetworkStats(t *testing.T, label string, seed int, stats *statsapi.Net
 	assert.EqualValues(t, seed+offsetNetTxBytes, *stats.TxBytes, label+".Net.TxBytes")
 	assert.EqualValues(t, seed+offsetNetTxErrors, *stats.TxErrors, label+".Net.TxErrors")
 
-	assert.EqualValues(t, 2, len(stats.Interfaces), "network interfaces should contain 2 elements")
+	assert.Len(t, stats.Interfaces, 2, "network interfaces should contain 2 elements")
 
 	assert.EqualValues(t, "eth0", stats.Interfaces[0].Name, "default interface name is not eth0")
 	assert.EqualValues(t, seed+offsetNetRxBytes, *stats.Interfaces[0].RxBytes, label+".Net.TxErrors")
@@ -679,6 +495,7 @@ func checkCPUStats(t *testing.T, label string, seed int, stats *statsapi.CPUStat
 	assert.EqualValues(t, testTime(timestamp, seed).Unix(), stats.Time.Time.Unix(), label+".CPU.Time")
 	assert.EqualValues(t, seed+offsetCPUUsageCores, *stats.UsageNanoCores, label+".CPU.UsageCores")
 	assert.EqualValues(t, seed+offsetCPUUsageCoreSeconds, *stats.UsageCoreNanoSeconds, label+".CPU.UsageCoreSeconds")
+	checkPSIStats(t, label+".CPU", seed, stats.PSI)
 }
 
 func checkMemoryStats(t *testing.T, label string, seed int, info cadvisorapiv2.ContainerInfo, stats *statsapi.MemoryStats) {
@@ -694,6 +511,42 @@ func checkMemoryStats(t *testing.T, label string, seed int, info cadvisorapiv2.C
 		expected := info.Spec.Memory.Limit - *stats.WorkingSetBytes
 		assert.EqualValues(t, expected, *stats.AvailableBytes, label+".Mem.AvailableBytes")
 	}
+	checkPSIStats(t, label+".Mem", seed, stats.PSI)
+}
+
+func checkIOStats(t *testing.T, label string, seed int, info cadvisorapiv2.ContainerInfo, stats *statsapi.IOStats) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.KubeletPSI) {
+		assert.EqualValues(t, testTime(timestamp, seed).Unix(), stats.Time.Time.Unix(), label+".Mem.Time")
+		checkPSIStats(t, label+".IO", seed, stats.PSI)
+	}
+}
+
+func checkPSIStats(t *testing.T, label string, seed int, stats *statsapi.PSIStats) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.KubeletPSI) {
+		require.NotNil(t, stats, label+".PSI")
+		assert.EqualValues(t, seed+offsetPSIDataTotal, stats.Full.Total, label+".PSI.Full.Total")
+		assert.InDelta(t, 10, stats.Full.Avg10, 0.01, label+".PSI.Full.Avg10")
+		assert.InDelta(t, 10, stats.Full.Avg60, 0.01, label+".PSI.Full.Avg60")
+		assert.InDelta(t, 10, stats.Full.Avg300, 0.01, label+".PSI.Full.Avg300")
+		assert.EqualValues(t, seed+offsetPSIDataTotal, stats.Some.Total, label+".PSI.Some.Total")
+		assert.InDelta(t, 10, stats.Some.Avg10, 0.01, label+".PSI.Some.Avg10")
+		assert.InDelta(t, 10, stats.Some.Avg60, 0.01, label+".PSI.Some.Avg60")
+		assert.InDelta(t, 10, stats.Some.Avg300, 0.01, label+".PSI.Some.Avg300")
+	}
+}
+
+func checkSwapStats(t *testing.T, label string, seed int, info cadvisorapiv2.ContainerInfo, stats *statsapi.SwapStats) {
+	label += ".Swap"
+
+	assert.EqualValues(t, testTime(timestamp, seed).Unix(), stats.Time.Time.Unix(), label+".Time")
+	assert.EqualValues(t, seed+offsetMemSwapUsageBytes, *stats.SwapUsageBytes, label+".SwapUsageBytes")
+
+	if !info.Spec.HasMemory || isMemoryUnlimited(info.Spec.Memory.SwapLimit) {
+		assert.Nil(t, stats.SwapAvailableBytes, label+".SwapAvailableBytes")
+	} else {
+		expected := info.Spec.Memory.Limit - *stats.SwapUsageBytes
+		assert.EqualValues(t, expected, *stats.SwapAvailableBytes, label+".AvailableBytes")
+	}
 }
 
 func checkFsStats(t *testing.T, label string, seed int, stats *statsapi.FsStats) {
@@ -701,6 +554,39 @@ func checkFsStats(t *testing.T, label string, seed int, stats *statsapi.FsStats)
 	assert.EqualValues(t, seed+offsetFsAvailable, *stats.AvailableBytes, label+".AvailableBytes")
 	assert.EqualValues(t, seed+offsetFsInodes, *stats.Inodes, label+".Inodes")
 	assert.EqualValues(t, seed+offsetFsInodesFree, *stats.InodesFree, label+".InodesFree")
+}
+
+func checkContainersSwapStats(t *testing.T, podStats statsapi.PodStats, containerStats ...cadvisorapiv2.ContainerInfo) {
+	if runtime.GOOS != "linux" {
+		return
+	}
+
+	podContainers := make(map[string]struct{}, len(podStats.Containers))
+	for _, container := range podStats.Containers {
+		podContainers[container.Name] = struct{}{}
+	}
+
+	for _, container := range containerStats {
+		found := false
+		containerName := container.Spec.Labels["io.kubernetes.container.name"]
+		for _, containerPodStats := range podStats.Containers {
+			if containerPodStats.Name == containerName {
+				assert.Equal(t, container.Stats[0].Memory.Swap, *containerPodStats.Swap.SwapUsageBytes)
+				found = true
+			}
+		}
+		assert.True(t, found, "container %s not found in pod stats", container.Spec.Labels["io.kubernetes.container.name"])
+		delete(podContainers, containerName)
+	}
+
+	var missingContainerNames []string
+	for containerName := range podContainers {
+		missingContainerNames = append(missingContainerNames, containerName)
+	}
+	assert.Emptyf(t, podContainers, "containers not found in pod stats: %v", strings.Join(missingContainerNames, " "))
+	if len(missingContainerNames) > 0 {
+		assert.FailNow(t, "containers not found in pod stats")
+	}
 }
 
 func checkEphemeralStats(t *testing.T, label string, containerSeeds []int, volumeSeeds []int, containerLogStats []*volume.Metrics, stats *statsapi.FsStats) {
@@ -742,7 +628,9 @@ func (o *fakeResourceAnalyzer) GetPodVolumeStats(uid types.UID) (serverstats.Pod
 }
 
 type fakeContainerStatsProvider struct {
-	device string
+	device      string
+	imageFs     *statsapi.FsStats
+	containerFs *statsapi.FsStats
 }
 
 func (p fakeContainerStatsProvider) ListPodStats(context.Context) ([]statsapi.PodStats, error) {
@@ -757,8 +645,8 @@ func (p fakeContainerStatsProvider) ListPodCPUAndMemoryStats(context.Context) ([
 	return nil, fmt.Errorf("not implemented")
 }
 
-func (p fakeContainerStatsProvider) ImageFsStats(context.Context) (*statsapi.FsStats, error) {
-	return nil, fmt.Errorf("not implemented")
+func (p fakeContainerStatsProvider) ImageFsStats(context.Context) (*statsapi.FsStats, *statsapi.FsStats, error) {
+	return p.imageFs, p.containerFs, nil
 }
 
 func (p fakeContainerStatsProvider) ImageFsDevice(context.Context) (string, error) {

@@ -29,8 +29,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
-
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -38,12 +36,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/client-go/rest/fake"
 	cmdtesting "k8s.io/kubectl/pkg/cmd/testing"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/drain"
 	"k8s.io/kubectl/pkg/scheme"
-	utilpointer "k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -75,7 +74,7 @@ func TestCordon(t *testing.T) {
 		description string
 		node        *corev1.Node
 		expected    *corev1.Node
-		cmd         func(cmdutil.Factory, genericclioptions.IOStreams) *cobra.Command
+		cmd         func(cmdutil.Factory, genericiooptions.IOStreams) *cobra.Command
 		arg         string
 		expectFatal bool
 	}{
@@ -211,7 +210,7 @@ func TestCordon(t *testing.T) {
 			}
 			tf.ClientConfigVal = cmdtesting.DefaultClientConfig()
 
-			ioStreams, _, _, _ := genericclioptions.NewTestIOStreams()
+			ioStreams, _, _, _ := genericiooptions.NewTestIOStreams()
 			cmd := test.cmd(tf, ioStreams)
 
 			var recovered interface{}
@@ -278,8 +277,8 @@ func TestDrain(t *testing.T) {
 					Kind:               "ReplicationController",
 					Name:               "rc",
 					UID:                "123",
-					BlockOwnerDeletion: utilpointer.BoolPtr(true),
-					Controller:         utilpointer.BoolPtr(true),
+					BlockOwnerDeletion: ptr.To(true),
+					Controller:         ptr.To(true),
 				},
 			},
 		},
@@ -310,8 +309,8 @@ func TestDrain(t *testing.T) {
 					APIVersion:         "apps/v1",
 					Kind:               "DaemonSet",
 					Name:               "ds",
-					BlockOwnerDeletion: utilpointer.BoolPtr(true),
-					Controller:         utilpointer.BoolPtr(true),
+					BlockOwnerDeletion: ptr.To(true),
+					Controller:         ptr.To(true),
 				},
 			},
 		},
@@ -331,8 +330,8 @@ func TestDrain(t *testing.T) {
 					APIVersion:         "apps/v1",
 					Kind:               "DaemonSet",
 					Name:               "ds",
-					BlockOwnerDeletion: utilpointer.BoolPtr(true),
-					Controller:         utilpointer.BoolPtr(true),
+					BlockOwnerDeletion: ptr.To(true),
+					Controller:         ptr.To(true),
 				},
 			},
 		},
@@ -355,8 +354,8 @@ func TestDrain(t *testing.T) {
 					APIVersion:         "apps/v1",
 					Kind:               "DaemonSet",
 					Name:               "ds",
-					BlockOwnerDeletion: utilpointer.BoolPtr(true),
-					Controller:         utilpointer.BoolPtr(true),
+					BlockOwnerDeletion: ptr.To(true),
+					Controller:         ptr.To(true),
 				},
 			},
 		},
@@ -405,8 +404,8 @@ func TestDrain(t *testing.T) {
 					APIVersion:         "v1",
 					Kind:               "Job",
 					Name:               "job",
-					BlockOwnerDeletion: utilpointer.BoolPtr(true),
-					Controller:         utilpointer.BoolPtr(true),
+					BlockOwnerDeletion: ptr.To(true),
+					Controller:         ptr.To(true),
 				},
 			},
 		},
@@ -432,8 +431,8 @@ func TestDrain(t *testing.T) {
 					APIVersion:         "v1",
 					Kind:               "Job",
 					Name:               "job",
-					BlockOwnerDeletion: utilpointer.BoolPtr(true),
-					Controller:         utilpointer.BoolPtr(true),
+					BlockOwnerDeletion: ptr.To(true),
+					Controller:         ptr.To(true),
 				},
 			},
 		},
@@ -474,8 +473,8 @@ func TestDrain(t *testing.T) {
 					APIVersion:         "v1",
 					Kind:               "ReplicaSet",
 					Name:               "rs",
-					BlockOwnerDeletion: utilpointer.BoolPtr(true),
-					Controller:         utilpointer.BoolPtr(true),
+					BlockOwnerDeletion: ptr.To(true),
+					Controller:         ptr.To(true),
 				},
 			},
 		},
@@ -632,17 +631,6 @@ func TestDrain(t *testing.T) {
 			pods:                  []corev1.Pod{jobPod},
 			rcs:                   []corev1.ReplicationController{rc},
 			args:                  []string{"node", "--force", "--delete-emptydir-data=true"},
-			expectFatal:           false,
-			expectDelete:          true,
-			expectOutputToContain: "node/node drained",
-		},
-		{
-			description:           "Ensure compatibility for --delete-local-data until fully deprecated",
-			node:                  node,
-			expected:              cordonedNode,
-			pods:                  []corev1.Pod{jobPod},
-			rcs:                   []corev1.ReplicationController{rc},
-			args:                  []string{"node", "--force", "--delete-local-data=true"},
 			expectFatal:           false,
 			expectDelete:          true,
 			expectOutputToContain: "node/node drained",
@@ -873,7 +861,7 @@ func TestDrain(t *testing.T) {
 				}
 				tf.ClientConfigVal = cmdtesting.DefaultClientConfig()
 
-				ioStreams, _, outBuf, errBuf := genericclioptions.NewTestIOStreams()
+				ioStreams, _, outBuf, errBuf := genericiooptions.NewTestIOStreams()
 				cmd := NewCmdDrain(tf, ioStreams)
 
 				var recovered interface{}

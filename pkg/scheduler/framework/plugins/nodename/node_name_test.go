@@ -17,13 +17,15 @@ limitations under the License.
 package nodename
 
 import (
-	"context"
-	"reflect"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/feature"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
+	"k8s.io/kubernetes/test/utils/ktesting"
 )
 
 func TestNodeName(t *testing.T) {
@@ -55,11 +57,14 @@ func TestNodeName(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			nodeInfo := framework.NewNodeInfo()
 			nodeInfo.SetNode(test.node)
-
-			p, _ := New(nil, nil)
-			gotStatus := p.(framework.FilterPlugin).Filter(context.Background(), nil, test.pod, nodeInfo)
-			if !reflect.DeepEqual(gotStatus, test.wantStatus) {
-				t.Errorf("status does not match: %v, want: %v", gotStatus, test.wantStatus)
+			_, ctx := ktesting.NewTestContext(t)
+			p, err := New(ctx, nil, nil, feature.Features{})
+			if err != nil {
+				t.Fatalf("creating plugin: %v", err)
+			}
+			gotStatus := p.(framework.FilterPlugin).Filter(ctx, nil, test.pod, nodeInfo)
+			if diff := cmp.Diff(test.wantStatus, gotStatus); diff != "" {
+				t.Errorf("status does not match (-want,+got):\n%s", diff)
 			}
 		})
 	}

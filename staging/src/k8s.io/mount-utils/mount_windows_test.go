@@ -21,14 +21,13 @@ package mount
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"k8s.io/utils/exec/testing"
+	testingexec "k8s.io/utils/exec/testing"
 )
 
 func makeLink(link, target string) error {
@@ -147,7 +146,7 @@ func TestIsLikelyNotMountPoint(t *testing.T) {
 			"Dir",
 			"",
 			func(base, fileName, targetLinkName string) error {
-				return os.Mkdir(filepath.Join(base, fileName), 0750)
+				return os.Mkdir(filepath.Join(base, fileName), 0o750)
 			},
 			true,
 			false,
@@ -166,7 +165,7 @@ func TestIsLikelyNotMountPoint(t *testing.T) {
 			"targetSymLink",
 			func(base, fileName, targetLinkName string) error {
 				targeLinkPath := filepath.Join(base, targetLinkName)
-				if err := os.Mkdir(targeLinkPath, 0750); err != nil {
+				if err := os.Mkdir(targeLinkPath, 0o750); err != nil {
 					return err
 				}
 
@@ -184,7 +183,7 @@ func TestIsLikelyNotMountPoint(t *testing.T) {
 			"targetSymLink2",
 			func(base, fileName, targetLinkName string) error {
 				targeLinkPath := filepath.Join(base, targetLinkName)
-				if err := os.Mkdir(targeLinkPath, 0750); err != nil {
+				if err := os.Mkdir(targeLinkPath, 0o750); err != nil {
 					return err
 				}
 
@@ -194,18 +193,32 @@ func TestIsLikelyNotMountPoint(t *testing.T) {
 				}
 				return removeLink(targeLinkPath)
 			},
-			true,
+			false,
+			false,
+		},
+		{
+			"junction",
+			"targetDir",
+			func(base, fileName, targetLinkName string) error {
+				target := filepath.Join(base, targetLinkName)
+				if err := os.Mkdir(target, 0o750); err != nil {
+					return err
+				}
+
+				// create a Junction file type on Windows
+				junction := filepath.Join(base, fileName)
+				if output, err := exec.Command("cmd", "/c", "mklink", "/J", junction, target).CombinedOutput(); err != nil {
+					return fmt.Errorf("mklink failed: %v, link(%q) target(%q) output: %q", err, junction, target, string(output))
+				}
+				return nil
+			},
+			false,
 			false,
 		},
 	}
 
 	for _, test := range tests {
-		base, err := ioutil.TempDir("", test.fileName)
-		if err != nil {
-			t.Fatalf(err.Error())
-		}
-
-		defer os.RemoveAll(base)
+		base := t.TempDir()
 
 		if err := test.setUp(base, test.fileName, test.targetLinkName); err != nil {
 			t.Fatalf("unexpected error in setUp(%s, %s): %v", test.fileName, test.targetLinkName, err)
@@ -213,7 +226,7 @@ func TestIsLikelyNotMountPoint(t *testing.T) {
 
 		filePath := filepath.Join(base, test.fileName)
 		result, err := mounter.IsLikelyNotMountPoint(filePath)
-		assert.Equal(t, result, test.expectedResult, "Expect result not equal with IsLikelyNotMountPoint(%s) return: %q, expected: %q",
+		assert.Equal(t, test.expectedResult, result, "Expect result not equal with IsLikelyNotMountPoint(%s) return: %q, expected: %q",
 			filePath, result, test.expectedResult)
 
 		if test.expectError {
@@ -280,14 +293,8 @@ func TestFormatAndMount(t *testing.T) {
 			Interface: &fakeMounter,
 			Exec:      fakeExec,
 		}
-		base, err := ioutil.TempDir("", test.device)
-		if err != nil {
-			t.Fatalf(err.Error())
-		}
-		defer os.RemoveAll(base)
-
-		target := filepath.Join(base, test.target)
-		err = mounter.FormatAndMount(test.device, target, test.fstype, test.mountOptions)
+		target := filepath.Join(t.TempDir(), test.target)
+		err := mounter.FormatAndMount(test.device, target, test.fstype, test.mountOptions)
 		if test.expectError {
 			assert.NotNil(t, err, "Expect error during FormatAndMount(%s, %s, %s, %v)", test.device, test.target, test.fstype, test.mountOptions)
 		} else {

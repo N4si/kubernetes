@@ -23,13 +23,12 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/gofuzz"
+	"sigs.k8s.io/randfill"
 
 	"k8s.io/apimachinery/pkg/api/apitesting/fuzzer"
 	"k8s.io/apimachinery/pkg/api/apitesting/roundtrip"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 )
 
@@ -44,12 +43,12 @@ func TestDeepCopyApiObjects(t *testing.T) {
 	}
 }
 
-func doDeepCopyTest(t *testing.T, kind schema.GroupVersionKind, f *fuzz.Fuzzer) {
+func doDeepCopyTest(t *testing.T, kind schema.GroupVersionKind, f *randfill.Filler) {
 	item, err := legacyscheme.Scheme.New(kind)
 	if err != nil {
 		t.Fatalf("Could not create a %v: %s", kind, err)
 	}
-	f.Fuzz(item)
+	f.Fill(item)
 	itemCopy := item.DeepCopyObject()
 	if !reflect.DeepEqual(item, itemCopy) {
 		t.Errorf("\nexpected: %#v\n\ngot:      %#v\n\ndiff:      %v", item, itemCopy, cmp.Diff(item, itemCopy))
@@ -62,7 +61,7 @@ func doDeepCopyTest(t *testing.T, kind schema.GroupVersionKind, f *fuzz.Fuzzer) 
 	}
 
 	// Refuzz the copy, which should have no effect on the original
-	f.Fuzz(itemCopy)
+	f.Fill(itemCopy)
 
 	postfuzzData := &bytes.Buffer{}
 	if err := legacyscheme.Codecs.LegacyCodec(kind.GroupVersion()).Encode(item, postfuzzData); err != nil {
@@ -71,7 +70,7 @@ func doDeepCopyTest(t *testing.T, kind schema.GroupVersionKind, f *fuzz.Fuzzer) 
 	}
 
 	if !bytes.Equal(prefuzzData.Bytes(), postfuzzData.Bytes()) {
-		t.Log(diff.StringDiff(prefuzzData.String(), postfuzzData.String()))
+		t.Log(cmp.Diff(prefuzzData.String(), postfuzzData.String()))
 		t.Errorf("Fuzzing copy modified original of %#v", kind)
 		return
 	}

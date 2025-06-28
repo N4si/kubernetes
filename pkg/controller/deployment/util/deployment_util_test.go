@@ -23,19 +23,21 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	apps "k8s.io/api/apps/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apiserver/pkg/storage/names"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/klog/v2/ktesting"
 	"k8s.io/kubernetes/pkg/controller"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 func newDControllerRef(d *apps.Deployment) *metav1.OwnerReference {
@@ -55,7 +57,7 @@ func generateRS(deployment apps.Deployment) apps.ReplicaSet {
 	return apps.ReplicaSet{
 		ObjectMeta: metav1.ObjectMeta{
 			UID:             randomUID(),
-			Name:            names.SimpleNameGenerator.GenerateName("replicaset"),
+			Name:            names.SimpleNameGenerator.GenerateName(deployment.Name),
 			Labels:          template.Labels,
 			OwnerReferences: []metav1.OwnerReference{*newDControllerRef(&deployment)},
 		},
@@ -342,42 +344,93 @@ func TestFindOldReplicaSets(t *testing.T) {
 }
 
 func TestGetReplicaCountForReplicaSets(t *testing.T) {
-	rs1 := generateRS(generateDeployment("foo"))
+	rs1 := generateRS(generateDeployment("foo-rs"))
+	rs1.Status.ObservedGeneration = 1
 	*(rs1.Spec.Replicas) = 1
 	rs1.Status.Replicas = 2
-	rs2 := generateRS(generateDeployment("bar"))
+	rs1.Status.TerminatingReplicas = ptr.To[int32](3)
+
+	rs2 := generateRS(generateDeployment("bar-rs"))
+	rs1.Status.ObservedGeneration = 1
 	*(rs2.Spec.Replicas) = 2
 	rs2.Status.Replicas = 3
+	rs2.Status.TerminatingReplicas = ptr.To[int32](1)
+
+	rs3 := generateRS(generateDeployment("unsynced-rs"))
+	*(rs3.Spec.Replicas) = 3
+	rs3.Status.Replicas = 0
+	rs3.Status.TerminatingReplicas = nil
+
+	rs4 := generateRS(generateDeployment("dropped-rs"))
+	rs4.Status.ObservedGeneration = 1
+	*(rs4.Spec.Replicas) = 1
+	rs4.Status.Replicas = 1
+	rs4.Status.TerminatingReplicas = nil
 
 	tests := []struct {
-		Name           string
-		sets           []*apps.ReplicaSet
-		expectedCount  int32
-		expectedActual int32
+		name                string
+		sets                []*apps.ReplicaSet
+		expectedCount       int32
+		expectedActual      int32
+		expectedTerminating *int32
 	}{
 		{
-			"1:2 Replicas",
-			[]*apps.ReplicaSet{&rs1},
-			1,
-			2,
+			name:                "scaling down rs1",
+			sets:                []*apps.ReplicaSet{&rs1},
+			expectedCount:       1,
+			expectedActual:      2,
+			expectedTerminating: ptr.To[int32](3),
 		},
 		{
-			"3:5 Replicas",
-			[]*apps.ReplicaSet{&rs1, &rs2},
-			3,
-			5,
+			name:                "scaling down rs1 and rs2",
+			sets:                []*apps.ReplicaSet{&rs1, &rs2},
+			expectedCount:       3,
+			expectedActual:      5,
+			expectedTerminating: ptr.To[int32](4),
+		},
+		{
+			name:                "scaling up rs3",
+			sets:                []*apps.ReplicaSet{&rs3},
+			expectedCount:       3,
+			expectedActual:      0,
+			expectedTerminating: ptr.To[int32](0),
+		},
+		{
+			name:                "scaling down rs1 and rs2 and scaling up rs3",
+			sets:                []*apps.ReplicaSet{&rs1, &rs2, &rs3},
+			expectedCount:       6,
+			expectedActual:      5,
+			expectedTerminating: ptr.To[int32](4),
+		},
+		{
+			name:                "invalid/unknown terminating status for rs4",
+			sets:                []*apps.ReplicaSet{&rs4},
+			expectedCount:       1,
+			expectedActual:      1,
+			expectedTerminating: nil,
+		},
+		{
+			name:                "invalid/unknown terminating status for rs4 with rs1, rs2 and rs3",
+			sets:                []*apps.ReplicaSet{&rs1, &rs2, &rs3, &rs4},
+			expectedCount:       7,
+			expectedActual:      6,
+			expectedTerminating: nil,
 		},
 	}
 
 	for _, test := range tests {
-		t.Run(test.Name, func(t *testing.T) {
-			rs := GetReplicaCountForReplicaSets(test.sets)
-			if rs != test.expectedCount {
-				t.Errorf("In test case %s, expectedCount %+v, got %+v", test.Name, test.expectedCount, rs)
+		t.Run(test.name, func(t *testing.T) {
+			replicasCount := GetReplicaCountForReplicaSets(test.sets)
+			if replicasCount != test.expectedCount {
+				t.Errorf("expectedCount %d, got %d", test.expectedCount, replicasCount)
 			}
-			rs = GetActualReplicaCountForReplicaSets(test.sets)
-			if rs != test.expectedActual {
-				t.Errorf("In test case %s, expectedActual %+v, got %+v", test.Name, test.expectedActual, rs)
+			actualReplicasCount := GetActualReplicaCountForReplicaSets(test.sets)
+			if actualReplicasCount != test.expectedActual {
+				t.Errorf("expectedActual %d, got %d", test.expectedActual, actualReplicasCount)
+			}
+			terminatingReplicasCount := GetTerminatingReplicaCountForReplicaSets(test.sets)
+			if !ptr.Equal(terminatingReplicasCount, test.expectedTerminating) {
+				t.Errorf("expectedTerminating %d, got %d", ptr.Deref(test.expectedTerminating, -1), ptr.Deref(terminatingReplicasCount, -1))
 			}
 		})
 	}
@@ -393,32 +446,32 @@ func TestResolveFenceposts(t *testing.T) {
 		expectError       bool
 	}{
 		{
-			maxSurge:          newString("0%"),
-			maxUnavailable:    newString("0%"),
+			maxSurge:          ptr.To("0%"),
+			maxUnavailable:    ptr.To("0%"),
 			desired:           0,
 			expectSurge:       0,
 			expectUnavailable: 1,
 			expectError:       false,
 		},
 		{
-			maxSurge:          newString("39%"),
-			maxUnavailable:    newString("39%"),
+			maxSurge:          ptr.To("39%"),
+			maxUnavailable:    ptr.To("39%"),
 			desired:           10,
 			expectSurge:       4,
 			expectUnavailable: 3,
 			expectError:       false,
 		},
 		{
-			maxSurge:          newString("oops"),
-			maxUnavailable:    newString("39%"),
+			maxSurge:          ptr.To("oops"),
+			maxUnavailable:    ptr.To("39%"),
 			desired:           10,
 			expectSurge:       0,
 			expectUnavailable: 0,
 			expectError:       true,
 		},
 		{
-			maxSurge:          newString("55%"),
-			maxUnavailable:    newString("urg"),
+			maxSurge:          ptr.To("55%"),
+			maxUnavailable:    ptr.To("urg"),
 			desired:           10,
 			expectSurge:       0,
 			expectUnavailable: 0,
@@ -426,14 +479,14 @@ func TestResolveFenceposts(t *testing.T) {
 		},
 		{
 			maxSurge:          nil,
-			maxUnavailable:    newString("39%"),
+			maxUnavailable:    ptr.To("39%"),
 			desired:           10,
 			expectSurge:       0,
 			expectUnavailable: 3,
 			expectError:       false,
 		},
 		{
-			maxSurge:          newString("39%"),
+			maxSurge:          ptr.To("39%"),
 			maxUnavailable:    nil,
 			desired:           10,
 			expectSurge:       4,
@@ -454,12 +507,10 @@ func TestResolveFenceposts(t *testing.T) {
 		t.Run(fmt.Sprintf("%d", num), func(t *testing.T) {
 			var maxSurge, maxUnavail *intstr.IntOrString
 			if test.maxSurge != nil {
-				surge := intstr.FromString(*test.maxSurge)
-				maxSurge = &surge
+				maxSurge = ptr.To(intstr.FromString(*test.maxSurge))
 			}
 			if test.maxUnavailable != nil {
-				unavail := intstr.FromString(*test.maxUnavailable)
-				maxUnavail = &unavail
+				maxUnavail = ptr.To(intstr.FromString(*test.maxUnavailable))
 			}
 			surge, unavail, err := ResolveFenceposts(maxSurge, maxUnavail, test.desired)
 			if err != nil && !test.expectError {
@@ -475,17 +526,13 @@ func TestResolveFenceposts(t *testing.T) {
 	}
 }
 
-func newString(s string) *string {
-	return &s
-}
-
 func TestNewRSNewReplicas(t *testing.T) {
 	tests := []struct {
 		Name          string
 		strategyType  apps.DeploymentStrategyType
 		depReplicas   int32
 		newRSReplicas int32
-		maxSurge      int
+		maxSurge      int32
 		expected      int32
 	}{
 		{
@@ -514,14 +561,8 @@ func TestNewRSNewReplicas(t *testing.T) {
 			*(newDeployment.Spec.Replicas) = test.depReplicas
 			newDeployment.Spec.Strategy = apps.DeploymentStrategy{Type: test.strategyType}
 			newDeployment.Spec.Strategy.RollingUpdate = &apps.RollingUpdateDeployment{
-				MaxUnavailable: func(i int) *intstr.IntOrString {
-					x := intstr.FromInt(i)
-					return &x
-				}(1),
-				MaxSurge: func(i int) *intstr.IntOrString {
-					x := intstr.FromInt(i)
-					return &x
-				}(test.maxSurge),
+				MaxUnavailable: ptr.To(intstr.FromInt32(1)),
+				MaxSurge:       ptr.To(intstr.FromInt32(test.maxSurge)),
 			}
 			*(newRC.Spec.Replicas) = test.newRSReplicas
 			rs, err := NewRSNewReplicas(&newDeployment, []*apps.ReplicaSet{&rs5}, &newRC)
@@ -704,8 +745,8 @@ func TestDeploymentComplete(t *testing.T) {
 				Replicas: &desired,
 				Strategy: apps.DeploymentStrategy{
 					RollingUpdate: &apps.RollingUpdateDeployment{
-						MaxUnavailable: func(i int) *intstr.IntOrString { x := intstr.FromInt(i); return &x }(int(maxUnavailable)),
-						MaxSurge:       func(i int) *intstr.IntOrString { x := intstr.FromInt(i); return &x }(int(maxSurge)),
+						MaxUnavailable: ptr.To(intstr.FromInt32(maxUnavailable)),
+						MaxSurge:       ptr.To(intstr.FromInt32(maxSurge)),
 					},
 					Type: apps.RollingUpdateDeploymentStrategyType,
 				},
@@ -944,7 +985,8 @@ func TestDeploymentTimedOut(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			nowFn = test.nowFn
-			if got, exp := DeploymentTimedOut(&test.d, &test.d.Status), test.expected; got != exp {
+			_, ctx := ktesting.NewTestContext(t)
+			if got, exp := DeploymentTimedOut(ctx, &test.d, &test.d.Status), test.expected; got != exp {
 				t.Errorf("expected timeout: %t, got: %t", exp, got)
 			}
 		})
@@ -958,7 +1000,7 @@ func TestMaxUnavailable(t *testing.T) {
 				Replicas: func(i int32) *int32 { return &i }(replicas),
 				Strategy: apps.DeploymentStrategy{
 					RollingUpdate: &apps.RollingUpdateDeployment{
-						MaxSurge:       func(i int) *intstr.IntOrString { x := intstr.FromInt(i); return &x }(int(1)),
+						MaxSurge:       ptr.To(intstr.FromInt32(1)),
 						MaxUnavailable: &maxUnavailable,
 					},
 					Type: apps.RollingUpdateDeploymentStrategyType,
@@ -973,22 +1015,22 @@ func TestMaxUnavailable(t *testing.T) {
 	}{
 		{
 			name:       "maxUnavailable less than replicas",
-			deployment: deployment(10, intstr.FromInt(5)),
+			deployment: deployment(10, intstr.FromInt32(5)),
 			expected:   int32(5),
 		},
 		{
 			name:       "maxUnavailable equal replicas",
-			deployment: deployment(10, intstr.FromInt(10)),
+			deployment: deployment(10, intstr.FromInt32(10)),
 			expected:   int32(10),
 		},
 		{
 			name:       "maxUnavailable greater than replicas",
-			deployment: deployment(5, intstr.FromInt(10)),
+			deployment: deployment(5, intstr.FromInt32(10)),
 			expected:   int32(5),
 		},
 		{
 			name:       "maxUnavailable with replicas is 0",
-			deployment: deployment(0, intstr.FromInt(10)),
+			deployment: deployment(0, intstr.FromInt32(10)),
 			expected:   int32(0),
 		},
 		{
@@ -1030,6 +1072,87 @@ func TestMaxUnavailable(t *testing.T) {
 	}
 }
 
+func TestGetNonNegativeInt32FromAnnotation(t *testing.T) {
+	tests := []struct {
+		name          string
+		annotations   map[string]string
+		expectedValue int32
+		expectedValid bool
+		expectedErr   string
+	}{
+		{
+			name: "invalid empty",
+		},
+		{
+			name:        "invalid",
+			annotations: map[string]string{"test": "invalid", "foo": "2"},
+			expectedErr: "invalid syntax",
+		},
+		{
+			name:        "invalid negative ",
+			annotations: map[string]string{"test": "-1", "foo": "2"},
+			expectedErr: "invalid syntax",
+		},
+		{
+			name:          "valid zero",
+			annotations:   map[string]string{"test": "0", "foo": "2"},
+			expectedValue: 0,
+			expectedValid: true,
+		},
+		{
+			name:          "valid",
+			annotations:   map[string]string{"test": "13", "foo": "2"},
+			expectedValue: 13,
+			expectedValid: true,
+		},
+		{
+			name:          "valid max",
+			annotations:   map[string]string{"test": fmt.Sprintf("%d", math.MaxInt32), "foo": "2"},
+			expectedValue: math.MaxInt32,
+			expectedValid: true,
+		},
+		{
+			name:        "invalid max out of range",
+			annotations: map[string]string{"test": fmt.Sprintf("%d", uint32(math.MaxInt32)+1), "foo": "2"},
+			expectedErr: "out of range",
+		},
+		{
+			name:        "invalid max out of range 2",
+			annotations: map[string]string{"test": fmt.Sprintf("%d", uint64(math.MaxUint32)+1), "foo": "2"},
+			expectedErr: "out of range",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tDeployment := generateDeployment("nginx")
+			tRS := generateRS(tDeployment)
+			tRS.Annotations = test.annotations
+			value, valid, err := getNonNegativeInt32FromAnnotation(&tRS, "test")
+			if test.expectedValue != value {
+				t.Fatalf("expected value:%v, got:%v", test.expectedValue, value)
+			}
+			if test.expectedValid != valid {
+				t.Fatalf("expected valid:%v, got:%v", test.expectedValid, valid)
+			}
+			if err != nil && !strings.Contains(err.Error(), test.expectedErr) {
+				t.Fatalf("unexpected error, expected: %s, got %v", test.expectedErr, err)
+			}
+			if err == nil && len(test.expectedErr) != 0 {
+				t.Fatalf("didn't return error expected %s", test.expectedErr)
+			}
+			logger, _ := ktesting.NewTestContext(t)
+			value, valid = getNonNegativeInt32FromAnnotationVerbose(logger, &tRS, "test")
+			if test.expectedValue != value {
+				t.Fatalf("expected value:%v, got:%v", test.expectedValue, value)
+			}
+			if test.expectedValid != valid {
+				t.Fatalf("expected valid:%v, got:%v", test.expectedValid, valid)
+			}
+		})
+	}
+}
+
 // Set of simple tests for annotation related util functions
 func TestAnnotationUtils(t *testing.T) {
 
@@ -1040,11 +1163,13 @@ func TestAnnotationUtils(t *testing.T) {
 
 	//Test Case 1: Check if anotations are copied properly from deployment to RS
 	t.Run("SetNewReplicaSetAnnotations", func(t *testing.T) {
+		_, ctx := ktesting.NewTestContext(t)
+
 		//Try to set the increment revision from 11 through 20
 		for i := 10; i < 20; i++ {
 
 			nextRevision := fmt.Sprintf("%d", i+1)
-			SetNewReplicaSetAnnotations(&tDeployment, &tRS, nextRevision, true, 5)
+			SetNewReplicaSetAnnotations(ctx, &tDeployment, &tRS, nextRevision, true, 5)
 			//Now the ReplicaSets Revision Annotation should be i+1
 
 			if i >= 12 {
@@ -1251,11 +1376,11 @@ func TestGetDeploymentsForReplicaSet(t *testing.T) {
 }
 
 func TestMinAvailable(t *testing.T) {
-	maxSurge := func(i int) *intstr.IntOrString { x := intstr.FromInt(i); return &x }(int(1))
+	maxSurge := ptr.To(intstr.FromInt32(1))
 	deployment := func(replicas int32, maxUnavailable intstr.IntOrString) *apps.Deployment {
 		return &apps.Deployment{
 			Spec: apps.DeploymentSpec{
-				Replicas: pointer.Int32(replicas),
+				Replicas: ptr.To(replicas),
 				Strategy: apps.DeploymentStrategy{
 					RollingUpdate: &apps.RollingUpdateDeployment{
 						MaxSurge:       maxSurge,
@@ -1273,29 +1398,29 @@ func TestMinAvailable(t *testing.T) {
 	}{
 		{
 			name:       "replicas greater than maxUnavailable",
-			deployment: deployment(10, intstr.FromInt(5)),
+			deployment: deployment(10, intstr.FromInt32(5)),
 			expected:   5,
 		},
 		{
 			name:       "replicas equal maxUnavailable",
-			deployment: deployment(10, intstr.FromInt(10)),
+			deployment: deployment(10, intstr.FromInt32(10)),
 			expected:   0,
 		},
 		{
 			name:       "replicas less than maxUnavailable",
-			deployment: deployment(5, intstr.FromInt(10)),
+			deployment: deployment(5, intstr.FromInt32(10)),
 			expected:   0,
 		},
 		{
 			name:       "replicas is 0",
-			deployment: deployment(0, intstr.FromInt(10)),
+			deployment: deployment(0, intstr.FromInt32(10)),
 			expected:   0,
 		},
 		{
 			name: "minAvailable with Recreate deployment strategy",
 			deployment: &apps.Deployment{
 				Spec: apps.DeploymentSpec{
-					Replicas: pointer.Int32(10),
+					Replicas: ptr.To[int32](10),
 					Strategy: apps.DeploymentStrategy{
 						Type: apps.RecreateDeploymentStrategyType,
 					},
@@ -1323,6 +1448,124 @@ func TestMinAvailable(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := MinAvailable(tt.deployment); got != tt.expected {
 				t.Errorf("MinAvailable() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGetReplicaSetFraction(t *testing.T) {
+	tests := []struct {
+		name                                          string
+		enableDeploymentReplicaSetTerminatingReplicas bool
+		deploymentReplicas                            int32
+		deploymentStatusReplicas                      int32
+		deploymentMaxSurge                            int32
+		rsReplicas                                    int32
+		rsAnnotations                                 map[string]string
+		expectedFraction                              int32
+	}{
+		{
+			name:               "empty deployment always scales to 0",
+			deploymentReplicas: 0,
+			rsReplicas:         10,
+			expectedFraction:   -10,
+		},
+		{
+			name:               "unsynced deployment does not scale when max-replicas annotation is missing (removed by a 3rd party)",
+			deploymentReplicas: 10,
+			rsReplicas:         5,
+			expectedFraction:   0,
+		},
+		{
+			name:               "unsynced deployment does not scale when max-replicas annotation is incorrectly set to 0 (by a 3rd party)",
+			deploymentReplicas: 10,
+			rsReplicas:         5,
+			rsAnnotations: map[string]string{
+				MaxReplicasAnnotation: "0",
+			},
+			expectedFraction: 0,
+		},
+		{
+			name:                     "scale up by 1/5 should increase RS replicas by 1/5 when max-replicas annotation is missing (removed by a 3rd party)",
+			deploymentReplicas:       120,
+			deploymentStatusReplicas: 100,
+			rsReplicas:               50,
+			expectedFraction:         10,
+		},
+		{
+			name:                     "scale up by 1/5 should increase RS replicas by 1/5 when max-replicas annotation is incorrectly set to 0 (by a 3rd party)",
+			deploymentReplicas:       120,
+			deploymentStatusReplicas: 100,
+			rsReplicas:               50,
+			rsAnnotations: map[string]string{
+				MaxReplicasAnnotation: "0",
+			},
+			expectedFraction: 10,
+		},
+		{
+			name:               "scale up by 1/5 should increase RS replicas by 1/5",
+			deploymentReplicas: 120,
+			rsReplicas:         50,
+			rsAnnotations: map[string]string{
+				MaxReplicasAnnotation: "100",
+			},
+			expectedFraction: 10,
+		},
+		{
+			name:               "scale up with maxSurge by 1/5 should increase RS replicas approximately by 1/5",
+			deploymentReplicas: 120,
+			deploymentMaxSurge: 10,
+			rsReplicas:         50,
+			rsAnnotations: map[string]string{
+				MaxReplicasAnnotation: "110",
+			},
+			// expectedFraction is not the whole 1/5 (10) since maxSurge pods have to be taken into account
+			// and replica sets with these surge pods should proportionally scale as well during a rollout
+			expectedFraction: 9,
+		},
+		{
+			name:               "scale down by 1/6 should decrease RS replicas by 1/6",
+			deploymentReplicas: 10,
+			rsReplicas:         6,
+			rsAnnotations: map[string]string{
+				MaxReplicasAnnotation: "12",
+			},
+			expectedFraction: -1,
+		},
+		{
+			name:               "scale down with maxSurge by 1/6 should decrease RS replicas approximately by 1/6",
+			deploymentReplicas: 100,
+			deploymentMaxSurge: 10,
+			rsReplicas:         50,
+			rsAnnotations: map[string]string{
+				MaxReplicasAnnotation: "130",
+			},
+			expectedFraction: -8,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			logger, _ := ktesting.NewTestContext(t)
+
+			tDeployment := generateDeployment("nginx")
+			tDeployment.Status.Replicas = test.deploymentStatusReplicas
+			tDeployment.Spec.Replicas = ptr.To(test.deploymentReplicas)
+			tDeployment.Spec.Strategy = apps.DeploymentStrategy{
+				Type: apps.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &apps.RollingUpdateDeployment{
+					MaxSurge:       ptr.To(intstr.FromInt32(test.deploymentMaxSurge)),
+					MaxUnavailable: ptr.To(intstr.FromInt32(1)),
+				},
+			}
+
+			tRS := generateRS(tDeployment)
+			tRS.Annotations = test.rsAnnotations
+			tRS.Spec.Replicas = ptr.To(test.rsReplicas)
+
+			fraction := getReplicaSetFraction(logger, tRS, tDeployment)
+			if test.expectedFraction != fraction {
+				t.Fatalf("expected fraction: %v, got:%v", test.expectedFraction, fraction)
 			}
 		})
 	}

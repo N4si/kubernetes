@@ -36,12 +36,17 @@ import (
 
 var _ = SIGDescribe("Container Runtime Conformance Test", func() {
 	f := framework.NewDefaultFramework("runtime-conformance")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelBaseline
+	f.NamespacePodSecurityLevel = admissionapi.LevelBaseline
 
 	ginkgo.Describe("container runtime conformance blackbox test", func() {
 
 		ginkgo.Context("when running a container with a new image", func() {
-			// The service account only has pull permission
+			// For the future security scans:
+			// The service account only has pull permission.
+			// The container repo is only made private to test private container pulling.
+			// All container images in the repo are public container images
+			// TODO: The long term plan is to come up with the alternative solution to test it:
+			// https://github.com/kubernetes/kubernetes/issues/130271
 			auth := `
 {
 	"auths": {
@@ -68,7 +73,7 @@ var _ = SIGDescribe("Container Runtime Conformance Test", func() {
 				},
 			} {
 				testCase := testCase
-				ginkgo.It(testCase.description+" [NodeConformance]", func(ctx context.Context) {
+				f.It(testCase.description+"", f.WithNodeConformance(), func(ctx context.Context) {
 					name := "image-pull-test"
 					command := []string{"/bin/sh", "-c", "while true; do sleep 1; done"}
 					container := node.ConformanceContainer{

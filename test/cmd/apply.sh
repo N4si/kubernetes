@@ -96,6 +96,34 @@ run_kubectl_apply_tests() {
   # cleanup
   kubectl delete pods selector-test-pod
 
+  # Create a deployment
+  kubectl apply -f hack/testdata/null-propagation/deployment-null.yml "${kube_flags[@]:?}"
+  # resources.limits.cpu should be nil.
+  kube::test::get_object_jsonpath_assert "deployment/my-dep-null" "{.spec.template.spec.containers[0].resources.requests.cpu}" ''
+  kube::test::get_object_jsonpath_assert "deployment/my-dep-null" "{.spec.template.spec.containers[0].resources.requests.memory}" '64Mi'
+  # The default value of the terminationMessagePolicy field is `File`, so the result will not be changed.
+  kube::test::get_object_jsonpath_assert "deployment/my-dep-null" "{.spec.template.spec.containers[0].terminationMessagePolicy}" 'File'
+
+  # kubectl apply on create should do what kubectl apply on update will accomplish.
+  kubectl apply -f hack/testdata/null-propagation/deployment-null.yml "${kube_flags[@]}"
+  kube::test::get_object_jsonpath_assert "deployment/my-dep-null" "{.spec.template.spec.containers[0].resources.requests.cpu}" ''
+  kube::test::get_object_jsonpath_assert "deployment/my-dep-null" "{.spec.template.spec.containers[0].resources.requests.memory}" '64Mi'
+  kube::test::get_object_jsonpath_assert "deployment/my-dep-null" "{.spec.template.spec.containers[0].terminationMessagePolicy}" 'File'
+
+  # hard.limits.cpu should be nil.
+  kubectl apply -f hack/testdata/null-propagation/resourcesquota-null.yml "${kube_flags[@]}"
+  kube::test::get_object_jsonpath_assert  "resourcequota/my-rq" "{.spec.hard['limits\.cpu']}" ''
+  kube::test::get_object_jsonpath_assert  "resourcequota/my-rq" "{.spec.hard['limits\.memory']}" ''
+
+  # kubectl apply on create should do what kubectl apply on update will accomplish.
+  kubectl apply -f hack/testdata/null-propagation/resourcesquota-null.yml "${kube_flags[@]}"
+  kube::test::get_object_jsonpath_assert "resourcequota/my-rq" "{.spec.hard['limits\.cpu']}" ''
+  kube::test::get_object_jsonpath_assert  "resourcequota/my-rq" "{.spec.hard['limits\.memory']}" ''
+
+  # cleanup
+  kubectl delete deployment my-dep-null
+  kubectl delete resourcequota my-rq
+
   ## kubectl apply --dry-run=server
   # Pre-Condition: no POD exists
   kube::test::get_object_assert pods "{{range.items}}{{${id_field:?}}}:{{end}}" ''
@@ -231,18 +259,18 @@ __EOF__
   kube::test::get_object_assert pods "{{range.items}}{{${id_field:?}}}:{{end}}" ''
   kubectl delete pvc b-pvc 2>&1 "${kube_flags[@]:?}"
 
-  ## kubectl apply --prune --prune-whitelist
+  ## kubectl apply --prune --prune-allowlist
   # Pre-Condition: no POD exists
   kube::test::get_object_assert pods "{{range.items}}{{${id_field:?}}}:{{end}}" ''
   # apply pod a
   kubectl apply --prune -l prune-group=true -f hack/testdata/prune/a.yaml "${kube_flags[@]:?}"
   # check right pod exists
   kube::test::get_object_assert 'pods a' "{{${id_field:?}}}" 'a'
-  # apply svc and don't prune pod a by overwriting whitelist
-  kubectl apply --prune -l prune-group=true -f hack/testdata/prune/svc.yaml --prune-whitelist core/v1/Service 2>&1 "${kube_flags[@]:?}"
+  # apply svc and don't prune pod a by overwriting allowlist
+  kubectl apply --prune -l prune-group=true -f hack/testdata/prune/svc.yaml --prune-allowlist core/v1/Service 2>&1 "${kube_flags[@]:?}"
   kube::test::get_object_assert 'service prune-svc' "{{${id_field:?}}}" 'prune-svc'
   kube::test::get_object_assert 'pods a' "{{${id_field:?}}}" 'a'
-  # apply svc and prune pod a with default whitelist
+  # apply svc and prune pod a with default allowlist
   kubectl apply --prune -l prune-group=true -f hack/testdata/prune/svc.yaml 2>&1 "${kube_flags[@]:?}"
   kube::test::get_object_assert 'service prune-svc' "{{${id_field:?}}}" 'prune-svc'
   kube::test::get_object_assert pods "{{range.items}}{{${id_field:?}}}:{{end}}" ''
@@ -385,6 +413,10 @@ run_kubectl_server_side_apply_tests() {
   kubectl apply --server-side --field-manager=my-field-manager --force-conflicts -f hack/testdata/pod.yaml "${kube_flags[@]:?}"
   output_message=$(kubectl get -f hack/testdata/pod.yaml -o=jsonpath='{.metadata.managedFields[*].manager}' "${kube_flags[@]:?}" 2>&1)
   kube::test::if_has_string "${output_message}" 'my-field-manager'
+  # can add pod condition
+  kubectl apply --server-side --subresource=status --field-manager=my-field-manager -f hack/testdata/pod-apply-status.yaml "${kube_flags[@]:?}"
+  output_message=$(kubectl get -f hack/testdata/pod.yaml -o=jsonpath='{.status.conditions[*].type}' "${kube_flags[@]:?}" 2>&1)
+  kube::test::if_has_string "${output_message}" 'example.io/Foo'
   # Clean up
   kubectl delete pods test-pod "${kube_flags[@]:?}"
 

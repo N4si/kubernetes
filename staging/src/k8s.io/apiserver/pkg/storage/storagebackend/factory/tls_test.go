@@ -18,14 +18,13 @@ package factory
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
 	"testing"
 
 	"go.etcd.io/etcd/client/pkg/v3/transport"
-	oteltrace "go.opentelemetry.io/otel/trace"
+	noopoteltrace "go.opentelemetry.io/otel/trace/noop"
 
 	apitesting "k8s.io/apimachinery/pkg/api/apitesting"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -62,11 +61,11 @@ func TestTLSConnection(t *testing.T) {
 		KeyFile:       keyFile,
 		TrustedCAFile: caFile,
 	}
-	for i := range etcdConfig.LCUrls {
-		etcdConfig.LCUrls[i].Scheme = "https"
+	for i := range etcdConfig.ListenClientUrls {
+		etcdConfig.ListenClientUrls[i].Scheme = "https"
 	}
-	for i := range etcdConfig.ACUrls {
-		etcdConfig.ACUrls[i].Scheme = "https"
+	for i := range etcdConfig.AdvertiseClientUrls {
+		etcdConfig.AdvertiseClientUrls[i].Scheme = "https"
 	}
 
 	client := testserver.RunEtcd(t, etcdConfig)
@@ -77,11 +76,11 @@ func TestTLSConnection(t *testing.T) {
 			CertFile:       certFile,
 			KeyFile:        keyFile,
 			TrustedCAFile:  caFile,
-			TracerProvider: oteltrace.NewNoopTracerProvider(),
+			TracerProvider: noopoteltrace.NewTracerProvider(),
 		},
 		Codec: codec,
 	}
-	storage, destroyFunc, err := newETCD3Storage(*cfg.ForResource(schema.GroupResource{Resource: "pods"}), nil)
+	storage, destroyFunc, err := newETCD3Storage(*cfg.ForResource(schema.GroupResource{Resource: "pods"}), nil, nil, "")
 	defer destroyFunc()
 	if err != nil {
 		t.Fatal(err)
@@ -94,20 +93,20 @@ func TestTLSConnection(t *testing.T) {
 
 func configureTLSCerts(t *testing.T) (certFile, keyFile, caFile string) {
 	baseDir := os.TempDir()
-	tempDir, err := ioutil.TempDir(baseDir, "etcd_certificates")
+	tempDir, err := os.MkdirTemp(baseDir, "etcd_certificates")
 	if err != nil {
 		t.Fatal(err)
 	}
 	certFile = path.Join(tempDir, "etcdcert.pem")
-	if err := ioutil.WriteFile(certFile, []byte(testingcert.CertFileContent), 0644); err != nil {
+	if err := os.WriteFile(certFile, []byte(testingcert.CertFileContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 	keyFile = path.Join(tempDir, "etcdkey.pem")
-	if err := ioutil.WriteFile(keyFile, []byte(testingcert.KeyFileContent), 0644); err != nil {
+	if err := os.WriteFile(keyFile, []byte(testingcert.KeyFileContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 	caFile = path.Join(tempDir, "ca.pem")
-	if err := ioutil.WriteFile(caFile, []byte(testingcert.CAFileContent), 0644); err != nil {
+	if err := os.WriteFile(caFile, []byte(testingcert.CAFileContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 	return certFile, keyFile, caFile

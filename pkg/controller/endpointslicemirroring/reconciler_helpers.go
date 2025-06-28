@@ -19,7 +19,7 @@ package endpointslicemirroring
 import (
 	v1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
-	endpointsliceutil "k8s.io/kubernetes/pkg/controller/util/endpointslice"
+	endpointsliceutil "k8s.io/endpointslice/util"
 )
 
 // slicesByAction includes lists of slices to create, update, or delete.
@@ -87,8 +87,7 @@ func (d *desiredCalc) initPorts(subsetPorts []v1.EndpointPort) multiAddrTypePort
 // addAddress adds an EndpointAddress to the desired state if it is valid. It
 // returns false if the address was invalid.
 func (d *desiredCalc) addAddress(address v1.EndpointAddress, multiKey multiAddrTypePortMapKey, ready bool) bool {
-	endpoint := addressToEndpoint(address, ready)
-	addrType := getAddressType(address.IP)
+	endpoint, addrType := addressToEndpoint(address, ready)
 	if addrType == nil {
 		return false
 	}

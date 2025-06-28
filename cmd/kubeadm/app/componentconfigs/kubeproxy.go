@@ -18,12 +18,14 @@ package componentconfigs
 
 import (
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/klog/v2"
 	kubeproxyconfig "k8s.io/kube-proxy/config/v1alpha1"
 	netutils "k8s.io/utils/net"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 const (
@@ -49,7 +51,14 @@ var kubeProxyHandler = handler{
 }
 
 func kubeProxyConfigFromCluster(h *handler, clientset clientset.Interface, _ *kubeadmapi.ClusterConfiguration) (kubeadmapi.ComponentConfig, error) {
-	return h.fromConfigMap(clientset, kubeadmconstants.KubeProxyConfigMap, kubeadmconstants.KubeProxyConfigMapKey, false)
+	configMapName := kubeadmconstants.KubeProxyConfigMap
+	klog.V(1).Infof("attempting to download the KubeProxyConfiguration from ConfigMap %q", configMapName)
+	cm, err := h.fromConfigMap(clientset, configMapName, kubeadmconstants.KubeProxyConfigMapKey, false)
+	if err != nil {
+		return nil, errors.Wrapf(err, "could not download the kube-proxy configuration from ConfigMap %q",
+			configMapName)
+	}
+	return cm, nil
 }
 
 // kubeProxyConfig implements the kubeadmapi.ComponentConfig interface for kube-proxy

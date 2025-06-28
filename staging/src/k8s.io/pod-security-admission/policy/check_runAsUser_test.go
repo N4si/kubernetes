@@ -25,11 +25,12 @@ import (
 
 func TestRunAsUser(t *testing.T) {
 	tests := []struct {
-		name         string
-		pod          *corev1.Pod
-		expectAllow  bool
-		expectReason string
-		expectDetail string
+		name           string
+		pod            *corev1.Pod
+		expectAllowed  bool
+		expectReason   string
+		expectDetail   string
+		relaxForUserNS bool
 	}{
 		{
 			name: "pod runAsUser=0",
@@ -50,7 +51,7 @@ func TestRunAsUser(t *testing.T) {
 					{Name: "a", SecurityContext: nil},
 				},
 			}},
-			expectAllow: true,
+			expectAllowed: true,
 		},
 		{
 			name: "pod runAsUser=nil",
@@ -60,7 +61,7 @@ func TestRunAsUser(t *testing.T) {
 					{Name: "a", SecurityContext: nil},
 				},
 			}},
-			expectAllow: true,
+			expectAllowed: true,
 		},
 		{
 			name: "containers runAsUser=0",
@@ -88,21 +89,43 @@ func TestRunAsUser(t *testing.T) {
 					{Name: "f", SecurityContext: &corev1.SecurityContext{RunAsUser: utilpointer.Int64(4)}},
 				},
 			}},
-			expectAllow: true,
+			expectAllowed: true,
+		},
+		{
+			name: "UserNamespacesPodSecurityStandards enabled without HostUsers",
+			pod: &corev1.Pod{Spec: corev1.PodSpec{
+				HostUsers: utilpointer.Bool(false),
+			}},
+			expectAllowed:  true,
+			relaxForUserNS: true,
+		},
+		{
+			name: "UserNamespacesPodSecurityStandards enabled with HostUsers",
+			pod: &corev1.Pod{Spec: corev1.PodSpec{
+				SecurityContext: &corev1.PodSecurityContext{RunAsUser: utilpointer.Int64(0)},
+				Containers: []corev1.Container{
+					{Name: "a", SecurityContext: nil},
+				},
+				HostUsers: utilpointer.Bool(true),
+			}},
+			expectAllowed:  false,
+			expectReason:   `runAsUser=0`,
+			expectDetail:   `pod must not set runAsUser=0`,
+			relaxForUserNS: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := runAsUser_1_23(&tc.pod.ObjectMeta, &tc.pod.Spec)
-			if tc.expectAllow {
-				if !result.Allowed {
-					t.Fatalf("expected to be allowed, disallowed: %s, %s", result.ForbiddenReason, result.ForbiddenDetail)
-				}
-				return
+			if tc.relaxForUserNS {
+				RelaxPolicyForUserNamespacePods(true)
+				t.Cleanup(func() {
+					RelaxPolicyForUserNamespacePods(false)
+				})
 			}
-			if result.Allowed {
-				t.Fatal("expected disallowed")
+			result := runAsUser_1_23(&tc.pod.ObjectMeta, &tc.pod.Spec)
+			if result.Allowed != tc.expectAllowed {
+				t.Fatalf("expected Allowed to be %v was %v", tc.expectAllowed, result.Allowed)
 			}
 			if e, a := tc.expectReason, result.ForbiddenReason; e != a {
 				t.Errorf("expected\n%s\ngot\n%s", e, a)

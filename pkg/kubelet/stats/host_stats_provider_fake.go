@@ -24,7 +24,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	statsapi "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
-	kubecontainertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
 	"k8s.io/kubernetes/pkg/kubelet/kuberuntime"
 	"k8s.io/kubernetes/pkg/volume"
 )
@@ -35,9 +34,9 @@ type fakeHostStatsProvider struct {
 }
 
 // NewFakeHostStatsProvider provides a way to test with fake host statistics
-func NewFakeHostStatsProvider() HostStatsProvider {
+func NewFakeHostStatsProvider(osInterface kubecontainer.OSInterface) HostStatsProvider {
 	return &fakeHostStatsProvider{
-		osInterface: &kubecontainertest.FakeOS{},
+		osInterface: osInterface,
 	}
 }
 
@@ -50,7 +49,7 @@ func NewFakeHostStatsProviderWithData(fakeStats map[string]*volume.Metrics, osIn
 }
 
 func (f *fakeHostStatsProvider) getPodLogStats(podNamespace, podName string, podUID types.UID, rootFsInfo *cadvisorapiv2.FsInfo) (*statsapi.FsStats, error) {
-	path := kuberuntime.BuildPodLogsDirectory(podNamespace, podName, podUID)
+	path := kuberuntime.BuildPodLogsDirectory("/var/log/kube/pods/", podNamespace, podName, podUID)
 	files, err := f.osInterface.ReadDir(path)
 	if err != nil {
 		return nil, err
@@ -68,7 +67,7 @@ func (f *fakeHostStatsProvider) getPodLogStats(podNamespace, podName string, pod
 }
 
 func (f *fakeHostStatsProvider) getPodContainerLogStats(podNamespace, podName string, podUID types.UID, containerName string, rootFsInfo *cadvisorapiv2.FsInfo) (*statsapi.FsStats, error) {
-	path := kuberuntime.BuildContainerLogsDirectory(podNamespace, podName, podUID, containerName)
+	path := kuberuntime.BuildContainerLogsDirectory("/var/log/kube/pods/", podNamespace, podName, podUID, containerName)
 	metricsProvider := NewFakeMetricsDu(path, f.fakeStats[path])
 	return fakeMetricsProvidersToStats([]volume.MetricsProvider{metricsProvider}, rootFsInfo)
 }

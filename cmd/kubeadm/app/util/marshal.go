@@ -21,8 +21,6 @@ import (
 	"bytes"
 	"io"
 
-	"github.com/pkg/errors"
-
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -33,6 +31,7 @@ import (
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 // MarshalToYaml marshals an object into yaml.
@@ -54,36 +53,24 @@ func MarshalToYamlForCodecs(obj runtime.Object, gv schema.GroupVersion, codecs s
 	return runtime.Encode(encoder, obj)
 }
 
-// UnmarshalFromYaml unmarshals yaml into an object.
-func UnmarshalFromYaml(buffer []byte, gv schema.GroupVersion) (runtime.Object, error) {
-	return UnmarshalFromYamlForCodecs(buffer, gv, clientsetscheme.Codecs)
-}
-
-// UnmarshalFromYamlForCodecs unmarshals yaml into an object using the specified codec
-// TODO: Is specifying the gv really needed here?
-// TODO: Can we support json out of the box easily here?
-func UnmarshalFromYamlForCodecs(buffer []byte, gv schema.GroupVersion, codecs serializer.CodecFactory) (runtime.Object, error) {
-	const mediaType = runtime.ContentTypeYAML
-	info, ok := runtime.SerializerInfoForMediaType(codecs.SupportedMediaTypes(), mediaType)
-	if !ok {
-		return nil, errors.Errorf("unsupported media type %q", mediaType)
-	}
-
-	decoder := codecs.DecoderToVersion(info.Serializer, gv)
-	obj, err := runtime.Decode(decoder, buffer)
+// UniversalUnmarshal unmarshals YAML or JSON into a runtime.Object using the universal deserializer.
+func UniversalUnmarshal(buffer []byte) (runtime.Object, error) {
+	codecs := clientsetscheme.Codecs
+	decoder := codecs.UniversalDeserializer()
+	obj, _, err := decoder.Decode(buffer, nil, nil)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to decode %s into runtime.Object", buffer)
 	}
 	return obj, nil
 }
 
-// SplitYAMLDocuments reads the YAML bytes per-document, unmarshals the TypeMeta information from each document
+// SplitConfigDocuments reads the YAML/JSON bytes per-document, unmarshals the TypeMeta information from each document
 // and returns a map between the GroupVersionKind of the document and the document bytes
-func SplitYAMLDocuments(yamlBytes []byte) (kubeadmapi.DocumentMap, error) {
+func SplitConfigDocuments(documentBytes []byte) (kubeadmapi.DocumentMap, error) {
 	gvkmap := kubeadmapi.DocumentMap{}
 	knownKinds := map[string]bool{}
 	errs := []error{}
-	buf := bytes.NewBuffer(yamlBytes)
+	buf := bytes.NewBuffer(documentBytes)
 	reader := utilyaml.NewYAMLReader(bufio.NewReader(buf))
 	for {
 		// Read one YAML document at a time, until io.EOF is returned
@@ -123,7 +110,7 @@ func SplitYAMLDocuments(yamlBytes []byte) (kubeadmapi.DocumentMap, error) {
 
 // GroupVersionKindsFromBytes parses the bytes and returns a gvk slice
 func GroupVersionKindsFromBytes(b []byte) ([]schema.GroupVersionKind, error) {
-	gvkmap, err := SplitYAMLDocuments(b)
+	gvkmap, err := SplitConfigDocuments(b)
 	if err != nil {
 		return nil, err
 	}
@@ -157,4 +144,14 @@ func GroupVersionKindsHasInitConfiguration(gvks ...schema.GroupVersionKind) bool
 // GroupVersionKindsHasJoinConfiguration returns whether the following gvk slice contains a JoinConfiguration object
 func GroupVersionKindsHasJoinConfiguration(gvks ...schema.GroupVersionKind) bool {
 	return GroupVersionKindsHasKind(gvks, constants.JoinConfigurationKind)
+}
+
+// GroupVersionKindsHasResetConfiguration returns whether the following gvk slice contains a ResetConfiguration object
+func GroupVersionKindsHasResetConfiguration(gvks ...schema.GroupVersionKind) bool {
+	return GroupVersionKindsHasKind(gvks, constants.ResetConfigurationKind)
+}
+
+// GroupVersionKindsHasUpgradeConfiguration returns whether the following gvk slice contains a UpgradeConfiguration object
+func GroupVersionKindsHasUpgradeConfiguration(gvks ...schema.GroupVersionKind) bool {
+	return GroupVersionKindsHasKind(gvks, constants.UpgradeConfigurationKind)
 }

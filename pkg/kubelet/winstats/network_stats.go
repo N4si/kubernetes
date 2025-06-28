@@ -40,14 +40,14 @@ const (
 
 // networkCounter contains the counters for network adapters.
 type networkCounter struct {
-	packetsReceivedPerSecondCounter *perfCounter
-	packetsSentPerSecondCounter     *perfCounter
-	bytesReceivedPerSecondCounter   *perfCounter
-	bytesSentPerSecondCounter       *perfCounter
-	packetsReceivedDiscardedCounter *perfCounter
-	packetsReceivedErrorsCounter    *perfCounter
-	packetsOutboundDiscardedCounter *perfCounter
-	packetsOutboundErrorsCounter    *perfCounter
+	packetsReceivedPerSecondCounter perfCounter
+	packetsSentPerSecondCounter     perfCounter
+	bytesReceivedPerSecondCounter   perfCounter
+	bytesSentPerSecondCounter       perfCounter
+	packetsReceivedDiscardedCounter perfCounter
+	packetsReceivedErrorsCounter    perfCounter
+	packetsOutboundDiscardedCounter perfCounter
+	packetsOutboundErrorsCounter    perfCounter
 
 	mu           sync.RWMutex
 	adapterStats map[string]cadvisorapi.InterfaceStats
@@ -180,7 +180,7 @@ func (n *networkCounter) mergeCollectedData(packetsReceivedPerSecondData,
 	packetsReceivedErrorsData,
 	packetsOutboundDiscardedData,
 	packetsOutboundErrorsData map[string]uint64) {
-	adapters := sets.NewString()
+	adapters := sets.New[string]()
 
 	// merge the collected data and list of adapters.
 	adapters.Insert(n.mergePacketsReceivedPerSecondData(packetsReceivedPerSecondData)...)

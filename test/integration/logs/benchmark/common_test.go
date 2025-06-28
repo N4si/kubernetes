@@ -18,52 +18,43 @@ package benchmark
 
 import (
 	"flag"
-	"io"
+	"os"
+	"testing"
 
-	"github.com/go-logr/logr"
-	"go.uber.org/zap/zapcore"
-
-	logsapi "k8s.io/component-base/logs/api/v1"
-	logsjson "k8s.io/component-base/logs/json"
 	"k8s.io/klog/v2"
 )
 
 func init() {
-	// Cause all klog output to be discarded with minimal overhead.
-	// We don't include time stamps and caller information.
-	// Individual tests can change that by calling flag.Set again,
-	// but should always restore this state here.
+	// hack/make-rules/test-integration.sh expects that all unit tests
+	// support -v and -vmodule.
 	klog.InitFlags(nil)
+
+	// Write all output into a single file.
 	flag.Set("alsologtostderr", "false")
 	flag.Set("logtostderr", "false")
-	flag.Set("skip_headers", "true")
 	flag.Set("one_output", "true")
 	flag.Set("stderrthreshold", "FATAL")
-	klog.SetOutput(&output)
 }
 
-type bytesWritten int64
+func newBytesWritten(tb testing.TB, filename string) *bytesWritten {
+	out, err := os.Create(filename)
+	if err != nil {
+		tb.Fatalf("open fake output: %v", err)
+	}
+	tb.Cleanup(func() { _ = out.Close() })
+	return &bytesWritten{
+		out: out,
+	}
+}
+
+type bytesWritten struct {
+	out          *os.File
+	bytesWritten int64
+}
 
 func (b *bytesWritten) Write(data []byte) (int, error) {
-	l := len(data)
-	*b += bytesWritten(l)
-	return l, nil
-}
-
-func (b *bytesWritten) Sync() error {
-	return nil
-}
-
-var output bytesWritten
-var jsonLogger = newJSONLogger(&output)
-
-func newJSONLogger(out io.Writer) logr.Logger {
-	encoderConfig := &zapcore.EncoderConfig{
-		MessageKey: "msg",
-	}
-	c := logsapi.NewLoggingConfiguration()
-	logger, _ := logsjson.NewJSONLogger(c.Verbosity, zapcore.AddSync(out), nil, encoderConfig)
-	return logger
+	b.bytesWritten += int64(len(data))
+	return b.out.Write(data)
 }
 
 func printf(item logMessage) {
@@ -74,17 +65,14 @@ func printf(item logMessage) {
 	}
 }
 
-// These variables are a workaround for logcheck complaining about the dynamic
-// parameters.
-var (
-	errorS = klog.ErrorS
-	infoS  = klog.InfoS
-)
-
-func prints(item logMessage) {
+func prints(logger klog.Logger, item logMessage) {
 	if item.isError {
-		errorS(item.err, item.msg, item.kvs...)
+		logger.Error(item.err, item.msg, item.kvs...) // nolint: logcheck
 	} else {
-		infoS(item.msg, item.kvs...)
+		logger.Info(item.msg, item.kvs...) // nolint: logcheck
 	}
+}
+
+func printLogger(item logMessage) {
+	prints(klog.Background(), item)
 }

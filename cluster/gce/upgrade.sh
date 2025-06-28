@@ -61,9 +61,9 @@ function usage() {
   local release_latest
   local ci_latest
 
-  release_stable=$(gsutil cat gs://kubernetes-release/release/stable.txt)
-  release_latest=$(gsutil cat gs://kubernetes-release/release/latest.txt)
-  ci_latest=$(gsutil cat gs://k8s-release-dev/ci/latest.txt)
+  release_stable=$(curl -sL https://dl.k8s.io/release/stable.txt)
+  release_latest=$(curl -sL https://dl.k8s.io/release/latest.txt)
+  ci_latest=$(curl -sL https://dl.k8s.io/ci/latest.txt)
 
   echo "Right now, versions are as follows:"
   echo "  release/stable: ${0} ${release_stable}"
@@ -258,6 +258,7 @@ function prepare-node-upgrade() {
   KUBE_PROXY_TOKEN=$(get-env-val "${node_env}" "KUBE_PROXY_TOKEN")
   export KUBE_PROXY_TOKEN
   NODE_PROBLEM_DETECTOR_TOKEN=$(get-env-val "${node_env}" "NODE_PROBLEM_DETECTOR_TOKEN")
+  export NODE_PROBLEM_DETECTOR_TOKEN
   CA_CERT_BASE64=$(get-env-val "${node_env}" "CA_CERT")
   export CA_CERT_BASE64
   EXTRA_DOCKER_OPTS=$(get-env-val "${node_env}" "EXTRA_DOCKER_OPTS")
@@ -402,17 +403,17 @@ function do-node-upgrade() {
     if [[ "${set_instance_template_rc}" != 0 ]]; then
       echo "== FAILED to set-instance-template for ${group} to ${template_name} =="
       echo "${set_instance_template_out}"
-      return ${set_instance_template_rc}
+      return "${set_instance_template_rc}"
     fi
     instances=()
     while IFS='' read -r line; do instances+=("$line"); done < <(gcloud compute instance-groups managed list-instances "${group}" \
-        --format='value(instance)' \
+        --format='value(name)' \
         --project="${PROJECT}" \
         --zone="${ZONE}" 2>&1) && list_instances_rc=$? || list_instances_rc=$?
     if [[ "${list_instances_rc}" != 0 ]]; then
       echo "== FAILED to list instances in group ${group} =="
       echo "${instances[@]}"
-      return ${list_instances_rc}
+      return "${list_instances_rc}"
     fi
 
     process_count_left=${node_upgrade_parallelism}

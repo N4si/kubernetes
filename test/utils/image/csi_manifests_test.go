@@ -48,7 +48,6 @@ func TestCSIImageConfigs(t *testing.T) {
 		"gcp-compute-persistent-disk-csi-driver",
 
 		// For some hostpath tests.
-		"socat",
 		"busybox",
 
 		// For AnyVolumeDataSource feature tests.
@@ -62,5 +61,5 @@ func TestCSIImageConfigs(t *testing.T) {
 		assert.NotEmpty(t, config.version, "version")
 		actualImages.Insert(config.name)
 	}
-	assert.ElementsMatch(t, expectedImages, actualImages.UnsortedList(), "found these images: %+v", configs)
+	assert.ElementsMatchf(t, expectedImages, actualImages.UnsortedList(), "found these images: %+v", configs)
 }

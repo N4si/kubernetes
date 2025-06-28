@@ -156,6 +156,9 @@ func testWebhookConverter(t *testing.T, watchCache bool) {
 		},
 	}
 
+	// KUBE_APISERVER_SERVE_REMOVED_APIS_FOR_ONE_RELEASE allows for APIs pending removal to not block tests
+	t.Setenv("KUBE_APISERVER_SERVE_REMOVED_APIS_FOR_ONE_RELEASE", "true")
+
 	// TODO: Added for integration testing of conversion webhooks, where decode errors due to conversion webhook failures need to be tested.
 	// Maybe we should identify conversion webhook related errors in decoding to avoid triggering this? Or maybe having this special casing
 	// of test cases in production code should be removed?
@@ -182,11 +185,8 @@ func testWebhookConverter(t *testing.T, watchCache bool) {
 
 	crd := multiVersionFixture.DeepCopy()
 
-	RESTOptionsGetter, err := serveroptions.NewCRDRESTOptionsGetter(*options.RecommendedOptions.Etcd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	restOptions, err := RESTOptionsGetter.GetRESTOptions(schema.GroupResource{Group: crd.Spec.Group, Resource: crd.Spec.Names.Plural})
+	RESTOptionsGetter := serveroptions.NewCRDRESTOptionsGetter(*options.RecommendedOptions.Etcd, nil, nil)
+	restOptions, err := RESTOptionsGetter.GetRESTOptions(schema.GroupResource{Group: crd.Spec.Group, Resource: crd.Spec.Names.Plural}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,13 +219,13 @@ func testWebhookConverter(t *testing.T, watchCache bool) {
 			defer ctc.removeConversionWebhook(t)
 
 			// wait until new webhook is called the first time
-			if err := wait.PollImmediate(time.Millisecond*100, wait.ForeverTestTimeout, func() (bool, error) {
-				_, err := ctc.versionedClient(marker.GetNamespace(), "v1alpha1").Get(context.TODO(), marker.GetName(), metav1.GetOptions{})
+			if err := wait.PollUntilContextTimeout(context.Background(), time.Millisecond*100, wait.ForeverTestTimeout, true, func(ctx context.Context) (done bool, err error) {
+				_, getErr := ctc.versionedClient(marker.GetNamespace(), "v1alpha1").Get(ctx, marker.GetName(), metav1.GetOptions{})
 				select {
 				case <-upCh:
 					return true, nil
 				default:
-					t.Logf("Waiting for webhook to become effective, getting marker object: %v", err)
+					t.Logf("Waiting for webhook to become effective, getting marker object: %v", getErr)
 					return false, nil
 				}
 			}); err != nil {

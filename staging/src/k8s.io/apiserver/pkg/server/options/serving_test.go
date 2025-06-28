@@ -18,6 +18,7 @@ package options
 
 import (
 	"bytes"
+	"context"
 	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -25,8 +26,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"math/big"
 	"net"
 	"os"
@@ -44,6 +45,9 @@ import (
 	"k8s.io/client-go/discovery"
 	restclient "k8s.io/client-go/rest"
 	cliflag "k8s.io/component-base/cli/flag"
+	basecompatibility "k8s.io/component-base/compatibility"
+	baseversion "k8s.io/component-base/version"
+	"k8s.io/klog/v2/ktesting"
 	netutils "k8s.io/utils/net"
 )
 
@@ -215,6 +219,10 @@ func TestServerRunWithSNI(t *testing.T) {
 		test := tests[title]
 		t.Run(title, func(t *testing.T) {
 			t.Parallel()
+			_, ctx := ktesting.NewTestContext(t)
+			ctx, cancel := context.WithCancelCause(ctx)
+			defer cancel(errors.New("test has completed"))
+
 			// create server cert
 			certDir := "testdata/" + specToName(test.Cert)
 			serverCertBundleFile := filepath.Join(certDir, "cert")
@@ -267,15 +275,10 @@ func TestServerRunWithSNI(t *testing.T) {
 				signatures[sig] = j
 			}
 
-			stopCh := make(chan struct{})
-			defer close(stopCh)
-
 			// launch server
 			config := setUp(t)
-
-			v := fakeVersion()
-			config.Version = &v
-
+			info := fakeVersionInfo()
+			config.EffectiveVersion = basecompatibility.NewEffectiveVersionFromString(fmt.Sprintf("%s.%s", info.Major, info.Minor), "", "")
 			config.EnableIndex = true
 			secureOptions := (&SecureServingOptions{
 				BindAddress: netutils.ParseIPSloppy("127.0.0.1"),
@@ -286,7 +289,8 @@ func TestServerRunWithSNI(t *testing.T) {
 						KeyFile:  serverKeyFile,
 					},
 				},
-				SNICertKeys: namedCertKeys,
+				DisableHTTP2Serving: true,
+				SNICertKeys:         namedCertKeys,
 			}).WithLoopback()
 			// use a random free port
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -316,7 +320,7 @@ func TestServerRunWithSNI(t *testing.T) {
 			preparedServer := s.PrepareRun()
 			preparedServerErrors := make(chan error)
 			go func() {
-				if err := preparedServer.Run(stopCh); err != nil {
+				if err := preparedServer.RunWithContext(ctx); err != nil {
 					preparedServerErrors <- err
 				}
 			}()
@@ -366,8 +370,8 @@ func TestServerRunWithSNI(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to connect with loopback client: %v", err)
 			}
-			if expected := &v; !reflect.DeepEqual(got, expected) {
-				t.Errorf("loopback client didn't get correct version info: expected=%v got=%v", expected, got)
+			if expected := &info; !reflect.DeepEqual(got, expected) {
+				t.Errorf("loopback client didn't get correct version info: expected=%v got=%v", *expected, *got)
 			}
 
 			select {
@@ -400,13 +404,13 @@ func getOrCreateTestCertFiles(certFileName, keyFileName string, spec TestCertSpe
 	}
 
 	os.MkdirAll(filepath.Dir(certFileName), os.FileMode(0755))
-	err = ioutil.WriteFile(certFileName, certPem, os.FileMode(0755))
+	err = os.WriteFile(certFileName, certPem, os.FileMode(0755))
 	if err != nil {
 		return err
 	}
 
 	os.MkdirAll(filepath.Dir(keyFileName), os.FileMode(0755))
-	err = ioutil.WriteFile(keyFileName, keyPem, os.FileMode(0755))
+	err = os.WriteFile(keyFileName, keyPem, os.FileMode(0755))
 	if err != nil {
 		return err
 	}
@@ -415,7 +419,7 @@ func getOrCreateTestCertFiles(certFileName, keyFileName string, spec TestCertSpe
 }
 
 func caCertFromBundle(bundlePath string) (*x509.Certificate, error) {
-	pemData, err := ioutil.ReadFile(bundlePath)
+	pemData, err := os.ReadFile(bundlePath)
 	if err != nil {
 		return nil, err
 	}
@@ -456,14 +460,15 @@ func certSignature(cert tls.Certificate) (string, error) {
 	return x509CertSignature(x509Certs[0]), nil
 }
 
-func fakeVersion() version.Info {
-	return version.Info{
-		Major:        "42",
-		Minor:        "42",
-		GitVersion:   "42",
-		GitCommit:    "34973274ccef6ab4dfaaf86599792fa9c3fe4689",
-		GitTreeState: "Dirty",
-	}
+func fakeVersionInfo() version.Info {
+	baseVer := baseversion.Get()
+	baseVer.Major = "42"
+	baseVer.Minor = "42"
+	baseVer.EmulationMajor = "42"
+	baseVer.EmulationMinor = "42"
+	baseVer.MinCompatibilityMajor = "42"
+	baseVer.MinCompatibilityMinor = "41"
+	return baseVer
 }
 
 // generateSelfSignedCertKey creates a self-signed certificate and key for the given host.

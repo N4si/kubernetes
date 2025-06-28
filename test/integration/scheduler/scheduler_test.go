@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,7 +40,7 @@ import (
 	configtesting "k8s.io/kubernetes/pkg/scheduler/apis/config/testing"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
 	testutils "k8s.io/kubernetes/test/integration/util"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 type nodeMutationFunc func(t *testing.T, n *v1.Node, nodeLister corelisters.NodeLister, c clientset.Interface)
@@ -50,8 +51,7 @@ type nodeStateManager struct {
 }
 
 func TestUnschedulableNodes(t *testing.T) {
-	testCtx := initTest(t, "unschedulable-nodes")
-	defer testutils.CleanupTest(t, testCtx)
+	testCtx := testutils.InitTestSchedulerWithNS(t, "unschedulable-nodes")
 
 	nodeLister := testCtx.InformerFactory.Core().V1().Nodes().Lister()
 	// NOTE: This test cannot run in parallel, because it is creating and deleting
@@ -98,12 +98,12 @@ func TestUnschedulableNodes(t *testing.T) {
 				if _, err := c.CoreV1().Nodes().Update(context.TODO(), n, metav1.UpdateOptions{}); err != nil {
 					t.Fatalf("Failed to update node with unschedulable=true: %v", err)
 				}
-				err = waitForReflection(t, nodeLister, nodeKey, func(node interface{}) bool {
+				err = testutils.WaitForReflection(testCtx.Ctx, t, nodeLister, nodeKey, func(node interface{}) bool {
 					// An unschedulable node should still be present in the store
 					// Nodes that are unschedulable or that are not ready or
 					// have their disk full (Node.Spec.Conditions) are excluded
 					// based on NodeConditionPredicate, a separate check
-					return node != nil && node.(*v1.Node).Spec.Unschedulable == true
+					return node != nil && node.(*v1.Node).Spec.Unschedulable
 				})
 				if err != nil {
 					t.Fatalf("Failed to observe reflected update for setting unschedulable=true: %v", err)
@@ -114,7 +114,7 @@ func TestUnschedulableNodes(t *testing.T) {
 				if _, err := c.CoreV1().Nodes().Update(context.TODO(), n, metav1.UpdateOptions{}); err != nil {
 					t.Fatalf("Failed to update node with unschedulable=false: %v", err)
 				}
-				err = waitForReflection(t, nodeLister, nodeKey, func(node interface{}) bool {
+				err = testutils.WaitForReflection(testCtx.Ctx, t, nodeLister, nodeKey, func(node interface{}) bool {
 					return node != nil && node.(*v1.Node).Spec.Unschedulable == false
 				})
 				if err != nil {
@@ -125,7 +125,7 @@ func TestUnschedulableNodes(t *testing.T) {
 	}
 
 	for i, mod := range nodeModifications {
-		unSchedNode, err := createNode(testCtx.ClientSet, node)
+		unSchedNode, err := testutils.CreateNode(testCtx.ClientSet, node)
 		if err != nil {
 			t.Fatalf("Failed to create node: %v", err)
 		}
@@ -135,17 +135,17 @@ func TestUnschedulableNodes(t *testing.T) {
 
 		// Create the new pod, note that this needs to happen post unschedulable
 		// modification or we have a race in the test.
-		myPod, err := createPausePodWithResource(testCtx.ClientSet, "node-scheduling-test-pod", testCtx.NS.Name, nil)
+		myPod, err := testutils.CreatePausePodWithResource(testCtx.ClientSet, "node-scheduling-test-pod", testCtx.NS.Name, nil)
 		if err != nil {
 			t.Fatalf("Failed to create pod: %v", err)
 		}
 
 		// There are no schedulable nodes - the pod shouldn't be scheduled.
-		err = testutils.WaitForPodToScheduleWithTimeout(testCtx.ClientSet, myPod, 2*time.Second)
+		err = testutils.WaitForPodToScheduleWithTimeout(testCtx.Ctx, testCtx.ClientSet, myPod, 2*time.Second)
 		if err == nil {
 			t.Errorf("Test %d: Pod scheduled successfully on unschedulable nodes", i)
 		}
-		if err != wait.ErrWaitTimeout {
+		if !wait.Interrupted(err) {
 			t.Errorf("Test %d: failed while trying to confirm the pod does not get scheduled on the node: %v", i, err)
 		} else {
 			t.Logf("Test %d: Pod did not get scheduled on an unschedulable node", i)
@@ -159,13 +159,13 @@ func TestUnschedulableNodes(t *testing.T) {
 		mod.makeSchedulable(t, schedNode, nodeLister, testCtx.ClientSet)
 
 		// Wait until the pod is scheduled.
-		if err := testutils.WaitForPodToSchedule(testCtx.ClientSet, myPod); err != nil {
+		if err := testutils.WaitForPodToSchedule(testCtx.Ctx, testCtx.ClientSet, myPod); err != nil {
 			t.Errorf("Test %d: failed to schedule a pod: %v", i, err)
 		} else {
 			t.Logf("Test %d: Pod got scheduled on a schedulable node", i)
 		}
 		// Clean up.
-		if err := deletePod(testCtx.ClientSet, myPod.Name, myPod.Namespace); err != nil {
+		if err := testutils.DeletePod(testCtx.ClientSet, myPod.Name, myPod.Namespace); err != nil {
 			t.Errorf("Failed to delete pod: %v", err)
 		}
 		err = testCtx.ClientSet.CoreV1().Nodes().Delete(context.TODO(), schedNode.Name, metav1.DeleteOptions{})
@@ -190,8 +190,7 @@ func TestMultipleSchedulers(t *testing.T) {
 	//     - testPodWithAnnotationFitsFoo should be scheduled
 
 	// 1. create and start default-scheduler
-	testCtx := initTest(t, "multi-scheduler")
-	defer testutils.CleanupTest(t, testCtx)
+	testCtx := testutils.InitTestSchedulerWithNS(t, "multi-scheduler")
 
 	// 2. create a node
 	node := &v1.Node{
@@ -203,23 +202,23 @@ func TestMultipleSchedulers(t *testing.T) {
 			},
 		},
 	}
-	createNode(testCtx.ClientSet, node)
+	testutils.CreateNode(testCtx.ClientSet, node)
 
 	// 3. create 3 pods for testing
 	t.Logf("create 3 pods for testing")
-	testPod, err := createPausePodWithResource(testCtx.ClientSet, "pod-without-scheduler-name", testCtx.NS.Name, nil)
+	testPod, err := testutils.CreatePausePodWithResource(testCtx.ClientSet, "pod-without-scheduler-name", testCtx.NS.Name, nil)
 	if err != nil {
 		t.Fatalf("Failed to create pod: %v", err)
 	}
 
 	defaultScheduler := "default-scheduler"
-	testPodFitsDefault, err := createPausePod(testCtx.ClientSet, initPausePod(&testutils.PausePodConfig{Name: "pod-fits-default", Namespace: testCtx.NS.Name, SchedulerName: defaultScheduler}))
+	testPodFitsDefault, err := testutils.CreatePausePod(testCtx.ClientSet, testutils.InitPausePod(&testutils.PausePodConfig{Name: "pod-fits-default", Namespace: testCtx.NS.Name, SchedulerName: defaultScheduler}))
 	if err != nil {
 		t.Fatalf("Failed to create pod: %v", err)
 	}
 
 	fooScheduler := "foo-scheduler"
-	testPodFitsFoo, err := createPausePod(testCtx.ClientSet, initPausePod(&testutils.PausePodConfig{Name: "pod-fits-foo", Namespace: testCtx.NS.Name, SchedulerName: fooScheduler}))
+	testPodFitsFoo, err := testutils.CreatePausePod(testCtx.ClientSet, testutils.InitPausePod(&testutils.PausePodConfig{Name: "pod-fits-foo", Namespace: testCtx.NS.Name, SchedulerName: fooScheduler}))
 	if err != nil {
 		t.Fatalf("Failed to create pod: %v", err)
 	}
@@ -228,19 +227,19 @@ func TestMultipleSchedulers(t *testing.T) {
 	//		- testPod, testPodFitsDefault should be scheduled
 	//		- testPodFitsFoo should NOT be scheduled
 	t.Logf("wait for pods scheduled")
-	if err := testutils.WaitForPodToSchedule(testCtx.ClientSet, testPod); err != nil {
+	if err := testutils.WaitForPodToSchedule(testCtx.Ctx, testCtx.ClientSet, testPod); err != nil {
 		t.Errorf("Test MultiScheduler: %s Pod not scheduled: %v", testPod.Name, err)
 	} else {
 		t.Logf("Test MultiScheduler: %s Pod scheduled", testPod.Name)
 	}
 
-	if err := testutils.WaitForPodToSchedule(testCtx.ClientSet, testPodFitsDefault); err != nil {
+	if err := testutils.WaitForPodToSchedule(testCtx.Ctx, testCtx.ClientSet, testPodFitsDefault); err != nil {
 		t.Errorf("Test MultiScheduler: %s Pod not scheduled: %v", testPodFitsDefault.Name, err)
 	} else {
 		t.Logf("Test MultiScheduler: %s Pod scheduled", testPodFitsDefault.Name)
 	}
 
-	if err := testutils.WaitForPodToScheduleWithTimeout(testCtx.ClientSet, testPodFitsFoo, time.Second*5); err == nil {
+	if err := testutils.WaitForPodToScheduleWithTimeout(testCtx.Ctx, testCtx.ClientSet, testPodFitsFoo, time.Second*5); err == nil {
 		t.Errorf("Test MultiScheduler: %s Pod got scheduled, %v", testPodFitsFoo.Name, err)
 	} else {
 		t.Logf("Test MultiScheduler: %s Pod not scheduled", testPodFitsFoo.Name)
@@ -249,13 +248,13 @@ func TestMultipleSchedulers(t *testing.T) {
 	// 5. create and start a scheduler with name "foo-scheduler"
 	cfg := configtesting.V1ToInternalWithDefaults(t, configv1.KubeSchedulerConfiguration{
 		Profiles: []configv1.KubeSchedulerProfile{{
-			SchedulerName: pointer.String(fooScheduler),
+			SchedulerName: ptr.To(fooScheduler),
 			PluginConfig: []configv1.PluginConfig{
 				{
 					Name: "VolumeBinding",
 					Args: runtime.RawExtension{
 						Object: &configv1.VolumeBindingArgs{
-							BindTimeoutSeconds: pointer.Int64(30),
+							BindTimeoutSeconds: ptr.To[int64](30),
 						},
 					},
 				},
@@ -263,12 +262,12 @@ func TestMultipleSchedulers(t *testing.T) {
 		},
 	})
 	testCtx = testutils.InitTestSchedulerWithOptions(t, testCtx, 0, scheduler.WithProfiles(cfg.Profiles...))
-	testutils.SyncInformerFactory(testCtx)
+	testutils.SyncSchedulerInformerFactory(testCtx)
 	go testCtx.Scheduler.Run(testCtx.Ctx)
 
 	//	6. **check point-2**:
 	//		- testPodWithAnnotationFitsFoo should be scheduled
-	err = testutils.WaitForPodToSchedule(testCtx.ClientSet, testPodFitsFoo)
+	err = testutils.WaitForPodToSchedule(testCtx.Ctx, testCtx.ClientSet, testPodFitsFoo)
 	if err != nil {
 		t.Errorf("Test MultiScheduler: %s Pod not scheduled, %v", testPodFitsFoo.Name, err)
 	} else {
@@ -279,13 +278,12 @@ func TestMultipleSchedulers(t *testing.T) {
 func TestMultipleSchedulingProfiles(t *testing.T) {
 	cfg := configtesting.V1ToInternalWithDefaults(t, configv1.KubeSchedulerConfiguration{
 		Profiles: []configv1.KubeSchedulerProfile{
-			{SchedulerName: pointer.String("default-scheduler")},
-			{SchedulerName: pointer.String("custom-scheduler")},
+			{SchedulerName: ptr.To("default-scheduler")},
+			{SchedulerName: ptr.To("custom-scheduler")},
 		},
 	})
 
-	testCtx := initTest(t, "multi-scheduler", scheduler.WithProfiles(cfg.Profiles...))
-	defer testutils.CleanupTest(t, testCtx)
+	testCtx := testutils.InitTestSchedulerWithNS(t, "multi-scheduler", scheduler.WithProfiles(cfg.Profiles...))
 
 	node := &v1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-multi-scheduler-test-node"},
@@ -296,7 +294,7 @@ func TestMultipleSchedulingProfiles(t *testing.T) {
 			},
 		},
 	}
-	if _, err := createNode(testCtx.ClientSet, node); err != nil {
+	if _, err := testutils.CreateNode(testCtx.ClientSet, node); err != nil {
 		t.Fatal(err)
 	}
 
@@ -312,7 +310,7 @@ func TestMultipleSchedulingProfiles(t *testing.T) {
 		{Name: "baz", Namespace: testCtx.NS.Name, SchedulerName: "default-scheduler"},
 		{Name: "zet", Namespace: testCtx.NS.Name, SchedulerName: "custom-scheduler"},
 	} {
-		if _, err := createPausePod(testCtx.ClientSet, initPausePod(pc)); err != nil {
+		if _, err := testutils.CreatePausePod(testCtx.ClientSet, testutils.InitPausePod(pc)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -324,7 +322,7 @@ func TestMultipleSchedulingProfiles(t *testing.T) {
 	}
 
 	gotProfiles := make(map[string]string)
-	if err := wait.Poll(100*time.Millisecond, 30*time.Second, func() (bool, error) {
+	if err := wait.PollUntilContextTimeout(testCtx.Ctx, 100*time.Millisecond, 30*time.Second, false, func(ctx context.Context) (bool, error) {
 		var ev watch.Event
 		select {
 		case ev = <-evs.ResultChan():
@@ -348,8 +346,7 @@ func TestMultipleSchedulingProfiles(t *testing.T) {
 
 // This test will verify scheduler can work well regardless of whether kubelet is allocatable aware or not.
 func TestAllocatable(t *testing.T) {
-	testCtx := initTest(t, "allocatable")
-	defer testutils.CleanupTest(t, testCtx)
+	testCtx := testutils.InitTestSchedulerWithNS(t, "allocatable")
 
 	// 2. create a node without allocatable awareness
 	nodeRes := map[v1.ResourceName]string{
@@ -357,7 +354,7 @@ func TestAllocatable(t *testing.T) {
 		v1.ResourceCPU:    "30m",
 		v1.ResourceMemory: "30",
 	}
-	allocNode, err := createNode(testCtx.ClientSet, st.MakeNode().Name("node-allocatable-scheduler-test-node").Capacity(nodeRes).Obj())
+	allocNode, err := testutils.CreateNode(testCtx.ClientSet, st.MakeNode().Name("node-allocatable-scheduler-test-node").Capacity(nodeRes).Obj())
 	if err != nil {
 		t.Fatalf("Failed to create node: %v", err)
 	}
@@ -368,13 +365,13 @@ func TestAllocatable(t *testing.T) {
 		v1.ResourceCPU:    *resource.NewMilliQuantity(20, resource.DecimalSI),
 		v1.ResourceMemory: *resource.NewQuantity(20, resource.BinarySI),
 	}
-	testAllocPod, err := createPausePodWithResource(testCtx.ClientSet, podName, testCtx.NS.Name, podRes)
+	testAllocPod, err := testutils.CreatePausePodWithResource(testCtx.ClientSet, podName, testCtx.NS.Name, podRes)
 	if err != nil {
 		t.Fatalf("Test allocatable unawareness failed to create pod: %v", err)
 	}
 
 	// 4. Test: this test pod should be scheduled since api-server will use Capacity as Allocatable
-	err = testutils.WaitForPodToScheduleWithTimeout(testCtx.ClientSet, testAllocPod, time.Second*5)
+	err = testutils.WaitForPodToScheduleWithTimeout(testCtx.Ctx, testCtx.ClientSet, testAllocPod, time.Second*5)
 	if err != nil {
 		t.Errorf("Test allocatable unawareness: %s Pod not scheduled: %v", testAllocPod.Name, err)
 	} else {
@@ -399,19 +396,19 @@ func TestAllocatable(t *testing.T) {
 		t.Fatalf("Failed to update node with Status.Allocatable: %v", err)
 	}
 
-	if err := deletePod(testCtx.ClientSet, testAllocPod.Name, testCtx.NS.Name); err != nil {
+	if err := testutils.DeletePod(testCtx.ClientSet, testAllocPod.Name, testCtx.NS.Name); err != nil {
 		t.Fatalf("Failed to remove the first pod: %v", err)
 	}
 
 	// 6. Make another pod with different name, same resource request
 	podName2 := "pod-test-allocatable2"
-	testAllocPod2, err := createPausePodWithResource(testCtx.ClientSet, podName2, testCtx.NS.Name, podRes)
+	testAllocPod2, err := testutils.CreatePausePodWithResource(testCtx.ClientSet, podName2, testCtx.NS.Name, podRes)
 	if err != nil {
 		t.Fatalf("Test allocatable awareness failed to create pod: %v", err)
 	}
 
 	// 7. Test: this test pod should not be scheduled since it request more than Allocatable
-	if err := testutils.WaitForPodToScheduleWithTimeout(testCtx.ClientSet, testAllocPod2, time.Second*5); err == nil {
+	if err := testutils.WaitForPodToScheduleWithTimeout(testCtx.Ctx, testCtx.ClientSet, testAllocPod2, time.Second*5); err == nil {
 		t.Errorf("Test allocatable awareness: %s Pod got scheduled unexpectedly, %v", testAllocPod2.Name, err)
 	} else {
 		t.Logf("Test allocatable awareness: %s Pod not scheduled as expected", testAllocPod2.Name)
@@ -422,8 +419,7 @@ func TestAllocatable(t *testing.T) {
 // pods are scheduled by other schedulers.
 func TestSchedulerInformers(t *testing.T) {
 	// Initialize scheduler.
-	testCtx := initTest(t, "scheduler-informer")
-	defer testutils.CleanupTest(t, testCtx)
+	testCtx := testutils.InitTestSchedulerWithNS(t, "scheduler-informer")
 	cs := testCtx.ClientSet
 
 	defaultPodRes := &v1.ResourceRequirements{Requests: v1.ResourceList{
@@ -452,7 +448,7 @@ func TestSchedulerInformers(t *testing.T) {
 			name:  "Pod cannot be scheduled when node is occupied by pods scheduled by other schedulers",
 			nodes: []*nodeConfig{{name: "node-1", res: defaultNodeRes}},
 			existingPods: []*v1.Pod{
-				initPausePod(&testutils.PausePodConfig{
+				testutils.InitPausePod(&testutils.PausePodConfig{
 					Name:          "pod1",
 					Namespace:     testCtx.NS.Name,
 					Resources:     defaultPodRes,
@@ -460,7 +456,7 @@ func TestSchedulerInformers(t *testing.T) {
 					NodeName:      "node-1",
 					SchedulerName: "foo-scheduler",
 				}),
-				initPausePod(&testutils.PausePodConfig{
+				testutils.InitPausePod(&testutils.PausePodConfig{
 					Name:          "pod2",
 					Namespace:     testCtx.NS.Name,
 					Resources:     defaultPodRes,
@@ -469,25 +465,52 @@ func TestSchedulerInformers(t *testing.T) {
 					SchedulerName: "bar-scheduler",
 				}),
 			},
-			pod: initPausePod(&testutils.PausePodConfig{
+			pod: testutils.InitPausePod(&testutils.PausePodConfig{
 				Name:      "unschedulable-pod",
 				Namespace: testCtx.NS.Name,
 				Resources: defaultPodRes,
 			}),
 			preemptedPodIndexes: map[int]struct{}{2: {}},
 		},
+		{
+			name:         "The pod cannot be scheduled when nodeAffinity specifies a non-existent node.",
+			nodes:        []*nodeConfig{{name: "node-1", res: defaultNodeRes}},
+			existingPods: []*v1.Pod{},
+			pod: testutils.InitPausePod(&testutils.PausePodConfig{
+				Name:      "unschedulable-pod",
+				Namespace: testCtx.NS.Name,
+				Affinity: &v1.Affinity{
+					NodeAffinity: &v1.NodeAffinity{
+						RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
+							NodeSelectorTerms: []v1.NodeSelectorTerm{
+								{
+									MatchFields: []v1.NodeSelectorRequirement{
+										{
+											Key:      "metadata.name",
+											Operator: v1.NodeSelectorOpIn,
+											Values:   []string{"invalid-node"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				Resources: defaultPodRes,
+			}),
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			for _, nodeConf := range test.nodes {
-				_, err := createNode(cs, st.MakeNode().Name(nodeConf.name).Capacity(nodeConf.res).Obj())
+				_, err := testutils.CreateNode(cs, st.MakeNode().Name(nodeConf.name).Capacity(nodeConf.res).Obj())
 				if err != nil {
 					t.Fatalf("Error creating node %v: %v", nodeConf.name, err)
 				}
 			}
 			// Ensure nodes are present in scheduler cache.
-			if err := waitForNodesInCache(testCtx.Scheduler, len(test.nodes)); err != nil {
+			if err := testutils.WaitForNodesInCache(testCtx.Ctx, testCtx.Scheduler, len(test.nodes)); err != nil {
 				t.Fatal(err)
 			}
 
@@ -495,24 +518,28 @@ func TestSchedulerInformers(t *testing.T) {
 			var err error
 			// Create and run existingPods.
 			for i, p := range test.existingPods {
-				if pods[i], err = runPausePod(cs, p); err != nil {
+				if pods[i], err = testutils.RunPausePod(cs, p); err != nil {
 					t.Fatalf("Error running pause pod: %v", err)
 				}
 			}
 			// Create the new "pod".
-			unschedulable, err := createPausePod(cs, test.pod)
+			unschedulable, err := testutils.CreatePausePod(cs, test.pod)
 			if err != nil {
 				t.Errorf("Error while creating new pod: %v", err)
 			}
-			if err := waitForPodUnschedulable(cs, unschedulable); err != nil {
+			if err := testutils.WaitForPodUnschedulable(testCtx.Ctx, cs, unschedulable); err != nil {
 				t.Errorf("Pod %v got scheduled: %v", unschedulable.Name, err)
 			}
 
 			// Cleanup
 			pods = append(pods, unschedulable)
-			testutils.CleanupPods(cs, t, pods)
-			cs.PolicyV1().PodDisruptionBudgets(testCtx.NS.Name).DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{})
-			cs.CoreV1().Nodes().DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{})
+			testutils.CleanupPods(testCtx.Ctx, cs, t, pods)
+			if err := cs.PolicyV1().PodDisruptionBudgets(testCtx.NS.Name).DeleteCollection(testCtx.Ctx, metav1.DeleteOptions{}, metav1.ListOptions{}); err != nil {
+				t.Errorf("error whiling deleting PDBs, error: %v", err)
+			}
+			if err := cs.CoreV1().Nodes().DeleteCollection(testCtx.Ctx, metav1.DeleteOptions{}, metav1.ListOptions{}); err != nil {
+				t.Errorf("error whiling deleting nodes, error: %v", err)
+			}
 		})
 	}
 }
@@ -525,12 +552,10 @@ func TestNodeEvents(t *testing.T) {
 	// 3. Create node2 with a taint, pod2 should still not schedule
 	// 4. Remove the taint from node2; pod2 should now schedule on node2
 
-	testCtx := initTest(t, "node-events")
-	defer testutils.CleanupTest(t, testCtx)
-	defer testCtx.ClientSet.CoreV1().Nodes().DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{})
+	testCtx := testutils.InitTestSchedulerWithNS(t, "node-events")
 
 	// 1.1 create pod1
-	pod1, err := createPausePodWithResource(testCtx.ClientSet, "pod1", testCtx.NS.Name, &v1.ResourceList{
+	pod1, err := testutils.CreatePausePodWithResource(testCtx.ClientSet, "pod1", testCtx.NS.Name, &v1.ResourceList{
 		v1.ResourceCPU: *resource.NewMilliQuantity(80, resource.DecimalSI),
 	})
 	if err != nil {
@@ -538,7 +563,7 @@ func TestNodeEvents(t *testing.T) {
 	}
 
 	// 1.2 Create node1
-	node1, err := createNode(testCtx.ClientSet, st.MakeNode().
+	node1, err := testutils.CreateNode(testCtx.ClientSet, st.MakeNode().
 		Name("node-events-test-node1").
 		Capacity(map[v1.ResourceName]string{
 			v1.ResourcePods:   "32",
@@ -550,20 +575,20 @@ func TestNodeEvents(t *testing.T) {
 	}
 
 	// 1.3 verify pod1 is scheduled
-	err = testutils.WaitForPodToScheduleWithTimeout(testCtx.ClientSet, pod1, time.Second*5)
+	err = testutils.WaitForPodToScheduleWithTimeout(testCtx.Ctx, testCtx.ClientSet, pod1, time.Second*5)
 	if err != nil {
 		t.Errorf("Pod %s didn't schedule: %v", pod1.Name, err)
 	}
 
 	// 2. create pod2
-	pod2, err := createPausePodWithResource(testCtx.ClientSet, "pod2", testCtx.NS.Name, &v1.ResourceList{
+	pod2, err := testutils.CreatePausePodWithResource(testCtx.ClientSet, "pod2", testCtx.NS.Name, &v1.ResourceList{
 		v1.ResourceCPU: *resource.NewMilliQuantity(40, resource.DecimalSI),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create pod %v: %v", pod2.Name, err)
 	}
 
-	if err := waitForPodUnschedulable(testCtx.ClientSet, pod2); err != nil {
+	if err := testutils.WaitForPodUnschedulable(testCtx.Ctx, testCtx.ClientSet, pod2); err != nil {
 		t.Errorf("Pod %v got scheduled: %v", pod2.Name, err)
 	}
 
@@ -577,39 +602,425 @@ func TestNodeEvents(t *testing.T) {
 		}).
 		Label("affinity-key", "affinity-value").
 		Taints([]v1.Taint{{Key: "taint-key", Effect: v1.TaintEffectNoSchedule}}).Obj()
-	node2, err = createNode(testCtx.ClientSet, node2)
+	node2, err = testutils.CreateNode(testCtx.ClientSet, node2)
 	if err != nil {
 		t.Fatalf("Failed to create %s: %v", node2.Name, err)
 	}
 	// make sure the scheduler received the node add event by creating a pod that only fits node2
 	plugPod := st.MakePod().Name("plug-pod").Namespace(testCtx.NS.Name).Container("pause").
 		Req(map[v1.ResourceName]string{v1.ResourceCPU: "40m"}).
-		NodeAffinityIn("affinity-key", []string{"affinity-value"}).
+		NodeAffinityIn("affinity-key", []string{"affinity-value"}, st.NodeSelectorTypeMatchExpressions).
 		Toleration("taint-key").Obj()
-	plugPod, err = testCtx.ClientSet.CoreV1().Pods(plugPod.Namespace).Create(context.TODO(), plugPod, metav1.CreateOptions{})
+	plugPod, err = testCtx.ClientSet.CoreV1().Pods(plugPod.Namespace).Create(testCtx.Ctx, plugPod, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("Failed to create pod %v: %v", plugPod.Name, err)
 	}
-	err = testutils.WaitForPodToScheduleWithTimeout(testCtx.ClientSet, plugPod, time.Second*5)
+	err = testutils.WaitForPodToScheduleWithTimeout(testCtx.Ctx, testCtx.ClientSet, plugPod, time.Second*5)
 	if err != nil {
 		t.Errorf("Pod %s didn't schedule: %v", plugPod.Name, err)
 	}
 
 	// 3.2 pod2 still unschedulable
-	if err := waitForPodUnschedulable(testCtx.ClientSet, pod2); err != nil {
+	if err := testutils.WaitForPodUnschedulable(testCtx.Ctx, testCtx.ClientSet, pod2); err != nil {
 		t.Errorf("Pod %v got scheduled: %v", pod2.Name, err)
 	}
 
 	// 4. Remove node taint, pod2 should schedule
 	node2.Spec.Taints = nil
-	node2, err = updateNode(testCtx.ClientSet, node2)
+	node2, err = testutils.UpdateNode(testCtx.ClientSet, node2)
 	if err != nil {
 		t.Fatalf("Failed to update %s: %v", node2.Name, err)
 	}
 
-	err = testutils.WaitForPodToScheduleWithTimeout(testCtx.ClientSet, pod2, time.Second*5)
+	err = testutils.WaitForPodToScheduleWithTimeout(testCtx.Ctx, testCtx.ClientSet, pod2, time.Second*5)
 	if err != nil {
 		t.Errorf("Pod %s didn't schedule: %v", pod2.Name, err)
 	}
 
+}
+
+func TestHostPorts(t *testing.T) {
+	type podPorts struct {
+		container                   []v1.ContainerPort
+		restartableInitContainer    []v1.ContainerPort
+		nonRestartableInitContainer []v1.ContainerPort
+	}
+
+	// Tests run with one node for scheduling. The first pod must always be scheduable.
+	tests := []struct {
+		name                string
+		firstPorts          podPorts
+		secondPorts         podPorts
+		wantSecondScheduled bool
+	}{
+		{
+			name: "Containers using same non-host port",
+			firstPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: true,
+		},
+		{
+			name: "non-restartable initContainer and container using same non-host port",
+			firstPorts: podPorts{
+				nonRestartableInitContainer: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: true,
+		},
+		{
+			name: "restartable initContainer and container using same non-host port",
+			firstPorts: podPorts{
+				restartableInitContainer: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: true,
+		},
+		{
+			name: "container and non-restartable initContainer using same non-host port",
+			firstPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				nonRestartableInitContainer: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: true,
+		},
+		{
+			name: "container and restartable initContainer using same non-host port",
+			firstPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				restartableInitContainer: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: true,
+		},
+		{
+			name: "containers using same host port",
+			firstPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: false,
+		},
+		{
+			name: "non-restartable initContainer and container using same host port",
+			firstPorts: podPorts{
+				nonRestartableInitContainer: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: true,
+		},
+		{
+			name: "restartable initContainer and container using same host port",
+			firstPorts: podPorts{
+				restartableInitContainer: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: false,
+		},
+		{
+			name: "container and non-restartable initContainer using same host port",
+			firstPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				nonRestartableInitContainer: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: true,
+		},
+		{
+			name: "container and restartable initContainer using same host port",
+			firstPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				restartableInitContainer: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: false,
+		},
+		{
+			name: "containers using different host ports",
+			firstPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8002,
+						HostPort:      8002,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: true,
+		},
+		{
+			name: "non-restartable initContainer and container using different host ports",
+			firstPorts: podPorts{
+				nonRestartableInitContainer: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8002,
+						HostPort:      8002,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: true,
+		},
+		{
+			name: "restartable initContainer and container using different host ports",
+			firstPorts: podPorts{
+				restartableInitContainer: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8002,
+						HostPort:      8002,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: true,
+		},
+		{
+			name: "container and non-restartable initContainer using different host ports",
+			firstPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				nonRestartableInitContainer: []v1.ContainerPort{
+					{
+						ContainerPort: 8002,
+						HostPort:      8002,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: true,
+		},
+		{
+			name: "container and restartable initContainer using different host ports",
+			firstPorts: podPorts{
+				container: []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			secondPorts: podPorts{
+				restartableInitContainer: []v1.ContainerPort{
+					{
+						ContainerPort: 8002,
+						HostPort:      8002,
+						Protocol:      v1.ProtocolTCP,
+					},
+				},
+			},
+			wantSecondScheduled: true,
+		},
+	}
+
+	testCtx := testutils.InitTestSchedulerWithNS(t, "conflicting-host-ports")
+	node, err := testutils.CreateNode(testCtx.ClientSet, st.MakeNode().
+		Name("conflicting-host-ports-node").Obj())
+	if err != nil {
+		t.Fatalf("Failed to create %s: %v", node.Name, err)
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p1, err := testutils.CreatePausePod(testCtx.ClientSet, testutils.InitPausePod(&testutils.PausePodConfig{
+				Name:                             "p1",
+				Namespace:                        testCtx.NS.Name,
+				ContainerPorts:                   tc.firstPorts.container,
+				RestartableInitContainerPorts:    tc.firstPorts.restartableInitContainer,
+				NonRestartableInitContainerPorts: tc.firstPorts.nonRestartableInitContainer,
+			}))
+			if err != nil {
+				t.Fatalf("Failed to create Pod p1: %v", err)
+			}
+			err = testutils.WaitForPodToScheduleWithTimeout(testCtx.Ctx, testCtx.ClientSet, p1, 5*time.Second)
+			if err != nil {
+				t.Errorf("Pod %s didn't schedule: %v", p1.Name, err)
+			}
+
+			p2, err := testutils.CreatePausePod(testCtx.ClientSet, testutils.InitPausePod(&testutils.PausePodConfig{
+				Name:                             "p2",
+				Namespace:                        testCtx.NS.Name,
+				ContainerPorts:                   tc.secondPorts.container,
+				RestartableInitContainerPorts:    tc.secondPorts.restartableInitContainer,
+				NonRestartableInitContainerPorts: tc.secondPorts.nonRestartableInitContainer,
+			}))
+			if err != nil {
+				t.Fatalf("Failed to create Pod p2: %v", err)
+			}
+
+			if tc.wantSecondScheduled {
+				err = testutils.WaitForPodToScheduleWithTimeout(testCtx.Ctx, testCtx.ClientSet, p2, 5*time.Second)
+				if err != nil {
+					t.Errorf("Pod %s didn't schedule: %v", p2.Name, err)
+				}
+			} else {
+				if err := testutils.WaitForPodUnschedulable(testCtx.Ctx, testCtx.ClientSet, p2); err != nil {
+					t.Errorf("Pod %v got scheduled: %v", p2.Name, err)
+				}
+			}
+
+			testutils.CleanupPods(testCtx.Ctx, testCtx.ClientSet, t, []*v1.Pod{p1, p2})
+		})
+	}
 }

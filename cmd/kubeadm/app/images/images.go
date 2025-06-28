@@ -22,7 +22,7 @@ import (
 	"k8s.io/klog/v2"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	kubeadmapiv1beta3 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
 )
@@ -49,7 +49,7 @@ func GetDNSImage(cfg *kubeadmapi.ClusterConfiguration) string {
 		dnsImageRepository = cfg.DNS.ImageRepository
 	}
 	// Handle the renaming of the official image from "registry.k8s.io/coredns" to "registry.k8s.io/coredns/coredns
-	if dnsImageRepository == kubeadmapiv1beta3.DefaultImageRepository {
+	if dnsImageRepository == kubeadmapiv1.DefaultImageRepository {
 		dnsImageRepository = fmt.Sprintf("%s/coredns", dnsImageRepository)
 	}
 	// DNS uses an imageTag that corresponds to the DNS version matching the Kubernetes version
@@ -77,7 +77,7 @@ func GetEtcdImage(cfg *kubeadmapi.ClusterConfiguration) string {
 		etcdImageTag = etcdVersion.String()
 	}
 	if warning != nil {
-		klog.Warningln(warning)
+		klog.V(1).Infof("WARNING: %v", warning)
 	}
 	// unless an override is specified
 	if cfg.Etcd.Local != nil && cfg.Etcd.Local.ImageTag != "" {
@@ -94,7 +94,19 @@ func GetControlPlaneImages(cfg *kubeadmapi.ClusterConfiguration) []string {
 	images = append(images, GetKubernetesImage(constants.KubeAPIServer, cfg))
 	images = append(images, GetKubernetesImage(constants.KubeControllerManager, cfg))
 	images = append(images, GetKubernetesImage(constants.KubeScheduler, cfg))
-	images = append(images, GetKubernetesImage(constants.KubeProxy, cfg))
+
+	// if Proxy addon is not disable then add the image
+	if cfg.Proxy.Disabled {
+		klog.V(1).Infof("skipping the kube-proxy image pull since the bundled addon is disabled")
+	} else {
+		images = append(images, GetKubernetesImage(constants.KubeProxy, cfg))
+	}
+	// if DNS addon is not disable then add the image
+	if cfg.DNS.Disabled {
+		klog.V(1).Infof("skipping the CoreDNS image pull since the bundled addon is disabled")
+	} else {
+		images = append(images, GetDNSImage(cfg))
+	}
 
 	// pause is not available on the ci image repository so use the default image repository.
 	images = append(images, GetPauseImage(cfg))
@@ -103,9 +115,6 @@ func GetControlPlaneImages(cfg *kubeadmapi.ClusterConfiguration) []string {
 	if cfg.Etcd.Local != nil {
 		images = append(images, GetEtcdImage(cfg))
 	}
-
-	// Append the appropriate DNS images
-	images = append(images, GetDNSImage(cfg))
 
 	return images
 }

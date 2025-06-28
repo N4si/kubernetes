@@ -21,6 +21,8 @@ import (
 	"os"
 	"regexp"
 
+	"k8s.io/klog/v2"
+
 	"github.com/opencontainers/selinux/go-selinux"
 
 	v1 "k8s.io/api/core/v1"
@@ -106,10 +108,6 @@ func (plugin *hostPathPlugin) SupportsMountOption() bool {
 	return false
 }
 
-func (plugin *hostPathPlugin) SupportsBulkVolumeVerification() bool {
-	return false
-}
-
 func (plugin *hostPathPlugin) SupportsSELinuxContextMount(spec *volume.Spec) (bool, error) {
 	return false, nil
 }
@@ -120,7 +118,7 @@ func (plugin *hostPathPlugin) GetAccessModes() []v1.PersistentVolumeAccessMode {
 	}
 }
 
-func (plugin *hostPathPlugin) NewMounter(spec *volume.Spec, pod *v1.Pod, opts volume.VolumeOptions) (volume.Mounter, error) {
+func (plugin *hostPathPlugin) NewMounter(spec *volume.Spec, pod *v1.Pod) (volume.Mounter, error) {
 	hostPathVolumeSource, readOnly, err := getVolumeSource(spec)
 	if err != nil {
 		return nil, err
@@ -140,7 +138,7 @@ func (plugin *hostPathPlugin) NewMounter(spec *volume.Spec, pod *v1.Pod, opts vo
 	return &hostPathMounter{
 		hostPath:      &hostPath{path: path, pathType: pathType},
 		readOnly:      readOnly,
-		mounter:       plugin.host.GetMounter(plugin.GetPluginName()),
+		mounter:       plugin.host.GetMounter(),
 		hu:            kvh.GetHostUtil(),
 		noTypeChecker: plugin.noTypeChecker,
 	}, nil
@@ -172,11 +170,11 @@ func (plugin *hostPathPlugin) Recycle(pvName string, spec *volume.Spec, eventRec
 	return recyclerclient.RecycleVolumeByWatchingPodUntilCompletion(pvName, pod, plugin.host.GetKubeClient(), eventRecorder)
 }
 
-func (plugin *hostPathPlugin) NewDeleter(spec *volume.Spec) (volume.Deleter, error) {
+func (plugin *hostPathPlugin) NewDeleter(logger klog.Logger, spec *volume.Spec) (volume.Deleter, error) {
 	return newDeleter(spec, plugin.host)
 }
 
-func (plugin *hostPathPlugin) NewProvisioner(options volume.VolumeOptions) (volume.Provisioner, error) {
+func (plugin *hostPathPlugin) NewProvisioner(logger klog.Logger, options volume.VolumeOptions) (volume.Provisioner, error) {
 	if !plugin.config.ProvisioningEnabled {
 		return nil, fmt.Errorf("provisioning in volume plugin %q is disabled", plugin.GetPluginName())
 	}

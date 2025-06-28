@@ -22,14 +22,15 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-
-	"github.com/pkg/errors"
+	"time"
 
 	certutil "k8s.io/client-go/util/cert"
 	"k8s.io/klog/v2"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil"
 )
 
@@ -50,6 +51,8 @@ type KubeadmCert struct {
 	// These functions will be run in series, passed both the InitConfiguration and a cert Config.
 	configMutators []configMutatorsFunc
 	config         pkiutil.CertConfig
+	// Used for unit tests.
+	creationTime time.Time
 }
 
 // GetConfig returns the definition for the given cert given the provided InitConfiguration
@@ -60,7 +63,31 @@ func (k *KubeadmCert) GetConfig(ic *kubeadmapi.InitConfiguration) (*pkiutil.Cert
 		}
 	}
 
-	k.config.PublicKeyAlgorithm = ic.ClusterConfiguration.PublicKeyAlgorithm()
+	// creationTime should be set only during unit tests, otherwise the kubeadm start time
+	// should be
+	if k.creationTime.IsZero() {
+		k.creationTime = kubeadmutil.StartTimeUTC()
+	}
+
+	// Backdate certificate to allow small time jumps.
+	k.config.NotBefore = k.creationTime.Add(-kubeadmconstants.CertificateBackdate)
+
+	// Use the validity periods defined in the ClusterConfiguration.
+	// If CAName is empty this is a CA cert.
+	if len(k.CAName) != 0 {
+		if ic.ClusterConfiguration.CertificateValidityPeriod != nil {
+			k.config.NotAfter = k.creationTime.
+				Add(ic.ClusterConfiguration.CertificateValidityPeriod.Duration)
+		}
+	} else {
+		if ic.ClusterConfiguration.CACertificateValidityPeriod != nil {
+			k.config.NotAfter = k.creationTime.
+				Add(ic.ClusterConfiguration.CACertificateValidityPeriod.Duration)
+		}
+	}
+
+	// Use the encryption algorithm from ClusterConfiguration.
+	k.config.EncryptionAlgorithm = ic.ClusterConfiguration.EncryptionAlgorithmType()
 	return &k.config, nil
 }
 
@@ -291,7 +318,7 @@ func KubeadmCertKubeletClient() *KubeadmCert {
 		config: pkiutil.CertConfig{
 			Config: certutil.Config{
 				CommonName:   kubeadmconstants.APIServerKubeletClientCertCommonName,
-				Organization: []string{kubeadmconstants.SystemPrivilegedGroup},
+				Organization: []string{kubeadmconstants.ClusterAdminsGroupAndClusterRoleBinding},
 				Usages:       []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 			},
 		},
@@ -352,7 +379,7 @@ func KubeadmCertEtcdServer() *KubeadmCert {
 		config: pkiutil.CertConfig{
 			Config: certutil.Config{
 				// TODO: etcd 3.2 introduced an undocumented requirement for ClientAuth usage on the
-				// server cert: https://github.com/coreos/etcd/issues/9785#issuecomment-396715692
+				// server cert: https://github.com/etcd-io/etcd/issues/9785#issuecomment-396715692
 				// Once the upstream issue is resolved, this should be returned to only allowing
 				// ServerAuth usage.
 				Usages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
@@ -393,9 +420,8 @@ func KubeadmCertEtcdHealthcheck() *KubeadmCert {
 		CAName:   "etcd-ca",
 		config: pkiutil.CertConfig{
 			Config: certutil.Config{
-				CommonName:   kubeadmconstants.EtcdHealthcheckClientCertCommonName,
-				Organization: []string{kubeadmconstants.SystemPrivilegedGroup},
-				Usages:       []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+				CommonName: kubeadmconstants.EtcdHealthcheckClientCertCommonName,
+				Usages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 			},
 		},
 	}
@@ -410,9 +436,8 @@ func KubeadmCertEtcdAPIClient() *KubeadmCert {
 		CAName:   "etcd-ca",
 		config: pkiutil.CertConfig{
 			Config: certutil.Config{
-				CommonName:   kubeadmconstants.APIServerEtcdClientCertCommonName,
-				Organization: []string{kubeadmconstants.SystemPrivilegedGroup},
-				Usages:       []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+				CommonName: kubeadmconstants.APIServerEtcdClientCertCommonName,
+				Usages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 			},
 		},
 	}

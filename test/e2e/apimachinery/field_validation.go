@@ -17,14 +17,12 @@ limitations under the License.
 package apimachinery
 
 import (
-	// ensure libs have a chance to initialize
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/onsi/ginkgo/v2"
-	_ "github.com/stretchr/testify/assert"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/apiextensions-apiserver/test/integration/fixtures"
@@ -39,7 +37,7 @@ import (
 
 var _ = SIGDescribe("FieldValidation", func() {
 	f := framework.NewDefaultFramework("field-validation")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelBaseline
+	f.NamespacePodSecurityLevel = admissionapi.LevelBaseline
 
 	var client clientset.Interface
 	var ns string
@@ -247,6 +245,11 @@ var _ = SIGDescribe("FieldValidation", func() {
 			framework.Failf("cannot create crd %s", err)
 		}
 
+		defer func() {
+			err = fixtures.DeleteV1CustomResourceDefinition(noxuDefinition, apiExtensionClient)
+			framework.ExpectNoError(err, "deleting CustomResourceDefinition")
+		}()
+
 		kind := noxuDefinition.Spec.Names.Kind
 		apiVersion := noxuDefinition.Spec.Group + "/" + noxuDefinition.Spec.Versions[0].Name
 		name := "mytest"
@@ -257,8 +260,6 @@ apiVersion: %s
 kind: %s
 metadata:
   name: %s
-  finalizers:
-  - test-finalizer
 spec:
   foo: foo1
   cronSpec: "* * * * */5"
@@ -304,6 +305,11 @@ spec:
 			framework.Failf("cannot create crd %s", err)
 		}
 
+		defer func() {
+			err = fixtures.DeleteV1CustomResourceDefinition(noxuDefinition, apiExtensionClient)
+			framework.ExpectNoError(err, "deleting CustomResourceDefinition")
+		}()
+
 		kind := noxuDefinition.Spec.Names.Kind
 		apiVersion := noxuDefinition.Spec.Group + "/" + noxuDefinition.Spec.Versions[0].Name
 		name := "mytest"
@@ -314,8 +320,6 @@ apiVersion: %s
 kind: %s
 metadata:
   name: %s
-  finalizers:
-  - test-finalizer
 spec:
   unknown: uk1
   cronSpec: "* * * * */5"
@@ -424,6 +428,11 @@ spec:
 			framework.Failf("cannot create crd %s", err)
 		}
 
+		defer func() {
+			err = fixtures.DeleteV1CustomResourceDefinition(noxuDefinition, apiExtensionClient)
+			framework.ExpectNoError(err, "deleting CustomResourceDefinition")
+		}()
+
 		kind := noxuDefinition.Spec.Names.Kind
 		apiVersion := noxuDefinition.Spec.Group + "/" + noxuDefinition.Spec.Versions[0].Name
 		name := "mytest"
@@ -434,8 +443,6 @@ apiVersion: %s
 kind: %s
 metadata:
   name: %s
-  finalizers:
-  - test-finalizer
 unknownField: unknown
 spec:
   foo: foo1
@@ -563,6 +570,11 @@ spec:
 			framework.Failf("cannot create crd %s", err)
 		}
 
+		defer func() {
+			err = fixtures.DeleteV1CustomResourceDefinition(noxuDefinition, apiExtensionClient)
+			framework.ExpectNoError(err, "deleting CustomResourceDefinition")
+		}()
+
 		kind := noxuDefinition.Spec.Names.Kind
 		apiVersion := noxuDefinition.Spec.Group + "/" + noxuDefinition.Spec.Versions[0].Name
 		name := "mytest"
@@ -574,8 +586,6 @@ kind: %s
 metadata:
   name: %s
   unknownMeta: unknown
-  finalizers:
-  - test-finalizer
 spec:
   template:
     apiversion: foo/v1
@@ -690,6 +700,11 @@ spec:
 			framework.Failf("cannot create crd %s", err)
 		}
 
+		defer func() {
+			err = fixtures.DeleteV1CustomResourceDefinition(noxuDefinition, apiExtensionClient)
+			framework.ExpectNoError(err, "deleting CustomResourceDefinition")
+		}()
+
 		kind := noxuDefinition.Spec.Names.Kind
 		apiVersion := noxuDefinition.Spec.Group + "/" + noxuDefinition.Spec.Versions[0].Name
 		name := "mytest"
@@ -700,8 +715,6 @@ apiVersion: %s
 kind: %s
 metadata:
   name: %s
-  finalizers:
-  - test-finalizer
 spec:
   unknown: uk1
   foo: foo1
@@ -718,7 +731,7 @@ spec:
 			Param("fieldValidation", "Strict").
 			Body(yamlBody).
 			DoRaw(ctx)
-		if !(strings.Contains(string(result), `line 11: key \"foo\" already set in map`)) {
+		if !(strings.Contains(string(result), `line 9: key \"foo\" already set in map`)) {
 			framework.Failf("error missing duplicate field: %v:\n%v", err, string(result))
 		}
 	})

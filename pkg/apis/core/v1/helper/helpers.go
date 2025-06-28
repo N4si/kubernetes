@@ -140,35 +140,6 @@ func IsServiceIPSet(service *v1.Service) bool {
 	return service.Spec.ClusterIP != v1.ClusterIPNone && service.Spec.ClusterIP != ""
 }
 
-// LoadBalancerStatusEqual evaluates the given load balancers' ingress IP addresses
-// and hostnames and returns true if equal or false if otherwise
-// TODO: make method on LoadBalancerStatus?
-func LoadBalancerStatusEqual(l, r *v1.LoadBalancerStatus) bool {
-	return ingressSliceEqual(l.Ingress, r.Ingress)
-}
-
-func ingressSliceEqual(lhs, rhs []v1.LoadBalancerIngress) bool {
-	if len(lhs) != len(rhs) {
-		return false
-	}
-	for i := range lhs {
-		if !ingressEqual(&lhs[i], &rhs[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func ingressEqual(lhs, rhs *v1.LoadBalancerIngress) bool {
-	if lhs.IP != rhs.IP {
-		return false
-	}
-	if lhs.Hostname != rhs.Hostname {
-		return false
-	}
-	return true
-}
-
 // GetAccessModesAsString returns a string representation of an array of access modes.
 // modes, when present, are always in the same order: RWO,ROX,RWX,RWOP.
 func GetAccessModesAsString(modes []v1.PersistentVolumeAccessMode) string {
@@ -315,12 +286,6 @@ func AddOrUpdateTolerationInPodSpec(spec *v1.PodSpec, toleration *v1.Toleration)
 	return true
 }
 
-// AddOrUpdateTolerationInPod tries to add a toleration to the pod's toleration list.
-// Returns true if something was updated, false otherwise.
-func AddOrUpdateTolerationInPod(pod *v1.Pod, toleration *v1.Toleration) bool {
-	return AddOrUpdateTolerationInPodSpec(&pod.Spec, toleration)
-}
-
 // GetMatchingTolerations returns true and list of Tolerations matching all Taints if all are tolerated, or false otherwise.
 func GetMatchingTolerations(taints []v1.Taint, tolerations []v1.Toleration) (bool, []v1.Toleration) {
 	if len(taints) == 0 {
@@ -368,64 +333,5 @@ func ScopedResourceSelectorRequirementsAsSelector(ssr v1.ScopedResourceSelectorR
 		return nil, err
 	}
 	selector = selector.Add(*r)
-	return selector, nil
-}
-
-// nodeSelectorRequirementsAsLabelRequirements converts the NodeSelectorRequirement
-// type to a labels.Requirement type.
-func nodeSelectorRequirementsAsLabelRequirements(nsr v1.NodeSelectorRequirement) (*labels.Requirement, error) {
-	var op selection.Operator
-	switch nsr.Operator {
-	case v1.NodeSelectorOpIn:
-		op = selection.In
-	case v1.NodeSelectorOpNotIn:
-		op = selection.NotIn
-	case v1.NodeSelectorOpExists:
-		op = selection.Exists
-	case v1.NodeSelectorOpDoesNotExist:
-		op = selection.DoesNotExist
-	case v1.NodeSelectorOpGt:
-		op = selection.GreaterThan
-	case v1.NodeSelectorOpLt:
-		op = selection.LessThan
-	default:
-		return nil, fmt.Errorf("%q is not a valid node selector operator", nsr.Operator)
-	}
-	return labels.NewRequirement(nsr.Key, op, nsr.Values)
-}
-
-// NodeSelectorAsSelector converts the NodeSelector api type into a struct that
-// implements labels.Selector
-// Note: This function should be kept in sync with the selector methods in
-// pkg/labels/selector.go
-func NodeSelectorAsSelector(ns *v1.NodeSelector) (labels.Selector, error) {
-	if ns == nil {
-		return labels.Nothing(), nil
-	}
-	if len(ns.NodeSelectorTerms) == 0 {
-		return labels.Everything(), nil
-	}
-	var requirements []labels.Requirement
-
-	for _, nsTerm := range ns.NodeSelectorTerms {
-		for _, expr := range nsTerm.MatchExpressions {
-			req, err := nodeSelectorRequirementsAsLabelRequirements(expr)
-			if err != nil {
-				return nil, err
-			}
-			requirements = append(requirements, *req)
-		}
-
-		for _, field := range nsTerm.MatchFields {
-			req, err := nodeSelectorRequirementsAsLabelRequirements(field)
-			if err != nil {
-				return nil, err
-			}
-			requirements = append(requirements, *req)
-		}
-	}
-
-	selector := labels.NewSelector()
-	selector = selector.Add(requirements...)
 	return selector, nil
 }

@@ -16,10 +16,6 @@ limitations under the License.
 
 package util
 
-import (
-	v1 "k8s.io/api/core/v1"
-)
-
 // For each of these resources, a container that doesn't request the resource explicitly
 // will be treated as having requested the amount indicated below, for the purpose
 // of computing priority only. This ensures that when scheduling zero-request pods, such
@@ -34,45 +30,3 @@ const (
 	// DefaultMemoryRequest defines default memory request size.
 	DefaultMemoryRequest int64 = 200 * 1024 * 1024 // 200 MB
 )
-
-// GetNonzeroRequests returns the default cpu and memory resource request if none is found or
-// what is provided on the request.
-func GetNonzeroRequests(requests *v1.ResourceList) (int64, int64) {
-	return GetRequestForResource(v1.ResourceCPU, requests, true),
-		GetRequestForResource(v1.ResourceMemory, requests, true)
-}
-
-// GetRequestForResource returns the requested values unless nonZero is true and there is no defined request
-// for CPU and memory.
-// If nonZero is true and the resource has no defined request for CPU or memory, it returns a default value.
-func GetRequestForResource(resource v1.ResourceName, requests *v1.ResourceList, nonZero bool) int64 {
-	if requests == nil {
-		return 0
-	}
-	switch resource {
-	case v1.ResourceCPU:
-		// Override if un-set, but not if explicitly set to zero
-		if _, found := (*requests)[v1.ResourceCPU]; !found && nonZero {
-			return DefaultMilliCPURequest
-		}
-		return requests.Cpu().MilliValue()
-	case v1.ResourceMemory:
-		// Override if un-set, but not if explicitly set to zero
-		if _, found := (*requests)[v1.ResourceMemory]; !found && nonZero {
-			return DefaultMemoryRequest
-		}
-		return requests.Memory().Value()
-	case v1.ResourceEphemeralStorage:
-		quantity, found := (*requests)[v1.ResourceEphemeralStorage]
-		if !found {
-			return 0
-		}
-		return quantity.Value()
-	default:
-		quantity, found := (*requests)[resource]
-		if !found {
-			return 0
-		}
-		return quantity.Value()
-	}
-}

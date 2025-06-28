@@ -21,17 +21,17 @@ import (
 	"reflect"
 	"testing"
 
-	fuzz "github.com/google/gofuzz"
-	"k8s.io/api/admissionregistration/v1"
-	"k8s.io/apimachinery/pkg/util/diff"
+	"github.com/google/go-cmp/cmp"
+	v1 "k8s.io/api/admissionregistration/v1"
+	"sigs.k8s.io/randfill"
 )
 
 func TestMutatingWebhookAccessor(t *testing.T) {
-	f := fuzz.New()
+	f := randfill.New()
 	for i := 0; i < 100; i++ {
 		t.Run(fmt.Sprintf("Run %d/100", i), func(t *testing.T) {
 			orig := &v1.MutatingWebhook{}
-			f.Fuzz(orig)
+			f.Fill(orig)
 
 			// zero out any accessor type specific fields not included in the accessor
 			orig.ReinvocationPolicy = nil
@@ -46,7 +46,7 @@ func TestMutatingWebhookAccessor(t *testing.T) {
 				t.Errorf("expected GetMutatingWebhook to return ok for mutating webhook accessor")
 			}
 			if !reflect.DeepEqual(orig, m) {
-				t.Errorf("expected GetMutatingWebhook to return original webhook, diff:\n%s", diff.ObjectReflectDiff(orig, m))
+				t.Errorf("expected GetMutatingWebhook to return original webhook, diff:\n%s", cmp.Diff(orig, m))
 			}
 			if _, ok := accessor.GetValidatingWebhook(); ok {
 				t.Errorf("expected GetValidatingWebhook to be nil for mutating webhook accessor")
@@ -62,20 +62,21 @@ func TestMutatingWebhookAccessor(t *testing.T) {
 				SideEffects:             accessor.GetSideEffects(),
 				TimeoutSeconds:          accessor.GetTimeoutSeconds(),
 				AdmissionReviewVersions: accessor.GetAdmissionReviewVersions(),
+				MatchConditions:         accessor.GetMatchConditions(),
 			}
 			if !reflect.DeepEqual(orig, copy) {
-				t.Errorf("expected mutatingWebhook to round trip through WebhookAccessor, diff:\n%s", diff.ObjectReflectDiff(orig, copy))
+				t.Errorf("expected mutatingWebhook to round trip through WebhookAccessor, diff:\n%s", cmp.Diff(orig, copy))
 			}
 		})
 	}
 }
 
 func TestValidatingWebhookAccessor(t *testing.T) {
-	f := fuzz.New()
+	f := randfill.New()
 	for i := 0; i < 100; i++ {
 		t.Run(fmt.Sprintf("Run %d/100", i), func(t *testing.T) {
 			orig := &v1.ValidatingWebhook{}
-			f.Fuzz(orig)
+			f.Fill(orig)
 			uid := fmt.Sprintf("test.configuration.admission/%s/0", orig.Name)
 			accessor := NewValidatingWebhookAccessor(uid, "test.configuration.admission", orig)
 			if uid != accessor.GetUID() {
@@ -86,7 +87,7 @@ func TestValidatingWebhookAccessor(t *testing.T) {
 				t.Errorf("expected GetValidatingWebhook to return ok for validating webhook accessor")
 			}
 			if !reflect.DeepEqual(orig, m) {
-				t.Errorf("expected GetValidatingWebhook to return original webhook, diff:\n%s", diff.ObjectReflectDiff(orig, m))
+				t.Errorf("expected GetValidatingWebhook to return original webhook, diff:\n%s", cmp.Diff(orig, m))
 			}
 			if _, ok := accessor.GetMutatingWebhook(); ok {
 				t.Errorf("expected GetMutatingWebhook to be nil for validating webhook accessor")
@@ -102,9 +103,10 @@ func TestValidatingWebhookAccessor(t *testing.T) {
 				SideEffects:             accessor.GetSideEffects(),
 				TimeoutSeconds:          accessor.GetTimeoutSeconds(),
 				AdmissionReviewVersions: accessor.GetAdmissionReviewVersions(),
+				MatchConditions:         accessor.GetMatchConditions(),
 			}
 			if !reflect.DeepEqual(orig, copy) {
-				t.Errorf("expected validatingWebhook to round trip through WebhookAccessor, diff:\n%s", diff.ObjectReflectDiff(orig, copy))
+				t.Errorf("expected validatingWebhook to round trip through WebhookAccessor, diff:\n%s", cmp.Diff(orig, copy))
 			}
 		})
 	}

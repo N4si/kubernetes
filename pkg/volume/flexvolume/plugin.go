@@ -101,6 +101,8 @@ func (plugin *flexVolumePlugin) Init(host volume.VolumeHost) error {
 	return nil
 }
 
+func (plugin *flexVolumePlugin) VerifyExhaustedResource(spec *volume.Spec, nodeName types.NodeName) {}
+
 func (plugin *flexVolumePlugin) getExecutable() string {
 	parts := strings.Split(plugin.driverName, "/")
 	execName := parts[len(parts)-1]
@@ -161,8 +163,8 @@ func (plugin *flexVolumePlugin) GetAccessModes() []api.PersistentVolumeAccessMod
 }
 
 // NewMounter is part of the volume.VolumePlugin interface.
-func (plugin *flexVolumePlugin) NewMounter(spec *volume.Spec, pod *api.Pod, _ volume.VolumeOptions) (volume.Mounter, error) {
-	return plugin.newMounterInternal(spec, pod, plugin.host.GetMounter(plugin.GetPluginName()), plugin.runner)
+func (plugin *flexVolumePlugin) NewMounter(spec *volume.Spec, pod *api.Pod) (volume.Mounter, error) {
+	return plugin.newMounterInternal(spec, pod, plugin.host.GetMounter(), plugin.runner)
 }
 
 // newMounterInternal is the internal mounter routine to build the volume.
@@ -206,7 +208,7 @@ func (plugin *flexVolumePlugin) newMounterInternal(spec *volume.Spec, pod *api.P
 
 // NewUnmounter is part of the volume.VolumePlugin interface.
 func (plugin *flexVolumePlugin) NewUnmounter(volName string, podUID types.UID) (volume.Unmounter, error) {
-	return plugin.newUnmounterInternal(volName, podUID, plugin.host.GetMounter(plugin.GetPluginName()), plugin.runner)
+	return plugin.newUnmounterInternal(volName, podUID, plugin.host.GetMounter(), plugin.runner)
 }
 
 // newUnmounterInternal is the internal unmounter routine to clean the volume.
@@ -285,10 +287,6 @@ func (plugin *flexVolumePlugin) unsupported(commands ...string) {
 	plugin.unsupportedCommands = append(plugin.unsupportedCommands, commands...)
 }
 
-func (plugin *flexVolumePlugin) SupportsBulkVolumeVerification() bool {
-	return false
-}
-
 func (plugin *flexVolumePlugin) SupportsSELinuxContextMount(spec *volume.Spec) (bool, error) {
 	return false, nil
 }
@@ -306,7 +304,7 @@ func (plugin *flexVolumePlugin) isUnsupported(command string) bool {
 }
 
 func (plugin *flexVolumePlugin) GetDeviceMountRefs(deviceMountPath string) ([]string, error) {
-	mounter := plugin.host.GetMounter(plugin.GetPluginName())
+	mounter := plugin.host.GetMounter()
 	return mounter.GetMountRefs(deviceMountPath)
 }
 

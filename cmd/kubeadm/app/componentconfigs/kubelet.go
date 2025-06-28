@@ -19,16 +19,15 @@ package componentconfigs
 import (
 	"path/filepath"
 
-	"github.com/pkg/errors"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	kubeletconfig "k8s.io/kubelet/config/v1beta1"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
-	"k8s.io/kubernetes/cmd/kubeadm/app/util/initsystem"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 const (
@@ -69,7 +68,7 @@ var kubeletHandler = handler{
 	fromCluster: kubeletConfigFromCluster,
 }
 
-func kubeletConfigFromCluster(h *handler, clientset clientset.Interface, clusterCfg *kubeadmapi.ClusterConfiguration) (kubeadmapi.ComponentConfig, error) {
+func kubeletConfigFromCluster(h *handler, clientset clientset.Interface, _ *kubeadmapi.ClusterConfiguration) (kubeadmapi.ComponentConfig, error) {
 	configMapName := constants.KubeletBaseConfigurationConfigMap
 	klog.V(1).Infof("attempting to download the KubeletConfiguration from ConfigMap %q", configMapName)
 	cm, err := h.fromConfigMap(clientset, configMapName, constants.KubeletBaseConfigurationConfigMapKey, true)
@@ -151,7 +150,7 @@ func (kc *kubeletConfig) Default(cfg *kubeadmapi.ClusterConfiguration, _ *kubead
 	}
 
 	if kc.config.Authentication.Anonymous.Enabled == nil {
-		kc.config.Authentication.Anonymous.Enabled = pointer.Bool(kubeletAuthenticationAnonymousEnabled)
+		kc.config.Authentication.Anonymous.Enabled = ptr.To(kubeletAuthenticationAnonymousEnabled)
 	} else if *kc.config.Authentication.Anonymous.Enabled {
 		warnDefaultComponentConfigValue(kind, "authentication.anonymous.enabled", kubeletAuthenticationAnonymousEnabled, *kc.config.Authentication.Anonymous.Enabled)
 	}
@@ -166,12 +165,12 @@ func (kc *kubeletConfig) Default(cfg *kubeadmapi.ClusterConfiguration, _ *kubead
 
 	// Let clients using other authentication methods like ServiceAccount tokens also access the kubelet API
 	if kc.config.Authentication.Webhook.Enabled == nil {
-		kc.config.Authentication.Webhook.Enabled = pointer.Bool(kubeletAuthenticationWebhookEnabled)
+		kc.config.Authentication.Webhook.Enabled = ptr.To(kubeletAuthenticationWebhookEnabled)
 	} else if !*kc.config.Authentication.Webhook.Enabled {
 		warnDefaultComponentConfigValue(kind, "authentication.webhook.enabled", kubeletAuthenticationWebhookEnabled, *kc.config.Authentication.Webhook.Enabled)
 	}
 
-	// Serve a /healthz webserver on localhost:10248 that kubeadm can talk to
+	// Serve a /healthz webserver on 127.0.0.1:10248 that kubeadm can talk to
 	if kc.config.HealthzBindAddress == "" {
 		kc.config.HealthzBindAddress = kubeletHealthzBindAddress
 	} else if kc.config.HealthzBindAddress != kubeletHealthzBindAddress {
@@ -179,7 +178,7 @@ func (kc *kubeletConfig) Default(cfg *kubeadmapi.ClusterConfiguration, _ *kubead
 	}
 
 	if kc.config.HealthzPort == nil {
-		kc.config.HealthzPort = pointer.Int32(constants.KubeletHealthzPort)
+		kc.config.HealthzPort = ptr.To[int32](constants.KubeletHealthzPort)
 	} else if *kc.config.HealthzPort != constants.KubeletHealthzPort {
 		warnDefaultComponentConfigValue(kind, "healthzPort", constants.KubeletHealthzPort, *kc.config.HealthzPort)
 	}
@@ -196,27 +195,4 @@ func (kc *kubeletConfig) Default(cfg *kubeadmapi.ClusterConfiguration, _ *kubead
 		klog.V(1).Infof("the value of KubeletConfiguration.cgroupDriver is empty; setting it to %q", constants.CgroupDriverSystemd)
 		kc.config.CgroupDriver = constants.CgroupDriverSystemd
 	}
-
-	ok, err := isServiceActive("systemd-resolved")
-	if err != nil {
-		klog.Warningf("cannot determine if systemd-resolved is active: %v", err)
-	}
-	if ok {
-		if kc.config.ResolverConfig == nil {
-			kc.config.ResolverConfig = pointer.String(kubeletSystemdResolverConfig)
-		} else {
-			if *kc.config.ResolverConfig != kubeletSystemdResolverConfig {
-				warnDefaultComponentConfigValue(kind, "resolvConf", kubeletSystemdResolverConfig, *kc.config.ResolverConfig)
-			}
-		}
-	}
-}
-
-// isServiceActive checks whether the given service exists and is running
-func isServiceActive(name string) (bool, error) {
-	initSystem, err := initsystem.GetInitSystem()
-	if err != nil {
-		return false, err
-	}
-	return initSystem.ServiceIsActive(name), nil
 }

@@ -21,7 +21,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strings"
@@ -38,9 +37,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/managedfields"
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
-	"k8s.io/apiserver/pkg/endpoints/handlers/fieldmanager"
 	requestmetrics "k8s.io/apiserver/pkg/endpoints/handlers/metrics"
 	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
 	"k8s.io/apiserver/pkg/endpoints/metrics"
@@ -89,7 +88,7 @@ type RequestScope struct {
 	EquivalentResourceMapper runtime.EquivalentResourceMapper
 
 	TableConvertor rest.TableConvertor
-	FieldManager   *fieldmanager.FieldManager
+	FieldManager   *managedfields.FieldManager
 
 	Resource schema.GroupVersionResource
 	Kind     schema.GroupVersionKind
@@ -373,13 +372,13 @@ func summarizeData(data []byte, maxLength int) string {
 func limitedReadBody(req *http.Request, limit int64) ([]byte, error) {
 	defer req.Body.Close()
 	if limit <= 0 {
-		return ioutil.ReadAll(req.Body)
+		return io.ReadAll(req.Body)
 	}
 	lr := &io.LimitedReader{
 		R: req.Body,
 		N: limit + 1,
 	}
-	data, err := ioutil.ReadAll(lr)
+	data, err := io.ReadAll(lr)
 	if err != nil {
 		return nil, err
 	}
@@ -389,11 +388,11 @@ func limitedReadBody(req *http.Request, limit int64) ([]byte, error) {
 	return data, nil
 }
 
-func limitedReadBodyWithRecordMetric(ctx context.Context, req *http.Request, limit int64, resourceGroup string, verb requestmetrics.RequestBodyVerb) ([]byte, error) {
+func limitedReadBodyWithRecordMetric(ctx context.Context, req *http.Request, limit int64, groupResource schema.GroupResource, verb requestmetrics.RequestBodyVerb) ([]byte, error) {
 	readBody, err := limitedReadBody(req, limit)
 	if err == nil {
 		// only record if we've read successfully
-		requestmetrics.RecordRequestBodySize(ctx, resourceGroup, verb, len(readBody))
+		requestmetrics.RecordRequestBodySize(ctx, groupResource, verb, len(readBody))
 	}
 	return readBody, err
 }

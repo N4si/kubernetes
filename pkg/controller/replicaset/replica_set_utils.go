@@ -26,15 +26,19 @@ import (
 	"k8s.io/klog/v2"
 
 	apps "k8s.io/api/apps/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	appsclient "k8s.io/client-go/kubernetes/typed/apps/v1"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/utils/clock"
+	"k8s.io/utils/ptr"
 )
 
 // updateReplicaSetStatus attempts to update the Status.Replicas of the given ReplicaSet, with a single GET/PUT retry.
-func updateReplicaSetStatus(c appsclient.ReplicaSetInterface, rs *apps.ReplicaSet, newStatus apps.ReplicaSetStatus) (*apps.ReplicaSet, error) {
+func updateReplicaSetStatus(logger klog.Logger, c appsclient.ReplicaSetInterface, rs *apps.ReplicaSet, newStatus apps.ReplicaSetStatus, controllerFeatures ReplicaSetControllerFeatures) (*apps.ReplicaSet, error) {
 	// This is the steady state. It happens when the ReplicaSet doesn't have any expectations, since
 	// we do a periodic relist every 30s. If the generations differ but the replicas are
 	// the same, a caller might've resized to the same replica count.
@@ -42,6 +46,7 @@ func updateReplicaSetStatus(c appsclient.ReplicaSetInterface, rs *apps.ReplicaSe
 		rs.Status.FullyLabeledReplicas == newStatus.FullyLabeledReplicas &&
 		rs.Status.ReadyReplicas == newStatus.ReadyReplicas &&
 		rs.Status.AvailableReplicas == newStatus.AvailableReplicas &&
+		ptr.Equal(rs.Status.TerminatingReplicas, newStatus.TerminatingReplicas) &&
 		rs.Generation == rs.Status.ObservedGeneration &&
 		reflect.DeepEqual(rs.Status.Conditions, newStatus.Conditions) {
 		return rs, nil
@@ -56,11 +61,16 @@ func updateReplicaSetStatus(c appsclient.ReplicaSetInterface, rs *apps.ReplicaSe
 	var getErr, updateErr error
 	var updatedRS *apps.ReplicaSet
 	for i, rs := 0, rs; ; i++ {
-		klog.V(4).Infof(fmt.Sprintf("Updating status for %v: %s/%s, ", rs.Kind, rs.Namespace, rs.Name) +
+		terminatingReplicasUpdateInfo := ""
+		if utilfeature.DefaultFeatureGate.Enabled(features.DeploymentReplicaSetTerminatingReplicas) && controllerFeatures.EnableStatusTerminatingReplicas {
+			terminatingReplicasUpdateInfo = fmt.Sprintf("terminatingReplicas %s->%s, ", derefInt32ToStr(rs.Status.TerminatingReplicas), derefInt32ToStr(newStatus.TerminatingReplicas))
+		}
+		logger.V(4).Info(fmt.Sprintf("Updating status for %v: %s/%s, ", rs.Kind, rs.Namespace, rs.Name) +
 			fmt.Sprintf("replicas %d->%d (need %d), ", rs.Status.Replicas, newStatus.Replicas, *(rs.Spec.Replicas)) +
 			fmt.Sprintf("fullyLabeledReplicas %d->%d, ", rs.Status.FullyLabeledReplicas, newStatus.FullyLabeledReplicas) +
 			fmt.Sprintf("readyReplicas %d->%d, ", rs.Status.ReadyReplicas, newStatus.ReadyReplicas) +
 			fmt.Sprintf("availableReplicas %d->%d, ", rs.Status.AvailableReplicas, newStatus.AvailableReplicas) +
+			terminatingReplicasUpdateInfo +
 			fmt.Sprintf("sequence No: %v->%v", rs.Status.ObservedGeneration, newStatus.ObservedGeneration))
 
 		rs.Status = newStatus
@@ -83,33 +93,39 @@ func updateReplicaSetStatus(c appsclient.ReplicaSetInterface, rs *apps.ReplicaSe
 	return nil, updateErr
 }
 
-func calculateStatus(rs *apps.ReplicaSet, filteredPods []*v1.Pod, manageReplicasErr error) apps.ReplicaSetStatus {
+func calculateStatus(rs *apps.ReplicaSet, activePods []*v1.Pod, terminatingPods []*v1.Pod, manageReplicasErr error, controllerFeatures ReplicaSetControllerFeatures, clock clock.PassiveClock) apps.ReplicaSetStatus {
 	newStatus := rs.Status
 	// Count the number of pods that have labels matching the labels of the pod
 	// template of the replica set, the matching pods may have more
 	// labels than are in the template. Because the label of podTemplateSpec is
 	// a superset of the selector of the replica set, so the possible
-	// matching pods must be part of the filteredPods.
+	// matching pods must be part of the activePods.
 	fullyLabeledReplicasCount := 0
 	readyReplicasCount := 0
 	availableReplicasCount := 0
 	templateLabel := labels.Set(rs.Spec.Template.Labels).AsSelectorPreValidated()
-	for _, pod := range filteredPods {
+	now := clock.Now()
+	for _, pod := range activePods {
 		if templateLabel.Matches(labels.Set(pod.Labels)) {
 			fullyLabeledReplicasCount++
 		}
 		if podutil.IsPodReady(pod) {
 			readyReplicasCount++
-			if podutil.IsPodAvailable(pod, rs.Spec.MinReadySeconds, metav1.Now()) {
+			if podutil.IsPodAvailable(pod, rs.Spec.MinReadySeconds, metav1.Time{Time: now}) {
 				availableReplicasCount++
 			}
 		}
 	}
 
+	var terminatingReplicasCount *int32
+	if utilfeature.DefaultFeatureGate.Enabled(features.DeploymentReplicaSetTerminatingReplicas) && controllerFeatures.EnableStatusTerminatingReplicas {
+		terminatingReplicasCount = ptr.To(int32(len(terminatingPods)))
+	}
+
 	failureCond := GetCondition(rs.Status, apps.ReplicaSetReplicaFailure)
 	if manageReplicasErr != nil && failureCond == nil {
 		var reason string
-		if diff := len(filteredPods) - int(*(rs.Spec.Replicas)); diff < 0 {
+		if diff := len(activePods) - int(*(rs.Spec.Replicas)); diff < 0 {
 			reason = "FailedCreate"
 		} else if diff > 0 {
 			reason = "FailedDelete"
@@ -120,10 +136,11 @@ func calculateStatus(rs *apps.ReplicaSet, filteredPods []*v1.Pod, manageReplicas
 		RemoveCondition(&newStatus, apps.ReplicaSetReplicaFailure)
 	}
 
-	newStatus.Replicas = int32(len(filteredPods))
+	newStatus.Replicas = int32(len(activePods))
 	newStatus.FullyLabeledReplicas = int32(fullyLabeledReplicasCount)
 	newStatus.ReadyReplicas = int32(readyReplicasCount)
 	newStatus.AvailableReplicas = int32(availableReplicasCount)
+	newStatus.TerminatingReplicas = terminatingReplicasCount
 	return newStatus
 }
 
@@ -174,4 +191,11 @@ func filterOutCondition(conditions []apps.ReplicaSetCondition, condType apps.Rep
 		newConditions = append(newConditions, c)
 	}
 	return newConditions
+}
+
+func derefInt32ToStr(ptr *int32) string {
+	if ptr == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("%d", *ptr)
 }

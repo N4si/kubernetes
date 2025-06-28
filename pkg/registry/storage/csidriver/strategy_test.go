@@ -40,6 +40,7 @@ func getValidCSIDriver(name string) *storage.CSIDriver {
 			PodInfoOnMount:    &enabled,
 			StorageCapacity:   &enabled,
 			RequiresRepublish: &enabled,
+			SELinuxMount:      &enabled,
 		},
 	}
 }
@@ -87,7 +88,6 @@ func TestCSIDriverPrepareForUpdate(t *testing.T) {
 	})
 
 	attachRequired := true
-	podInfoOnMount := true
 	driverWithNothing := &storage.CSIDriver{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "foo",
@@ -99,7 +99,6 @@ func TestCSIDriverPrepareForUpdate(t *testing.T) {
 		},
 		Spec: storage.CSIDriverSpec{
 			AttachRequired: &attachRequired,
-			PodInfoOnMount: &podInfoOnMount,
 			VolumeLifecycleModes: []storage.VolumeLifecycleMode{
 				storage.VolumeLifecyclePersistent,
 			},
@@ -108,6 +107,49 @@ func TestCSIDriverPrepareForUpdate(t *testing.T) {
 	enabled := true
 	disabled := false
 	gcp := "gcp"
+	noneFsGroupPolicy := storage.NoneFSGroupPolicy
+	readWriteOnceWithFSTypeFSGroupPolicy := storage.ReadWriteOnceWithFSTypeFSGroupPolicy
+	fileFSGroupPolicy := storage.FileFSGroupPolicy
+	driverWithPodInfoOnMountEnabled := &storage.CSIDriver{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "foo",
+		},
+		Spec: storage.CSIDriverSpec{
+			PodInfoOnMount: &enabled,
+		},
+	}
+	driverWithPodInfoOnMountDisabled := &storage.CSIDriver{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "foo",
+		},
+		Spec: storage.CSIDriverSpec{
+			PodInfoOnMount: &disabled,
+		},
+	}
+	driverWithNoneFSGroupPolicy := &storage.CSIDriver{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "foo",
+		},
+		Spec: storage.CSIDriverSpec{
+			FSGroupPolicy: &noneFsGroupPolicy,
+		},
+	}
+	driverWithReadWriteOnceWithFSTypeFSGroupPolicy := &storage.CSIDriver{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "foo",
+		},
+		Spec: storage.CSIDriverSpec{
+			FSGroupPolicy: &readWriteOnceWithFSTypeFSGroupPolicy,
+		},
+	}
+	driverWithFileFSGroupPolicy := &storage.CSIDriver{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "foo",
+		},
+		Spec: storage.CSIDriverSpec{
+			FSGroupPolicy: &fileFSGroupPolicy,
+		},
+	}
 	driverWithCapacityEnabled := &storage.CSIDriver{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "foo",
@@ -150,36 +192,126 @@ func TestCSIDriverPrepareForUpdate(t *testing.T) {
 		},
 	}
 
+	thirty := int64(30)
+	sixty := int64(60)
+	driverWithNodeAllocatableUpdatePeriodSeconds30 := &storage.CSIDriver{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "foo",
+		},
+		Spec: storage.CSIDriverSpec{
+			NodeAllocatableUpdatePeriodSeconds: &thirty,
+		},
+	}
+	driverWithNodeAllocatableUpdatePeriodSeconds60 := &storage.CSIDriver{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "foo",
+		},
+		Spec: storage.CSIDriverSpec{
+			NodeAllocatableUpdatePeriodSeconds: &sixty,
+		},
+	}
+
 	resultPersistent := []storage.VolumeLifecycleMode{storage.VolumeLifecyclePersistent}
 
 	tests := []struct {
-		name                                string
-		old, update                         *storage.CSIDriver
-		seLinuxMountReadWriteOncePodEnabled bool
-		wantCapacity                        *bool
-		wantModes                           []storage.VolumeLifecycleMode
-		wantTokenRequests                   []storage.TokenRequest
-		wantRequiresRepublish               *bool
-		wantGeneration                      int64
-		wantSELinuxMount                    *bool
+		name                                   string
+		old, update                            *storage.CSIDriver
+		seLinuxMountReadWriteOncePodEnabled    bool
+		mutableCSINodeAllocatableCountEnabled  bool
+		wantCapacity                           *bool
+		wantModes                              []storage.VolumeLifecycleMode
+		wantTokenRequests                      []storage.TokenRequest
+		wantRequiresRepublish                  *bool
+		wantGeneration                         int64
+		wantSELinuxMount                       *bool
+		wantNodeAllocatableUpdatePeriodSeconds *int64
 	}{
 		{
-			name:         "capacity feature enabled, before: none, update: enabled",
-			old:          driverWithNothing,
-			update:       driverWithCapacityEnabled,
-			wantCapacity: &enabled,
+			name:           "podInfoOnMount feature enabled, before: none, update: enabled",
+			old:            driverWithNothing,
+			update:         driverWithPodInfoOnMountEnabled,
+			wantGeneration: 1,
 		},
 		{
-			name:         "capacity feature enabled, before: enabled, update: disabled",
-			old:          driverWithCapacityEnabled,
-			update:       driverWithCapacityDisabled,
-			wantCapacity: &disabled,
+			name:           "podInfoOnMount feature enabled, before: enabled, update: disabled",
+			old:            driverWithPodInfoOnMountEnabled,
+			update:         driverWithPodInfoOnMountDisabled,
+			wantGeneration: 1,
 		},
 		{
-			name:      "inline feature enabled, before: none, update: persistent",
-			old:       driverWithNothing,
-			update:    driverWithPersistent,
-			wantModes: resultPersistent,
+			name:           "fSGroupPolicy feature enabled, before: nil, update: none",
+			old:            driverWithNothing,
+			update:         driverWithNoneFSGroupPolicy,
+			wantGeneration: 1,
+		},
+		{
+			name:           "fSGroupPolicy feature enabled, before: nil, update: readWriteOnceWithFSType",
+			old:            driverWithNothing,
+			update:         driverWithReadWriteOnceWithFSTypeFSGroupPolicy,
+			wantGeneration: 1,
+		},
+		{
+			name:           "fSGroupPolicy feature enabled, before: nil, update: file",
+			old:            driverWithNothing,
+			update:         driverWithFileFSGroupPolicy,
+			wantGeneration: 1,
+		},
+		{
+			name:           "fSGroupPolicy feature enabled, before: none, update: readWriteOnceWithFSType",
+			old:            driverWithNoneFSGroupPolicy,
+			update:         driverWithReadWriteOnceWithFSTypeFSGroupPolicy,
+			wantGeneration: 1,
+		},
+		{
+			name:           "fSGroupPolicy feature enabled, before: none, update: file",
+			old:            driverWithNoneFSGroupPolicy,
+			update:         driverWithFileFSGroupPolicy,
+			wantGeneration: 1,
+		},
+		{
+			name:           "fSGroupPolicy feature enabled, before: readWriteOnceWithFSType, update: none",
+			old:            driverWithReadWriteOnceWithFSTypeFSGroupPolicy,
+			update:         driverWithNoneFSGroupPolicy,
+			wantGeneration: 1,
+		},
+		{
+			name:           "fSGroupPolicy feature enabled, before: readWriteOnceWithFSType, update: file",
+			old:            driverWithReadWriteOnceWithFSTypeFSGroupPolicy,
+			update:         driverWithFileFSGroupPolicy,
+			wantGeneration: 1,
+		},
+		{
+			name:           "fSGroupPolicy feature enabled, before: file, update: none",
+			old:            driverWithFileFSGroupPolicy,
+			update:         driverWithNoneFSGroupPolicy,
+			wantGeneration: 1,
+		},
+		{
+			name:           "fSGroupPolicy feature enabled, before: file, update: readWriteOnceWithFSType",
+			old:            driverWithFileFSGroupPolicy,
+			update:         driverWithReadWriteOnceWithFSTypeFSGroupPolicy,
+			wantGeneration: 1,
+		},
+		{
+			name:           "capacity feature enabled, before: none, update: enabled",
+			old:            driverWithNothing,
+			update:         driverWithCapacityEnabled,
+			wantCapacity:   &enabled,
+			wantGeneration: 1,
+		},
+		{
+			name:           "capacity feature enabled, before: enabled, update: disabled",
+			old:            driverWithCapacityEnabled,
+			update:         driverWithCapacityDisabled,
+			wantCapacity:   &disabled,
+			wantGeneration: 1,
+		},
+		{
+			name:           "inline feature enabled, before: none, update: persistent",
+			old:            driverWithNothing,
+			update:         driverWithPersistent,
+			wantModes:      resultPersistent,
+			wantGeneration: 1,
 		},
 		{
 			name:                  "service account token feature enabled, before: none, update: audience=gcp",
@@ -237,11 +369,36 @@ func TestCSIDriverPrepareForUpdate(t *testing.T) {
 			wantSELinuxMount:                    &disabled,
 			wantGeneration:                      1,
 		},
+		{
+			name:                                   "NodeAllocatableUpdatePeriod feature enabled, before: nil, update: 30s",
+			mutableCSINodeAllocatableCountEnabled:  true,
+			old:                                    driverWithNothing,
+			update:                                 driverWithNodeAllocatableUpdatePeriodSeconds30,
+			wantNodeAllocatableUpdatePeriodSeconds: &thirty,
+			wantGeneration:                         1,
+		},
+		{
+			name:                                   "NodeAllocatableUpdatePeriod feature enabled, before: 30s, update: 60s",
+			mutableCSINodeAllocatableCountEnabled:  true,
+			old:                                    driverWithNodeAllocatableUpdatePeriodSeconds30,
+			update:                                 driverWithNodeAllocatableUpdatePeriodSeconds60,
+			wantNodeAllocatableUpdatePeriodSeconds: &sixty,
+			wantGeneration:                         1,
+		},
+		{
+			name:                                   "NodeAllocatableUpdatePeriod feature disabled, before: nil, update: 30s",
+			mutableCSINodeAllocatableCountEnabled:  false,
+			old:                                    driverWithNothing,
+			update:                                 driverWithNodeAllocatableUpdatePeriodSeconds30,
+			wantNodeAllocatableUpdatePeriodSeconds: nil,
+			wantGeneration:                         0,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SELinuxMountReadWriteOncePod, test.seLinuxMountReadWriteOncePodEnabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SELinuxMountReadWriteOncePod, test.seLinuxMountReadWriteOncePodEnabled)
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.MutableCSINodeAllocatableCount, test.mutableCSINodeAllocatableCountEnabled)
 
 			csiDriver := test.update.DeepCopy()
 			Strategy.PrepareForUpdate(ctx, csiDriver, test.old)
@@ -251,6 +408,7 @@ func TestCSIDriverPrepareForUpdate(t *testing.T) {
 			require.Equal(t, test.wantTokenRequests, csiDriver.Spec.TokenRequests)
 			require.Equal(t, test.wantRequiresRepublish, csiDriver.Spec.RequiresRepublish)
 			require.Equal(t, test.wantSELinuxMount, csiDriver.Spec.SELinuxMount)
+			require.Equal(t, test.wantNodeAllocatableUpdatePeriodSeconds, csiDriver.Spec.NodeAllocatableUpdatePeriodSeconds)
 		})
 	}
 }
@@ -259,6 +417,8 @@ func TestCSIDriverValidation(t *testing.T) {
 	enabled := true
 	disabled := true
 	gcp := "gcp"
+	validNodeAllocatableUpdatePeriodSeconds := int64(30)
+	invalidNodeAllocatableUpdatePeriodSeconds := int64(3)
 
 	tests := []struct {
 		name        string
@@ -281,6 +441,7 @@ func TestCSIDriverValidation(t *testing.T) {
 					PodInfoOnMount:    &enabled,
 					StorageCapacity:   &enabled,
 					RequiresRepublish: &enabled,
+					SELinuxMount:      &enabled,
 				},
 			},
 			false,
@@ -296,6 +457,7 @@ func TestCSIDriverValidation(t *testing.T) {
 					PodInfoOnMount:    &disabled,
 					StorageCapacity:   &disabled,
 					RequiresRepublish: &disabled,
+					SELinuxMount:      &disabled,
 				},
 			},
 			false,
@@ -311,6 +473,7 @@ func TestCSIDriverValidation(t *testing.T) {
 					PodInfoOnMount:    &enabled,
 					StorageCapacity:   &enabled,
 					RequiresRepublish: &enabled,
+					SELinuxMount:      &enabled,
 				},
 			},
 			true,
@@ -329,6 +492,7 @@ func TestCSIDriverValidation(t *testing.T) {
 						storage.VolumeLifecycleMode("no-such-mode"),
 					},
 					RequiresRepublish: &enabled,
+					SELinuxMount:      &enabled,
 				},
 			},
 			true,
@@ -347,6 +511,7 @@ func TestCSIDriverValidation(t *testing.T) {
 						storage.VolumeLifecyclePersistent,
 					},
 					RequiresRepublish: &enabled,
+					SELinuxMount:      &enabled,
 				},
 			},
 			false,
@@ -365,6 +530,7 @@ func TestCSIDriverValidation(t *testing.T) {
 						storage.VolumeLifecycleEphemeral,
 					},
 					RequiresRepublish: &enabled,
+					SELinuxMount:      &enabled,
 				},
 			},
 			false,
@@ -384,6 +550,7 @@ func TestCSIDriverValidation(t *testing.T) {
 						storage.VolumeLifecycleEphemeral,
 					},
 					RequiresRepublish: &enabled,
+					SELinuxMount:      &enabled,
 				},
 			},
 			false,
@@ -400,14 +567,65 @@ func TestCSIDriverValidation(t *testing.T) {
 					StorageCapacity:   &enabled,
 					TokenRequests:     []storage.TokenRequest{{Audience: gcp}},
 					RequiresRepublish: &enabled,
+					SELinuxMount:      &enabled,
 				},
 			},
 			false,
+		},
+		{
+			"invalid SELinuxMount",
+			&storage.CSIDriver{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo",
+				},
+				Spec: storage.CSIDriverSpec{
+					AttachRequired:  &enabled,
+					PodInfoOnMount:  &enabled,
+					StorageCapacity: &enabled,
+					SELinuxMount:    nil,
+				},
+			},
+			true,
+		},
+		{
+			"valid NodeAllocatableUpdatePeriodSeconds - greater than 10s",
+			&storage.CSIDriver{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo",
+				},
+				Spec: storage.CSIDriverSpec{
+					AttachRequired:                     &enabled,
+					PodInfoOnMount:                     &enabled,
+					StorageCapacity:                    &enabled,
+					SELinuxMount:                       &enabled,
+					NodeAllocatableUpdatePeriodSeconds: &validNodeAllocatableUpdatePeriodSeconds,
+				},
+			},
+			false,
+		},
+		{
+			"invalid NodeAllocatableUpdatePeriodSeconds - less than 10s",
+			&storage.CSIDriver{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo",
+				},
+				Spec: storage.CSIDriverSpec{
+					AttachRequired:                     &enabled,
+					PodInfoOnMount:                     &enabled,
+					StorageCapacity:                    &enabled,
+					SELinuxMount:                       &enabled,
+					NodeAllocatableUpdatePeriodSeconds: &invalidNodeAllocatableUpdatePeriodSeconds,
+				},
+			},
+			true,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			// assume this feature is on for this test, detailed enabled/disabled tests in TestCSIDriverValidationSELinuxMountEnabledDisabled
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SELinuxMountReadWriteOncePod, true)
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.MutableCSINodeAllocatableCount, true)
 
 			testValidation := func(csiDriver *storage.CSIDriver, apiVersion string) field.ErrorList {
 				ctx := genericapirequest.WithRequestInfo(genericapirequest.NewContext(), &genericapirequest.RequestInfo{

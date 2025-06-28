@@ -1,6 +1,3 @@
-//go:build providerless
-// +build providerless
-
 /*
 Copyright 2019 The Kubernetes Authors.
 
@@ -20,22 +17,24 @@ limitations under the License.
 package nodeipam
 
 import (
+	"context"
+	"errors"
 	"net"
 
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	cloudprovider "k8s.io/cloud-provider"
-	"k8s.io/klog/v2"
 )
 
 type fakeController struct {
 }
 
-func (f *fakeController) Run(stopCh <-chan struct{}) {
-	<-stopCh
+func (f *fakeController) Run(ctx context.Context) {
+	<-ctx.Done()
 }
 
 func createLegacyIPAM(
+	ctx context.Context,
 	ic *Controller,
 	nodeInformer coreinformers.NodeInformer,
 	cloud cloudprovider.Interface,
@@ -43,7 +42,6 @@ func createLegacyIPAM(
 	clusterCIDRs []*net.IPNet,
 	serviceCIDR *net.IPNet,
 	nodeCIDRMaskSizes []int,
-) *fakeController {
-	klog.Fatal("Error trying to Init(): legacy cloud provider support disabled at build time")
-	return &fakeController{}
+) (*fakeController, error) {
+	return nil, errors.New("Error trying to Init(): legacy cloud provider support disabled at build time")
 }

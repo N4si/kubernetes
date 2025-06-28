@@ -7,14 +7,12 @@ reviewers:
   - bentheelder
   - cblecker
   - dchen1107
-  - hwdef
   - justaugustus
-  - lavalamp
   - liggitt
   - mikedanese
+  - pohly
   - SataQiu
   - smarterclayton
-  - spiffxp
   - sttts
   - thockin
   - wojtek-t
@@ -25,14 +23,13 @@ approvers:
   - deads2k
   - dims # for local-up-cluster related files
   - enj # for sig-auth related stuff like cert testdata
-  - lavalamp
   - liggitt
   - mikedanese
+  - pohly # for logging and linting
   - pwittrock
   - SataQiu
   - smarterclayton
   - soltysh # for sig-cli related stuff
-  - spiffxp
   - sttts
   - thockin
   - wojtek-t
@@ -41,5 +38,7 @@ emeritus_approvers:
   - fejta
   - ixdy
   - jbeda
+  - lavalamp
   - zmerlynn
   - vishh
+  - spiffxp

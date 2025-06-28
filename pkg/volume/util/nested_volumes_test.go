@@ -17,12 +17,11 @@ limitations under the License.
 package util
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -31,7 +30,7 @@ import (
 type testCases struct {
 	name     string
 	err      bool
-	expected sets.String
+	expected sets.Set[string]
 	volname  string
 	pod      v1.Pod
 }
@@ -46,7 +45,7 @@ func TestGetNestedMountpoints(t *testing.T) {
 		{
 			name:     "Simple Pod",
 			err:      false,
-			expected: sets.NewString(),
+			expected: sets.New[string](),
 			volname:  "vol1",
 			pod: v1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -67,7 +66,7 @@ func TestGetNestedMountpoints(t *testing.T) {
 		{
 			name:     "Simple Nested Pod",
 			err:      false,
-			expected: sets.NewString("nested"),
+			expected: sets.New[string]("nested"),
 			volname:  "vol1",
 			pod: v1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -89,7 +88,7 @@ func TestGetNestedMountpoints(t *testing.T) {
 		{
 			name:     "Unsorted Nested Pod",
 			err:      false,
-			expected: sets.NewString("nested", "nested2", "nested-vol", "nested.vol"),
+			expected: sets.New[string]("nested", "nested2", "nested-vol", "nested.vol"),
 			volname:  "vol1",
 			pod: v1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -118,7 +117,7 @@ func TestGetNestedMountpoints(t *testing.T) {
 		{
 			name:     "Multiple vol1 mounts Pod",
 			err:      false,
-			expected: sets.NewString("nested", "nested2"),
+			expected: sets.New[string]("nested", "nested2"),
 			volname:  "vol1",
 			pod: v1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -144,7 +143,7 @@ func TestGetNestedMountpoints(t *testing.T) {
 			name:     "Big Pod",
 			err:      false,
 			volname:  "vol1",
-			expected: sets.NewString(filepath.Join("sub1", "sub2", "sub3"), filepath.Join("sub1", "sub2", "sub4"), filepath.Join("sub1", "sub2", "sub6"), "sub"),
+			expected: sets.New[string](filepath.Join("sub1", "sub2", "sub3"), filepath.Join("sub1", "sub2", "sub4"), filepath.Join("sub1", "sub2", "sub6"), "sub"),
 			pod: v1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: testNamespace,
@@ -202,7 +201,7 @@ func TestGetNestedMountpoints(t *testing.T) {
 		},
 	}
 	for _, test := range tc {
-		dir, err := ioutil.TempDir("", "TestMakeNestedMountpoints.")
+		dir, err := os.MkdirTemp("", "TestMakeNestedMountpoints.")
 		if err != nil {
 			t.Errorf("Unexpected error trying to create temp directory: %v", err)
 			return
@@ -228,7 +227,7 @@ func TestGetNestedMountpoints(t *testing.T) {
 				continue
 			}
 		}
-		actual := sets.NewString(dirs...)
+		actual := sets.New[string](dirs...)
 		if !test.expected.Equal(actual) {
 			t.Errorf("%v: unexpected nested directories created:\nexpected: %v\n     got: %v", test.name, test.expected, actual)
 		}

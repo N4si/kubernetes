@@ -25,13 +25,13 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/generic"
@@ -39,6 +39,7 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 	storeerr "k8s.io/apiserver/pkg/storage/errors"
 	etcd3testing "k8s.io/apiserver/pkg/storage/etcd3/testing"
+	podtest "k8s.io/kubernetes/pkg/api/pod/testing"
 	"k8s.io/kubernetes/pkg/apis/apps"
 	"k8s.io/kubernetes/pkg/apis/autoscaling"
 	api "k8s.io/kubernetes/pkg/apis/core"
@@ -71,26 +72,15 @@ func validNewDeployment() *apps.Deployment {
 			Strategy: apps.DeploymentStrategy{
 				Type: apps.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &apps.RollingUpdateDeployment{
-					MaxSurge:       intstr.FromInt(1),
-					MaxUnavailable: intstr.FromInt(1),
+					MaxSurge:       intstr.FromInt32(1),
+					MaxUnavailable: intstr.FromInt32(1),
 				},
 			},
 			Template: api.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{"a": "b"},
 				},
-				Spec: api.PodSpec{
-					Containers: []api.Container{
-						{
-							Name:                     "test",
-							Image:                    "test_image",
-							ImagePullPolicy:          api.PullIfNotPresent,
-							TerminationMessagePolicy: api.TerminationMessageReadFile,
-						},
-					},
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSClusterFirst,
-				},
+				Spec: podtest.MakePodSpec(),
 			},
 			Replicas: 7,
 		},
@@ -242,7 +232,7 @@ func TestScaleGet(t *testing.T) {
 	}
 	got := obj.(*autoscaling.Scale)
 	if !apiequality.Semantic.DeepEqual(want, got) {
-		t.Errorf("unexpected scale: %s", diff.ObjectDiff(want, got))
+		t.Errorf("unexpected scale: %s", cmp.Diff(want, got))
 	}
 }
 

@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	clientgorbacv1 "k8s.io/client-go/kubernetes/typed/rbac/v1"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/scheme"
@@ -115,7 +116,7 @@ var (
 func AddSpecialVerb(verb string, gr schema.GroupResource) {
 	resources, ok := specialVerbs[verb]
 	if !ok {
-		resources = make([]schema.GroupResource, 1)
+		resources = make([]schema.GroupResource, 0, 1)
 	}
 	resources = append(resources, gr)
 	specialVerbs[verb] = resources
@@ -148,11 +149,11 @@ type CreateRoleOptions struct {
 	FieldManager        string
 	CreateAnnotation    bool
 
-	genericclioptions.IOStreams
+	genericiooptions.IOStreams
 }
 
 // NewCreateRoleOptions returns an initialized CreateRoleOptions instance
-func NewCreateRoleOptions(ioStreams genericclioptions.IOStreams) *CreateRoleOptions {
+func NewCreateRoleOptions(ioStreams genericiooptions.IOStreams) *CreateRoleOptions {
 	return &CreateRoleOptions{
 		PrintFlags: genericclioptions.NewPrintFlags("created").WithTypeSetter(scheme.Scheme),
 
@@ -161,7 +162,7 @@ func NewCreateRoleOptions(ioStreams genericclioptions.IOStreams) *CreateRoleOpti
 }
 
 // NewCmdCreateRole returnns an initialized Command instance for 'create role' sub command
-func NewCmdCreateRole(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobra.Command {
+func NewCmdCreateRole(f cmdutil.Factory, ioStreams genericiooptions.IOStreams) *cobra.Command {
 	o := NewCreateRoleOptions(ioStreams)
 
 	cmd := &cobra.Command{
@@ -424,7 +425,7 @@ func generateResourcePolicyRules(mapper meta.RESTMapper, verbs []string, resourc
 
 	// Create separate rule for each of the api group.
 	rules := []rbacv1.PolicyRule{}
-	for _, g := range sets.StringKeySet(groupResourceMapping).List() {
+	for _, g := range sets.List(sets.KeySet(groupResourceMapping)) {
 		rule := rbacv1.PolicyRule{}
 		rule.Verbs = verbs
 		rule.Resources = groupResourceMapping[g]

@@ -17,6 +17,7 @@ limitations under the License.
 package workqueue_test
 
 import (
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,23 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/workqueue"
 )
+
+// traceQueue traces whether items are touched
+type traceQueue struct {
+	workqueue.Queue[any]
+
+	touched map[interface{}]struct{}
+}
+
+func (t *traceQueue) Touch(item interface{}) {
+	t.Queue.Touch(item)
+	if t.touched == nil {
+		t.touched = make(map[interface{}]struct{})
+	}
+	t.touched[item] = struct{}{}
+}
+
+var _ workqueue.Queue[any] = &traceQueue{}
 
 func TestBasic(t *testing.T) {
 	tests := []struct {
@@ -197,6 +215,88 @@ func TestReinsert(t *testing.T) {
 	}
 }
 
+func TestCollapse(t *testing.T) {
+	tq := &traceQueue{Queue: workqueue.DefaultQueue[any]()}
+	q := workqueue.NewWithConfig(workqueue.QueueConfig{
+		Name:  "",
+		Queue: tq,
+	})
+	// Add a new one twice
+	q.Add("bar")
+	q.Add("bar")
+
+	// It should get the new one
+	i, _ := q.Get()
+	if i != "bar" {
+		t.Errorf("Expected %v, got %v", "bar", i)
+	}
+
+	// Finish that one up
+	q.Done(i)
+
+	// There should be no more objects in the queue
+	if a := q.Len(); a != 0 {
+		t.Errorf("Expected queue to be empty. Has %v items", a)
+	}
+
+	if _, ok := tq.touched["bar"]; !ok {
+		t.Errorf("Expected bar to be Touched")
+	}
+}
+
+func TestCollapseWhileProcessing(t *testing.T) {
+	tq := &traceQueue{Queue: workqueue.DefaultQueue[any]()}
+	q := workqueue.NewWithConfig(workqueue.QueueConfig{
+		Name:  "",
+		Queue: tq,
+	})
+	q.Add("foo")
+
+	// Start processing
+	i, _ := q.Get()
+	if i != "foo" {
+		t.Errorf("Expected %v, got %v", "foo", i)
+	}
+
+	// Add the same one twice
+	q.Add("foo")
+	q.Add("foo")
+
+	waitCh := make(chan struct{})
+	// simulate another worker consuming the queue
+	go func() {
+		defer close(waitCh)
+		i, _ := q.Get()
+		if i != "foo" {
+			t.Errorf("Expected %v, got %v", "foo", i)
+		}
+		// Finish that one up
+		q.Done(i)
+	}()
+
+	// give the worker some head start to avoid races
+	// on the select statement that cause flakiness
+	time.Sleep(100 * time.Millisecond)
+	// Finish the first one to unblock the other worker
+	select {
+	case <-waitCh:
+		t.Errorf("worker should be blocked until we are done")
+	default:
+		q.Done("foo")
+	}
+
+	// wait for the worker to consume the new object
+	// There should be no more objects in the queue
+	<-waitCh
+	if a := q.Len(); a != 0 {
+		t.Errorf("Expected queue to be empty. Has %v items", a)
+	}
+
+	if _, ok := tq.touched["foo"]; ok {
+		t.Errorf("Unexpected Touch")
+	}
+}
+
 func TestQueueDrainageUsingShutDownWithDrain(t *testing.T) {
 
 	q := workqueue.New()
@@ -360,4 +460,22 @@ func mustGarbageCollect(t *testing.T, i interface{}) {
 			t.Errorf("object was not garbage collected")
 		}
 	})
+}
+
+func BenchmarkQueue(b *testing.B) {
+	keys := make([]string, 100)
+	for idx := range keys {
+		keys[idx] = fmt.Sprintf("key-%d", idx)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		q := workqueue.NewTypedWithConfig(workqueue.TypedQueueConfig[string]{})
+		b.StartTimer()
+		for j := 0; j < 100; j++ {
+			q.Add(keys[j])
+			key, _ := q.Get()
+			q.Done(key)
+		}
+	}
 }

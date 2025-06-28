@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
@@ -54,7 +55,7 @@ const (
 	rebootPodReadyAgainTimeout = 5 * time.Minute
 )
 
-var _ = SIGDescribe("Reboot [Disruptive] [Feature:Reboot]", func() {
+var _ = SIGDescribe("Reboot", framework.WithDisruptive(), feature.Reboot, func() {
 	var f *framework.Framework
 
 	ginkgo.BeforeEach(func() {
@@ -78,21 +79,10 @@ var _ = SIGDescribe("Reboot [Disruptive] [Feature:Reboot]", func() {
 				framework.Logf("event for %v: %v %v: %v", e.InvolvedObject.Name, e.Source, e.Reason, e.Message)
 			}
 		}
-		// In GKE, our current tunneling setup has the potential to hold on to a broken tunnel (from a
-		// rebooted/deleted node) for up to 5 minutes before all tunnels are dropped and recreated.  Most tests
-		// make use of some proxy feature to verify functionality. So, if a reboot test runs right before a test
-		// that tries to get logs, for example, we may get unlucky and try to use a closed tunnel to a node that
-		// was recently rebooted. There's no good way to framework.Poll for proxies being closed, so we sleep.
-		//
-		// TODO(cjcullen) reduce this sleep (#19314)
-		if framework.ProviderIs("gke") {
-			ginkgo.By("waiting 5 minutes for all dead tunnels to be dropped")
-			time.Sleep(5 * time.Minute)
-		}
 	})
 
 	f = framework.NewDefaultFramework("reboot")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.It("each node by ordering clean reboot and ensure they function upon restart", func(ctx context.Context) {
 		// clean shutdown and restart

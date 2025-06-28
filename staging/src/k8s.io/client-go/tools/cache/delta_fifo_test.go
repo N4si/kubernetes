@@ -17,7 +17,6 @@ limitations under the License.
 package cache
 
 import (
-	"errors"
 	"fmt"
 	"reflect"
 	"runtime"
@@ -25,9 +24,78 @@ import (
 	"time"
 )
 
+// List returns a list of all the items; it returns the object
+// from the most recent Delta.
+// You should treat the items returned inside the deltas as immutable.
+// This function was moved here because it is not consistent with normal list semantics, but is used in unit testing.
+func (f *DeltaFIFO) List() []interface{} {
+	f.lock.RLock()
+	defer f.lock.RUnlock()
+	return f.listLocked()
+}
+
+// This function was moved here because it is not consistent with normal list semantics, but is used in unit testing.
+func (f *DeltaFIFO) listLocked() []interface{} {
+	list := make([]interface{}, 0, len(f.items))
+	for _, item := range f.items {
+		list = append(list, item.Newest().Object)
+	}
+	return list
+}
+
+// ListKeys returns a list of all the keys of the objects currently
+// in the FIFO.
+// This function was moved here because it is not consistent with normal list semantics, but is used in unit testing.
+func (f *DeltaFIFO) ListKeys() []string {
+	f.lock.RLock()
+	defer f.lock.RUnlock()
+	list := make([]string, 0, len(f.queue))
+	for _, key := range f.queue {
+		list = append(list, key)
+	}
+	return list
+}
+
+// Get returns the complete list of deltas for the requested item,
+// or sets exists=false.
+// You should treat the items returned inside the deltas as immutable.
+// This function was moved here because it is not consistent with normal list semantics, but is used in unit testing.
+func (f *DeltaFIFO) Get(obj interface{}) (item interface{}, exists bool, err error) {
+	key, err := f.KeyOf(obj)
+	if err != nil {
+		return nil, false, KeyError{obj, err}
+	}
+	return f.GetByKey(key)
+}
+
+// GetByKey returns the complete list of deltas for the requested item,
+// setting exists=false if that list is empty.
+// You should treat the items returned inside the deltas as immutable.
+// This function was moved here because it is not consistent with normal list semantics, but is used in unit testing.
+func (f *DeltaFIFO) GetByKey(key string) (item interface{}, exists bool, err error) {
+	f.lock.RLock()
+	defer f.lock.RUnlock()
+	d, exists := f.items[key]
+	if exists {
+		// Copy item's slice so operations on this slice
+		// won't interfere with the object we return.
+		d = copyDeltas(d)
+	}
+	return d, exists, nil
+}
+
 // helper function to reduce stuttering
 func testPop(f *DeltaFIFO) testFifoObject {
 	return Pop(f).(Deltas).Newest().Object.(testFifoObject)
+}
+
+// testPopIfAvailable returns `{}, false` if Pop returns a nil object
+func testPopIfAvailable(f *DeltaFIFO) (testFifoObject, bool) {
+	obj := Pop(f)
+	if obj == nil {
+		return testFifoObject{}, false
+	}
+	return obj.(Deltas).Newest().Object.(testFifoObject), true
 }
 
 // literalListerGetter is a KeyListerGetter that is based on a
@@ -245,52 +313,9 @@ func TestDeltaFIFOW_ReplaceMakesDeletionsForObjectsOnlyInQueue(t *testing.T) {
 	}
 }
 
-func TestDeltaFIFO_requeueOnPop(t *testing.T) {
-	f := NewDeltaFIFOWithOptions(DeltaFIFOOptions{KeyFunction: testFifoObjectKeyFunc})
-
-	f.Add(mkFifoObj("foo", 10))
-	_, err := f.Pop(func(obj interface{}, isInInitialList bool) error {
-		if obj.(Deltas)[0].Object.(testFifoObject).name != "foo" {
-			t.Fatalf("unexpected object: %#v", obj)
-		}
-		return ErrRequeue{Err: nil}
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if _, ok, err := f.GetByKey("foo"); !ok || err != nil {
-		t.Fatalf("object should have been requeued: %t %v", ok, err)
-	}
-
-	_, err = f.Pop(func(obj interface{}, isInInitialList bool) error {
-		if obj.(Deltas)[0].Object.(testFifoObject).name != "foo" {
-			t.Fatalf("unexpected object: %#v", obj)
-		}
-		return ErrRequeue{Err: fmt.Errorf("test error")}
-	})
-	if err == nil || err.Error() != "test error" {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if _, ok, err := f.GetByKey("foo"); !ok || err != nil {
-		t.Fatalf("object should have been requeued: %t %v", ok, err)
-	}
-
-	_, err = f.Pop(func(obj interface{}, isInInitialList bool) error {
-		if obj.(Deltas)[0].Object.(testFifoObject).name != "foo" {
-			t.Fatalf("unexpected object: %#v", obj)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if _, ok, err := f.GetByKey("foo"); ok || err != nil {
-		t.Fatalf("object should have been removed: %t %v", ok, err)
-	}
-}
-
 func TestDeltaFIFO_addUpdate(t *testing.T) {
 	f := NewDeltaFIFOWithOptions(DeltaFIFOOptions{KeyFunction: testFifoObjectKeyFunc})
+	defer f.Close()
 	f.Add(mkFifoObj("foo", 10))
 	f.Update(mkFifoObj("foo", 12))
 	f.Delete(mkFifoObj("foo", 15))
@@ -305,7 +330,10 @@ func TestDeltaFIFO_addUpdate(t *testing.T) {
 	got := make(chan testFifoObject, 2)
 	go func() {
 		for {
-			obj := testPop(f)
+			obj, ok := testPopIfAvailable(f)
+			if !ok {
+				return
+			}
 			t.Logf("got a thing %#v", obj)
 			t.Logf("D len: %v", len(f.queue))
 			got <- obj
@@ -324,6 +352,88 @@ func TestDeltaFIFO_addUpdate(t *testing.T) {
 	_, exists, _ := f.Get(mkFifoObj("foo", ""))
 	if exists {
 		t.Errorf("item did not get removed")
+	}
+}
+
+type rvAndXfrm struct {
+	rv   int
+	xfrm int
+}
+
+func TestDeltaFIFO_transformer(t *testing.T) {
+	mk := func(name string, rv int) testFifoObject {
+		return mkFifoObj(name, &rvAndXfrm{rv, 0})
+	}
+	xfrm := TransformFunc(func(obj interface{}) (interface{}, error) {
+		switch v := obj.(type) {
+		case testFifoObject:
+			v.val.(*rvAndXfrm).xfrm++
+		case DeletedFinalStateUnknown:
+			if x := v.Obj.(testFifoObject).val.(*rvAndXfrm).xfrm; x != 1 {
+				return nil, fmt.Errorf("object has been transformed wrong number of times: %#v", obj)
+			}
+		default:
+			return nil, fmt.Errorf("unexpected object: %#v", obj)
+		}
+		return obj, nil
+	})
+
+	must := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	f := NewDeltaFIFOWithOptions(DeltaFIFOOptions{
+		KeyFunction: testFifoObjectKeyFunc,
+		Transformer: xfrm,
+	})
+	must(f.Add(mk("foo", 10)))
+	must(f.Add(mk("bar", 11)))
+	must(f.Update(mk("foo", 12)))
+	must(f.Delete(mk("foo", 15)))
+	must(f.Replace([]interface{}{}, ""))
+	must(f.Add(mk("bar", 16)))
+	must(f.Replace([]interface{}{}, ""))
+
+	// Should be empty
+	if e, a := []string{"foo", "bar"}, f.ListKeys(); !reflect.DeepEqual(e, a) {
+		t.Errorf("Expected %+v, got %+v", e, a)
+	}
+
+	for i := 0; i < 2; i++ {
+		obj, err := f.Pop(func(o interface{}, isInInitialList bool) error { return nil })
+		if err != nil {
+			t.Fatalf("got nothing on try %v?", i)
+		}
+		obj = obj.(Deltas).Newest().Object
+		switch v := obj.(type) {
+		case testFifoObject:
+			if v.name != "foo" {
+				t.Errorf("expected regular deletion of foo, got %q", v.name)
+			}
+			rx := v.val.(*rvAndXfrm)
+			if rx.rv != 15 {
+				t.Errorf("expected last message, got %#v", obj)
+			}
+			if rx.xfrm != 1 {
+				t.Errorf("obj %v transformed wrong number of times.", obj)
+			}
+		case DeletedFinalStateUnknown:
+			tf := v.Obj.(testFifoObject)
+			rx := tf.val.(*rvAndXfrm)
+			if tf.name != "bar" {
+				t.Errorf("expected tombstone deletion of bar, got %q", tf.name)
+			}
+			if rx.rv != 16 {
+				t.Errorf("expected last message, got %#v", obj)
+			}
+			if rx.xfrm != 1 {
+				t.Errorf("tombstoned obj %v transformed wrong number of times.", obj)
+			}
+		default:
+			t.Errorf("unknown item %#v", obj)
+		}
 	}
 }
 
@@ -374,12 +484,17 @@ func TestDeltaFIFO_enqueueingWithLister(t *testing.T) {
 
 func TestDeltaFIFO_addReplace(t *testing.T) {
 	f := NewDeltaFIFOWithOptions(DeltaFIFOOptions{KeyFunction: testFifoObjectKeyFunc})
+	defer f.Close()
 	f.Add(mkFifoObj("foo", 10))
 	f.Replace([]interface{}{mkFifoObj("foo", 15)}, "0")
 	got := make(chan testFifoObject, 2)
 	go func() {
 		for {
-			got <- testPop(f)
+			obj, ok := testPopIfAvailable(f)
+			if !ok {
+				return
+			}
+			got <- obj
 		}
 	}()
 
@@ -736,39 +851,6 @@ func TestDeltaFIFO_detectLineJumpers(t *testing.T) {
 
 	if e, a := 14, testPop(f).val; a != e {
 		t.Fatalf("expected %d, got %d", e, a)
-	}
-}
-
-func TestDeltaFIFO_addIfNotPresent(t *testing.T) {
-	f := NewDeltaFIFOWithOptions(DeltaFIFOOptions{KeyFunction: testFifoObjectKeyFunc})
-
-	emptyDeltas := Deltas{}
-	if err := f.AddIfNotPresent(emptyDeltas); err == nil || !errors.Is(err, ErrZeroLengthDeltasObject) {
-		t.Errorf("Expected error '%v', got %v", ErrZeroLengthDeltasObject, err)
-	}
-
-	f.Add(mkFifoObj("b", 3))
-	b3 := Pop(f)
-	f.Add(mkFifoObj("c", 4))
-	c4 := Pop(f)
-	if e, a := 0, len(f.items); e != a {
-		t.Fatalf("Expected %v, got %v items in queue", e, a)
-	}
-
-	f.Add(mkFifoObj("a", 1))
-	f.Add(mkFifoObj("b", 2))
-	f.AddIfNotPresent(b3)
-	f.AddIfNotPresent(c4)
-
-	if e, a := 3, len(f.items); a != e {
-		t.Fatalf("expected queue length %d, got %d", e, a)
-	}
-
-	expectedValues := []int{1, 2, 4}
-	for _, expected := range expectedValues {
-		if actual := testPop(f).val; actual != expected {
-			t.Fatalf("expected value %d, got %d", expected, actual)
-		}
 	}
 }
 

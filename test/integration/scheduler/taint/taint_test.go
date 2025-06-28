@@ -19,7 +19,6 @@ package taint
 // This file tests the Taint feature.
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -34,11 +33,6 @@ import (
 	"k8s.io/kubernetes/plugin/pkg/admission/podtolerationrestriction"
 	pluginapi "k8s.io/kubernetes/plugin/pkg/admission/podtolerationrestriction/apis/podtolerationrestriction"
 	testutils "k8s.io/kubernetes/test/integration/util"
-)
-
-// imported from testutils
-var (
-	waitForPodUnschedulable = testutils.WaitForPodUnschedulable
 )
 
 func newPod(nsName, name string, req, limit v1.ResourceList) *v1.Pod {
@@ -79,14 +73,13 @@ func TestTaintNodeByCondition(t *testing.T) {
 	admission.SetExternalKubeInformerFactory(externalInformers)
 
 	testCtx = testutils.InitTestScheduler(t, testCtx)
-	defer testutils.CleanupTest(t, testCtx)
 
 	cs := testCtx.ClientSet
 	nsName := testCtx.NS.Name
 
 	// Start NodeLifecycleController for taint.
 	nc, err := nodelifecycle.NewNodeLifecycleController(
-		context.TODO(),
+		testCtx.Ctx,
 		externalInformers.Coordination().V1().Leases(),
 		externalInformers.Core().V1().Pods(),
 		externalInformers.Core().V1().Nodes(),
@@ -95,12 +88,10 @@ func TestTaintNodeByCondition(t *testing.T) {
 		time.Hour,   // Node monitor grace period
 		time.Second, // Node startup grace period
 		time.Second, // Node monitor period
-		time.Second, // Pod eviction timeout
 		100,         // Eviction limiter QPS
 		100,         // Secondary eviction limiter QPS
 		100,         // Large cluster threshold
 		100,         // Unhealthy zone threshold
-		true,        // Run taint manager
 	)
 	if err != nil {
 		t.Errorf("Failed to create node controller: %v", err)
@@ -110,7 +101,7 @@ func TestTaintNodeByCondition(t *testing.T) {
 	// Waiting for all controllers to sync
 	externalInformers.Start(testCtx.Ctx.Done())
 	externalInformers.WaitForCacheSync(testCtx.Ctx.Done())
-	testutils.SyncInformerFactory(testCtx)
+	testutils.SyncSchedulerInformerFactory(testCtx)
 
 	// Run all controllers
 	go nc.Run(testCtx.Ctx)
@@ -527,11 +518,11 @@ func TestTaintNodeByCondition(t *testing.T) {
 				},
 			}
 
-			if _, err := cs.CoreV1().Nodes().Create(context.TODO(), node, metav1.CreateOptions{}); err != nil {
+			if _, err := cs.CoreV1().Nodes().Create(testCtx.Ctx, node, metav1.CreateOptions{}); err != nil {
 				t.Errorf("Failed to create node, err: %v", err)
 			}
-			if err := testutils.WaitForNodeTaints(cs, node, test.expectedTaints); err != nil {
-				node, err = cs.CoreV1().Nodes().Get(context.TODO(), node.Name, metav1.GetOptions{})
+			if err := testutils.WaitForNodeTaints(testCtx.Ctx, cs, node, test.expectedTaints); err != nil {
+				node, err = cs.CoreV1().Nodes().Get(testCtx.Ctx, node.Name, metav1.GetOptions{})
 				if err != nil {
 					t.Errorf("Failed to get node <%s>", node.Name)
 				}
@@ -545,7 +536,7 @@ func TestTaintNodeByCondition(t *testing.T) {
 				pod.Name = fmt.Sprintf("%s-%d", pod.Name, i)
 				pod.Spec.Tolerations = p.tolerations
 
-				createdPod, err := cs.CoreV1().Pods(pod.Namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
+				createdPod, err := cs.CoreV1().Pods(pod.Namespace).Create(testCtx.Ctx, pod, metav1.CreateOptions{})
 				if err != nil {
 					t.Fatalf("Failed to create pod %s/%s, error: %v",
 						pod.Namespace, pod.Name, err)
@@ -554,21 +545,21 @@ func TestTaintNodeByCondition(t *testing.T) {
 				pods = append(pods, createdPod)
 
 				if p.fits {
-					if err := testutils.WaitForPodToSchedule(cs, createdPod); err != nil {
+					if err := testutils.WaitForPodToSchedule(testCtx.Ctx, cs, createdPod); err != nil {
 						t.Errorf("Failed to schedule pod %s/%s on the node, err: %v",
 							pod.Namespace, pod.Name, err)
 					}
 				} else {
-					if err := waitForPodUnschedulable(cs, createdPod); err != nil {
+					if err := testutils.WaitForPodUnschedulable(testCtx.Ctx, cs, createdPod); err != nil {
 						t.Errorf("Unschedulable pod %s/%s gets scheduled on the node, err: %v",
 							pod.Namespace, pod.Name, err)
 					}
 				}
 			}
 
-			testutils.CleanupPods(cs, t, pods)
+			testutils.CleanupPods(testCtx.Ctx, cs, t, pods)
 			testutils.CleanupNodes(cs, t)
-			testutils.WaitForSchedulerCacheCleanup(testCtx.Scheduler, t)
+			testutils.WaitForSchedulerCacheCleanup(testCtx.Ctx, testCtx.Scheduler, t)
 		})
 	}
 }

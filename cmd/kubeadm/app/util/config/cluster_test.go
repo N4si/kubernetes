@@ -25,21 +25,22 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/pkg/errors"
-
+	authv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
 	clientsetfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
+	kubeadmapiv1old "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	"k8s.io/kubernetes/cmd/kubeadm/app/componentconfigs"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 	testresources "k8s.io/kubernetes/cmd/kubeadm/test/resources"
 )
 
@@ -49,8 +50,17 @@ var cfgFiles = map[string][]byte{
 	"InitConfiguration_v1beta3": []byte(fmt.Sprintf(`
 apiVersion: %s
 kind: InitConfiguration
-`, kubeadmapiv1.SchemeGroupVersion.String())),
+`, kubeadmapiv1old.SchemeGroupVersion.String())),
 	"ClusterConfiguration_v1beta3": []byte(fmt.Sprintf(`
+apiVersion: %s
+kind: ClusterConfiguration
+kubernetesVersion: %s
+`, kubeadmapiv1old.SchemeGroupVersion.String(), k8sVersionString)),
+	"InitConfiguration_v1beta4": []byte(fmt.Sprintf(`
+apiVersion: %s
+kind: InitConfiguration
+`, kubeadmapiv1.SchemeGroupVersion.String())),
+	"ClusterConfiguration_v1beta4": []byte(fmt.Sprintf(`
 apiVersion: %s
 kind: ClusterConfiguration
 kubernetesVersion: %s
@@ -79,7 +89,6 @@ contexts:
   name: system:node:mynode@kubernetes
 current-context: system:node:mynode@kubernetes
 kind: Config
-preferences: {}
 users:
 - name: system:node:mynode
   user:
@@ -97,7 +106,6 @@ contexts:
   name: system:node:mynode@kubernetes
 current-context: system:node:mynode@kubernetes
 kind: Config
-preferences: {}
 users:
 - name: system:node:mynode
   user:
@@ -116,7 +124,6 @@ contexts:
   name: system:node:mynode@kubernetes
 current-context: system:node:mynode@kubernetes
 kind: Config
-preferences: {}
 users:
 - name: system:node:mynode
   user:
@@ -135,7 +142,6 @@ contexts:
   name: system:node:mynode@kubernetes
 current-context: invalidContext
 kind: Config
-preferences: {}
 users:
 - name: system:node:mynode
   user:
@@ -154,7 +160,6 @@ contexts:
   name: system:node:mynode@kubernetes
 current-context: system:node:mynode@kubernetes
 kind: Config
-preferences: {}
 users:
 - name: system:node:mynode
   user:
@@ -325,7 +330,7 @@ func TestGetNodeRegistration(t *testing.T) {
 			}
 
 			cfg := &kubeadmapi.InitConfiguration{}
-			err = GetNodeRegistration(cfgPath, client, &cfg.NodeRegistration)
+			err = GetNodeRegistration(cfgPath, client, &cfg.NodeRegistration, &cfg.ClusterConfiguration)
 			if rt.expectedError != (err != nil) {
 				t.Errorf("unexpected return err from getNodeRegistration: %v", err)
 				return
@@ -461,7 +466,8 @@ func TestGetAPIEndpointWithBackoff(t *testing.T) {
 				}
 			}
 			apiEndpoint := kubeadmapi.APIEndpoint{}
-			err := getAPIEndpointWithBackoff(client, rt.nodeName, &apiEndpoint, wait.Backoff{Duration: 0, Jitter: 0, Steps: 1})
+			err := getAPIEndpointWithRetry(client, rt.nodeName, &apiEndpoint,
+				time.Millisecond*10, time.Millisecond*100)
 			if err != nil && !rt.expectedErr {
 				t.Errorf("got error %q; was expecting no errors", err)
 				return
@@ -508,7 +514,7 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 			expectedError: true,
 		},
 		{
-			name: "valid v1beta3 - new control plane == false", // InitConfiguration composed with data from different places, with also node specific information
+			name: "valid v1beta4 - new control plane == false", // InitConfiguration composed with data from different places, with also node specific information
 			staticPods: []testresources.FakeStaticPod{
 				{
 					NodeName:  nodeName,
@@ -522,7 +528,7 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 				{
 					Name: kubeadmconstants.KubeadmConfigConfigMap, // ClusterConfiguration from kubeadm-config.
 					Data: map[string]string{
-						kubeadmconstants.ClusterConfigurationConfigMapKey: string(cfgFiles["ClusterConfiguration_v1beta3"]),
+						kubeadmconstants.ClusterConfigurationConfigMapKey: string(cfgFiles["ClusterConfiguration_v1beta4"]),
 					},
 				},
 				{
@@ -566,7 +572,7 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 				{
 					Name: kubeadmconstants.KubeadmConfigConfigMap, // ClusterConfiguration from kubeadm-config.
 					Data: map[string]string{
-						kubeadmconstants.ClusterConfigurationConfigMapKey: string(cfgFiles["ClusterConfiguration_v1beta3"]),
+						kubeadmconstants.ClusterConfigurationConfigMapKey: string(cfgFiles["ClusterConfiguration_v1beta4"]),
 					},
 				},
 				{
@@ -646,6 +652,12 @@ func TestGetInitConfigurationFromCluster(t *testing.T) {
 			if !rt.newControlPlane && (cfg.LocalAPIEndpoint.AdvertiseAddress != "1.2.3.4" || cfg.LocalAPIEndpoint.BindPort != 1234) {
 				t.Errorf("invalid cfg.LocalAPIEndpoint: %v", cfg.LocalAPIEndpoint)
 			}
+			if !rt.newControlPlane && (cfg.NodeRegistration.Name != nodeName || cfg.NodeRegistration.CRISocket != "myCRIsocket" || len(cfg.NodeRegistration.Taints) != 1) {
+				t.Errorf("invalid cfg.NodeRegistration: %v", cfg.NodeRegistration)
+			}
+			if rt.newControlPlane && len(cfg.NodeRegistration.CRISocket) > 0 {
+				t.Errorf("invalid cfg.NodeRegistration.CRISocket: expected empty CRISocket, but got %v", cfg.NodeRegistration.CRISocket)
+			}
 			if _, ok := cfg.ComponentConfigs[componentconfigs.KubeletGroup]; !ok {
 				t.Errorf("no cfg.ComponentConfigs[%q]", componentconfigs.KubeletGroup)
 			}
@@ -712,7 +724,8 @@ func TestGetAPIEndpointFromPodAnnotation(t *testing.T) {
 				rt.clientSetup(client)
 			}
 			apiEndpoint := kubeadmapi.APIEndpoint{}
-			err := getAPIEndpointFromPodAnnotation(client, rt.nodeName, &apiEndpoint, wait.Backoff{Duration: 0, Jitter: 0, Steps: 1})
+			err := getAPIEndpointFromPodAnnotation(client, rt.nodeName, &apiEndpoint,
+				time.Millisecond*10, time.Millisecond*100)
 			if err != nil && !rt.expectedErr {
 				t.Errorf("got error %v, but wasn't expecting any error", err)
 				return
@@ -826,7 +839,7 @@ func TestGetRawAPIEndpointFromPodAnnotationWithoutRetry(t *testing.T) {
 			if rt.clientSetup != nil {
 				rt.clientSetup(client)
 			}
-			endpoint, err := getRawAPIEndpointFromPodAnnotationWithoutRetry(client, rt.nodeName)
+			endpoint, err := getRawAPIEndpointFromPodAnnotationWithoutRetry(context.Background(), client, rt.nodeName)
 			if err != nil && !rt.expectedErr {
 				t.Errorf("got error %v, but wasn't expecting any error", err)
 				return
@@ -838,6 +851,78 @@ func TestGetRawAPIEndpointFromPodAnnotationWithoutRetry(t *testing.T) {
 			}
 			if endpoint != rt.expectedEndpoint {
 				t.Errorf("expected API endpoint: %v; got: %v", rt.expectedEndpoint, endpoint)
+			}
+		})
+	}
+}
+
+func TestGetNodeNameFromSSR(t *testing.T) {
+	var tests = []struct {
+		name             string
+		clientSetup      func(*clientsetfake.Clientset)
+		expectedNodeName string
+		expectedError    bool
+	}{
+		{
+			name: "valid node name",
+			clientSetup: func(clientset *clientsetfake.Clientset) {
+				clientset.PrependReactor("create", "selfsubjectreviews",
+					func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
+						obj := &authv1.SelfSubjectReview{
+							Status: authv1.SelfSubjectReviewStatus{
+								UserInfo: authv1.UserInfo{
+									Username: kubeadmconstants.NodesUserPrefix + "foo",
+								},
+							},
+						}
+						return true, obj, nil
+					})
+			},
+			expectedNodeName: "foo",
+			expectedError:    false,
+		},
+		{
+			name: "SSR created but client is not a node",
+			clientSetup: func(clientset *clientsetfake.Clientset) {
+				clientset.PrependReactor("create", "selfsubjectreviews",
+					func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
+						obj := &authv1.SelfSubjectReview{
+							Status: authv1.SelfSubjectReviewStatus{
+								UserInfo: authv1.UserInfo{
+									Username: "foo",
+								},
+							},
+						}
+						return true, obj, nil
+					})
+			},
+			expectedNodeName: "",
+			expectedError:    true,
+		},
+		{
+			name: "error creating SSR",
+			clientSetup: func(clientset *clientsetfake.Clientset) {
+				clientset.PrependReactor("create", "selfsubjectreviews",
+					func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
+						return true, nil, errors.New("")
+					})
+			},
+			expectedNodeName: "",
+			expectedError:    true,
+		},
+	}
+	for _, rt := range tests {
+		t.Run(rt.name, func(t *testing.T) {
+			client := clientsetfake.NewSimpleClientset()
+			rt.clientSetup(client)
+
+			nodeName, err := getNodeNameFromSSR(client)
+
+			if (err != nil) != rt.expectedError {
+				t.Fatalf("expected error: %+v, got: %+v", rt.expectedError, err)
+			}
+			if rt.expectedNodeName != nodeName {
+				t.Fatalf("expected nodeName: %s, got: %s", rt.expectedNodeName, nodeName)
 			}
 		})
 	}

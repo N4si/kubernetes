@@ -74,8 +74,13 @@ func TestZapLoggerInfo(t *testing.T) {
 		},
 		{
 			msg:        "test for NamespacedName argument",
-			format:     "{\"ts\":%f,\"caller\":\"json/json_test.go:%d\",\"msg\":\"test for NamespacedName argument\",\"v\":0,\"obj\":{\"Name\":\"kube-proxy\",\"Namespace\":\"kube-system\"}}\n",
+			format:     "{\"ts\":%f,\"caller\":\"json/json_test.go:%d\",\"msg\":\"test for NamespacedName argument\",\"v\":0,\"obj\":{\"name\":\"kube-proxy\",\"namespace\":\"kube-system\"}}\n",
 			keysValues: []interface{}{"obj", types.NamespacedName{Name: "kube-proxy", Namespace: "kube-system"}},
+		},
+		{
+			msg:        "test for NamespacedName argument with no namespace",
+			format:     "{\"ts\":%f,\"caller\":\"json/json_test.go:%d\",\"msg\":\"test for NamespacedName argument with no namespace\",\"v\":0,\"obj\":{\"name\":\"kube-proxy\"}}\n",
+			keysValues: []interface{}{"obj", types.NamespacedName{Name: "kube-proxy"}},
 		},
 	}
 
@@ -93,7 +98,7 @@ func TestZapLoggerInfo(t *testing.T) {
 
 		logStrLines := strings.Split(logStr, "\n")
 		dataFormatLines := strings.Split(data.format, "\n")
-		if !assert.Equal(t, len(logStrLines), len(dataFormatLines)) {
+		if !assert.Len(t, logStrLines, len(dataFormatLines)) {
 			t.Errorf("Info has wrong format: no. of lines in log is incorrect \n expect:%d\n got:%d", len(dataFormatLines), len(logStrLines))
 		}
 

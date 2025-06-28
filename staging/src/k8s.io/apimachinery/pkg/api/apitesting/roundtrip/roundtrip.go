@@ -24,11 +24,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/davecgh/go-spew/spew"
-	//nolint:staticcheck //iccheck // SA1019 Keep using deprecated module; it still seems to be maintained and the api of the recommended replacement differs
-	"github.com/golang/protobuf/proto"
-	fuzz "github.com/google/gofuzz"
+	"github.com/google/go-cmp/cmp"
 	flag "github.com/spf13/pflag"
+	"sigs.k8s.io/randfill"
 
 	apitesting "k8s.io/apimachinery/pkg/api/apitesting"
 	"k8s.io/apimachinery/pkg/api/apitesting/fuzzer"
@@ -40,7 +38,7 @@ import (
 	runtimeserializer "k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/apimachinery/pkg/runtime/serializer/protobuf"
-	"k8s.io/apimachinery/pkg/util/diff"
+	"k8s.io/apimachinery/pkg/util/dump"
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
@@ -122,15 +120,15 @@ func GlobalNonRoundTrippableTypes() sets.String {
 
 // RoundTripTypesWithoutProtobuf applies the round-trip test to all round-trippable Kinds
 // in the scheme.  It will skip all the GroupVersionKinds in the skip list.
-func RoundTripTypesWithoutProtobuf(t *testing.T, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *fuzz.Fuzzer, nonRoundTrippableTypes map[schema.GroupVersionKind]bool) {
+func RoundTripTypesWithoutProtobuf(t *testing.T, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *randfill.Filler, nonRoundTrippableTypes map[schema.GroupVersionKind]bool) {
 	roundTripTypes(t, scheme, codecFactory, fuzzer, nonRoundTrippableTypes, true)
 }
 
-func RoundTripTypes(t *testing.T, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *fuzz.Fuzzer, nonRoundTrippableTypes map[schema.GroupVersionKind]bool) {
+func RoundTripTypes(t *testing.T, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *randfill.Filler, nonRoundTrippableTypes map[schema.GroupVersionKind]bool) {
 	roundTripTypes(t, scheme, codecFactory, fuzzer, nonRoundTrippableTypes, false)
 }
 
-func roundTripTypes(t *testing.T, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *fuzz.Fuzzer, nonRoundTrippableTypes map[schema.GroupVersionKind]bool, skipProtobuf bool) {
+func roundTripTypes(t *testing.T, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *randfill.Filler, nonRoundTrippableTypes map[schema.GroupVersionKind]bool, skipProtobuf bool) {
 	for _, group := range groupsFromScheme(scheme) {
 		t.Logf("starting group %q", group)
 		internalVersion := schema.GroupVersion{Group: group, Version: runtime.APIVersionInternal}
@@ -151,7 +149,7 @@ func roundTripTypes(t *testing.T, scheme *runtime.Scheme, codecFactory runtimese
 
 // RoundTripExternalTypes applies the round-trip test to all external round-trippable Kinds
 // in the scheme.  It will skip all the GroupVersionKinds in the nonRoundTripExternalTypes list .
-func RoundTripExternalTypes(t *testing.T, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *fuzz.Fuzzer, nonRoundTrippableTypes map[schema.GroupVersionKind]bool) {
+func RoundTripExternalTypes(t *testing.T, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *randfill.Filler, nonRoundTrippableTypes map[schema.GroupVersionKind]bool) {
 	kinds := scheme.AllKnownTypes()
 	for gvk := range kinds {
 		if gvk.Version == runtime.APIVersionInternal || globalNonRoundTrippableTypes.Has(gvk.Kind) {
@@ -165,7 +163,7 @@ func RoundTripExternalTypes(t *testing.T, scheme *runtime.Scheme, codecFactory r
 
 // RoundTripExternalTypesWithoutProtobuf applies the round-trip test to all external round-trippable Kinds
 // in the scheme.  It will skip all the GroupVersionKinds in the nonRoundTripExternalTypes list.
-func RoundTripExternalTypesWithoutProtobuf(t *testing.T, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *fuzz.Fuzzer, nonRoundTrippableTypes map[schema.GroupVersionKind]bool) {
+func RoundTripExternalTypesWithoutProtobuf(t *testing.T, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *randfill.Filler, nonRoundTrippableTypes map[schema.GroupVersionKind]bool) {
 	kinds := scheme.AllKnownTypes()
 	for gvk := range kinds {
 		if gvk.Version == runtime.APIVersionInternal || globalNonRoundTrippableTypes.Has(gvk.Kind) {
@@ -177,15 +175,15 @@ func RoundTripExternalTypesWithoutProtobuf(t *testing.T, scheme *runtime.Scheme,
 	}
 }
 
-func RoundTripSpecificKindWithoutProtobuf(t *testing.T, gvk schema.GroupVersionKind, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *fuzz.Fuzzer, nonRoundTrippableTypes map[schema.GroupVersionKind]bool) {
+func RoundTripSpecificKindWithoutProtobuf(t *testing.T, gvk schema.GroupVersionKind, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *randfill.Filler, nonRoundTrippableTypes map[schema.GroupVersionKind]bool) {
 	roundTripSpecificKind(t, gvk, scheme, codecFactory, fuzzer, nonRoundTrippableTypes, true)
 }
 
-func RoundTripSpecificKind(t *testing.T, gvk schema.GroupVersionKind, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *fuzz.Fuzzer, nonRoundTrippableTypes map[schema.GroupVersionKind]bool) {
+func RoundTripSpecificKind(t *testing.T, gvk schema.GroupVersionKind, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *randfill.Filler, nonRoundTrippableTypes map[schema.GroupVersionKind]bool) {
 	roundTripSpecificKind(t, gvk, scheme, codecFactory, fuzzer, nonRoundTrippableTypes, false)
 }
 
-func roundTripSpecificKind(t *testing.T, gvk schema.GroupVersionKind, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *fuzz.Fuzzer, nonRoundTrippableTypes map[schema.GroupVersionKind]bool, skipProtobuf bool) {
+func roundTripSpecificKind(t *testing.T, gvk schema.GroupVersionKind, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *randfill.Filler, nonRoundTrippableTypes map[schema.GroupVersionKind]bool, skipProtobuf bool) {
 	if nonRoundTrippableTypes[gvk] {
 		t.Logf("skipping %v", gvk)
 		return
@@ -206,8 +204,8 @@ func roundTripSpecificKind(t *testing.T, gvk schema.GroupVersionKind, scheme *ru
 
 // fuzzInternalObject fuzzes an arbitrary runtime object using the appropriate
 // fuzzer registered with the apitesting package.
-func fuzzInternalObject(t *testing.T, fuzzer *fuzz.Fuzzer, object runtime.Object) runtime.Object {
-	fuzzer.Fuzz(object)
+func fuzzInternalObject(t *testing.T, fuzzer *randfill.Filler, object runtime.Object) runtime.Object {
+	fuzzer.Fill(object)
 
 	j, err := apimeta.TypeAccessor(object)
 	if err != nil {
@@ -227,7 +225,7 @@ func groupsFromScheme(scheme *runtime.Scheme) []string {
 	return ret.List()
 }
 
-func roundTripToAllExternalVersions(t *testing.T, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *fuzz.Fuzzer, internalGVK schema.GroupVersionKind, nonRoundTrippableTypes map[schema.GroupVersionKind]bool, skipProtobuf bool) {
+func roundTripToAllExternalVersions(t *testing.T, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *randfill.Filler, internalGVK schema.GroupVersionKind, nonRoundTrippableTypes map[schema.GroupVersionKind]bool, skipProtobuf bool) {
 	object, err := scheme.New(internalGVK)
 	if err != nil {
 		t.Fatalf("Couldn't make a %v? %v", internalGVK, err)
@@ -264,7 +262,7 @@ func roundTripToAllExternalVersions(t *testing.T, scheme *runtime.Scheme, codecF
 	}
 }
 
-func roundTripOfExternalType(t *testing.T, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *fuzz.Fuzzer, externalGVK schema.GroupVersionKind, skipProtobuf bool) {
+func roundTripOfExternalType(t *testing.T, scheme *runtime.Scheme, codecFactory runtimeserializer.CodecFactory, fuzzer *randfill.Filler, externalGVK schema.GroupVersionKind, skipProtobuf bool) {
 	object, err := scheme.New(externalGVK)
 	if err != nil {
 		t.Fatalf("Couldn't make a %v? %v", externalGVK, err)
@@ -279,7 +277,7 @@ func roundTripOfExternalType(t *testing.T, scheme *runtime.Scheme, codecFactory 
 	typeAcc.SetKind(externalGVK.Kind)
 	typeAcc.SetAPIVersion(externalGVK.GroupVersion().String())
 
-	roundTrip(t, scheme, json.NewSerializer(json.DefaultMetaFactory, scheme, scheme, false), object)
+	roundTrip(t, scheme, json.NewSerializerWithOptions(json.DefaultMetaFactory, scheme, scheme, json.SerializerOptions{}), object)
 
 	// TODO remove this hack after we're past the intermediate steps
 	if !skipProtobuf {
@@ -299,16 +297,15 @@ func roundTripOfExternalType(t *testing.T, scheme *runtime.Scheme, codecFactory 
 //
 //	external -> json/protobuf -> external.
 func roundTrip(t *testing.T, scheme *runtime.Scheme, codec runtime.Codec, object runtime.Object) {
-	printer := spew.ConfigState{DisableMethods: true}
 	original := object
 
 	// deep copy the original object
 	object = object.DeepCopyObject()
 	name := reflect.TypeOf(object).Elem().Name()
 	if !apiequality.Semantic.DeepEqual(original, object) {
-		t.Errorf("%v: DeepCopy altered the object, diff: %v", name, diff.ObjectReflectDiff(original, object))
-		t.Errorf("%s", spew.Sdump(original))
-		t.Errorf("%s", spew.Sdump(object))
+		t.Errorf("%v: DeepCopy altered the object, diff: %v", name, cmp.Diff(original, object))
+		t.Errorf("%s", dump.Pretty(original))
+		t.Errorf("%s", dump.Pretty(object))
 		return
 	}
 
@@ -316,9 +313,9 @@ func roundTrip(t *testing.T, scheme *runtime.Scheme, codec runtime.Codec, object
 	data, err := runtime.Encode(codec, object)
 	if err != nil {
 		if runtime.IsNotRegisteredError(err) {
-			t.Logf("%v: not registered: %v (%s)", name, err, printer.Sprintf("%#v", object))
+			t.Logf("%v: not registered: %v (%s)", name, err, dump.Pretty(object))
 		} else {
-			t.Errorf("%v: %v (%s)", name, err, printer.Sprintf("%#v", object))
+			t.Errorf("%v: %v (%s)", name, err, dump.Pretty(object))
 		}
 		return
 	}
@@ -327,7 +324,7 @@ func roundTrip(t *testing.T, scheme *runtime.Scheme, codec runtime.Codec, object
 	// copy or conversion should alter the object
 	// TODO eliminate this global
 	if !apiequality.Semantic.DeepEqual(original, object) {
-		t.Errorf("%v: encode altered the object, diff: %v", name, diff.ObjectReflectDiff(original, object))
+		t.Errorf("%v: encode altered the object, diff: %v", name, cmp.Diff(original, object))
 		return
 	}
 
@@ -335,9 +332,9 @@ func roundTrip(t *testing.T, scheme *runtime.Scheme, codec runtime.Codec, object
 	secondData, err := runtime.Encode(codec, object)
 	if err != nil {
 		if runtime.IsNotRegisteredError(err) {
-			t.Logf("%v: not registered: %v (%s)", name, err, printer.Sprintf("%#v", object))
+			t.Logf("%v: not registered: %v (%s)", name, err, dump.Pretty(object))
 		} else {
-			t.Errorf("%v: %v (%s)", name, err, printer.Sprintf("%#v", object))
+			t.Errorf("%v: %v (%s)", name, err, dump.Pretty(object))
 		}
 		return
 	}
@@ -345,20 +342,20 @@ func roundTrip(t *testing.T, scheme *runtime.Scheme, codec runtime.Codec, object
 	// serialization to the wire must be stable to ensure that we don't write twice to the DB
 	// when the object hasn't changed.
 	if !bytes.Equal(data, secondData) {
-		t.Errorf("%v: serialization is not stable: %s", name, printer.Sprintf("%#v", object))
+		t.Errorf("%v: serialization is not stable: %s", name, dump.Pretty(object))
 	}
 
 	// decode (deserialize) the encoded data back into an object
 	obj2, err := runtime.Decode(codec, data)
 	if err != nil {
-		t.Errorf("%v: %v\nCodec: %#v\nData: %s\nSource: %#v", name, err, codec, dataAsString(data), printer.Sprintf("%#v", object))
+		t.Errorf("%v: %v\nCodec: %#v\nData: %s\nSource: %s", name, err, codec, dataAsString(data), dump.Pretty(object))
 		panic("failed")
 	}
 
 	// ensure that the object produced from decoding the encoded data is equal
 	// to the original object
 	if !apiequality.Semantic.DeepEqual(original, obj2) {
-		t.Errorf("%v: diff: %v\nCodec: %#v\nSource:\n\n%#v\n\nEncoded:\n\n%s\n\nFinal:\n\n%#v", name, diff.ObjectReflectDiff(original, obj2), codec, printer.Sprintf("%#v", original), dataAsString(data), printer.Sprintf("%#v", obj2))
+		t.Errorf("%v: diff: %v\nCodec: %#v\nSource:\n\n%s\n\nEncoded:\n\n%s\n\nFinal:\n\n%s", name, cmp.Diff(original, obj2), codec, dump.Pretty(original), dataAsString(data), dump.Pretty(obj2))
 		return
 	}
 
@@ -396,7 +393,7 @@ func roundTrip(t *testing.T, scheme *runtime.Scheme, codec runtime.Codec, object
 	// ensure that the new runtime object is equal to the original after being
 	// decoded into
 	if !apiequality.Semantic.DeepEqual(object, obj3) {
-		t.Errorf("%v: diff: %v\nCodec: %#v", name, diff.ObjectReflectDiff(object, obj3), codec)
+		t.Errorf("%v: diff: %v\nCodec: %#v", name, cmp.Diff(object, obj3), codec)
 		return
 	}
 
@@ -405,7 +402,7 @@ func roundTrip(t *testing.T, scheme *runtime.Scheme, codec runtime.Codec, object
 	// NOTE: we use the encoding+decoding here as an alternative, guaranteed deep-copy to compare against.
 	fuzzer.ValueFuzz(object)
 	if !apiequality.Semantic.DeepEqual(original, obj3) {
-		t.Errorf("%v: fuzzing a copy altered the original, diff: %v", name, diff.ObjectReflectDiff(original, obj3))
+		t.Errorf("%v: fuzzing a copy altered the original, diff: %v", name, cmp.Diff(original, obj3))
 		return
 	}
 }
@@ -432,7 +429,6 @@ func dataAsString(data []byte) string {
 	dataString := string(data)
 	if !strings.HasPrefix(dataString, "{") {
 		dataString = "\n" + hex.Dump(data)
-		proto.NewBuffer(make([]byte, 0, 1024)).DebugPrint("decoded object", data)
 	}
 	return dataString
 }

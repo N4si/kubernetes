@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
+	podtest "k8s.io/kubernetes/pkg/api/pod/testing"
 	"k8s.io/kubernetes/pkg/apis/apps"
 	api "k8s.io/kubernetes/pkg/apis/core"
 )
@@ -81,16 +82,6 @@ func TestSelectorImmutability(t *testing.T) {
 				},
 			},
 		},
-		{
-			genericapirequest.RequestInfo{
-				APIGroup:   "extensions",
-				APIVersion: "v1beta1",
-				Resource:   "daemonsets",
-			},
-			map[string]string{"a": "b"},
-			map[string]string{"c": "d"},
-			nil,
-		},
 	}
 
 	for _, test := range tests {
@@ -138,11 +129,7 @@ func newDaemonSetWithSelectorLabels(selectorLabels map[string]string, templateGe
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: selectorLabels,
 				},
-				Spec: api.PodSpec{
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSClusterFirst,
-					Containers:    []api.Container{{Name: fakeImageName, Image: fakeImage, ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-				},
+				Spec: podtest.MakePodSpec(),
 			},
 		},
 	}

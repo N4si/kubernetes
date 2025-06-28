@@ -18,7 +18,6 @@ package apparmor
 
 import (
 	"errors"
-	"fmt"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
@@ -38,16 +37,16 @@ func TestValidateBadHost(t *testing.T) {
 		expectValid bool
 	}{
 		{"", true},
-		{v1.AppArmorBetaProfileRuntimeDefault, false},
-		{v1.AppArmorBetaProfileNamePrefix + "docker-default", false},
+		{v1.DeprecatedAppArmorBetaProfileRuntimeDefault, false},
+		{v1.DeprecatedAppArmorBetaProfileNamePrefix + "docker-default", false},
 	}
 
 	for _, test := range tests {
 		err := v.Validate(getPodWithProfile(test.profile))
 		if test.expectValid {
-			assert.NoError(t, err, "Pod with profile %q should be valid", test.profile)
+			assert.NoErrorf(t, err, "Pod with profile %q should be valid", test.profile)
 		} else {
-			assert.Equal(t, hostErr, err, "Pod with profile %q should trigger a host validation error", test.profile)
+			assert.Equalf(t, hostErr, err, "Pod with profile %q should trigger a host validation error", test.profile)
 		}
 	}
 }
@@ -60,21 +59,20 @@ func TestValidateValidHost(t *testing.T) {
 		expectValid bool
 	}{
 		{"", true},
-		{v1.AppArmorBetaProfileRuntimeDefault, true},
-		{v1.AppArmorBetaProfileNamePrefix + "docker-default", true},
-		{v1.AppArmorBetaProfileNamePrefix + "foo-container", true},
-		{v1.AppArmorBetaProfileNamePrefix + "/usr/sbin/ntpd", true},
-		{"docker-default", false},
-		{v1.AppArmorBetaProfileNamePrefix + "", false}, // Empty profile explicitly forbidden.
-		{v1.AppArmorBetaProfileNamePrefix + " ", false},
+		{v1.DeprecatedAppArmorBetaProfileRuntimeDefault, true},
+		{v1.DeprecatedAppArmorBetaProfileNamePrefix + "docker-default", true},
+		{v1.DeprecatedAppArmorBetaProfileNamePrefix + "foo-container", true},
+		{v1.DeprecatedAppArmorBetaProfileNamePrefix + "/usr/sbin/ntpd", true},
+		{v1.DeprecatedAppArmorBetaProfileNamePrefix + "", false}, // Empty profile explicitly forbidden.
+		{v1.DeprecatedAppArmorBetaProfileNamePrefix + " ", false},
 	}
 
 	for _, test := range tests {
 		err := v.Validate(getPodWithProfile(test.profile))
 		if test.expectValid {
-			assert.NoError(t, err, "Pod with profile %q should be valid", test.profile)
+			assert.NoErrorf(t, err, "Pod with profile %q should be valid", test.profile)
 		} else {
-			assert.Error(t, err, fmt.Sprintf("Pod with profile %q should trigger a validation error", test.profile))
+			assert.Errorf(t, err, "Pod with profile %q should trigger a validation error", test.profile)
 		}
 	}
 
@@ -82,9 +80,9 @@ func TestValidateValidHost(t *testing.T) {
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
-				v1.AppArmorBetaContainerAnnotationKeyPrefix + "init":  v1.AppArmorBetaProfileNamePrefix + "foo-container",
-				v1.AppArmorBetaContainerAnnotationKeyPrefix + "test1": v1.AppArmorBetaProfileRuntimeDefault,
-				v1.AppArmorBetaContainerAnnotationKeyPrefix + "test2": v1.AppArmorBetaProfileNamePrefix + "docker-default",
+				v1.DeprecatedAppArmorBetaContainerAnnotationKeyPrefix + "init":  v1.DeprecatedAppArmorBetaProfileNamePrefix + "foo-container",
+				v1.DeprecatedAppArmorBetaContainerAnnotationKeyPrefix + "test1": v1.DeprecatedAppArmorBetaProfileRuntimeDefault,
+				v1.DeprecatedAppArmorBetaContainerAnnotationKeyPrefix + "test2": v1.DeprecatedAppArmorBetaProfileNamePrefix + "docker-default",
 			},
 		},
 		Spec: v1.PodSpec{
@@ -103,7 +101,7 @@ func TestValidateValidHost(t *testing.T) {
 
 func getPodWithProfile(profile string) *v1.Pod {
 	annotations := map[string]string{
-		v1.AppArmorBetaContainerAnnotationKeyPrefix + "test": profile,
+		v1.DeprecatedAppArmorBetaContainerAnnotationKeyPrefix + "test": profile,
 	}
 	if profile == "" {
 		annotations = map[string]string{

@@ -27,22 +27,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/cmd/kube-apiserver/app/options"
 	"k8s.io/kubernetes/pkg/controlplane"
 	"k8s.io/kubernetes/pkg/controlplane/reconcilers"
 	"k8s.io/kubernetes/test/integration/framework"
+	"k8s.io/kubernetes/test/utils/ktesting"
 )
 
 // setup create kube-apiserver backed up by two separate etcds,
 // with one of them containing events and the other all other objects.
-func multiEtcdSetup(t *testing.T) (clientset.Interface, framework.TearDownFunc) {
+func multiEtcdSetup(ctx context.Context, t *testing.T) (clientset.Interface, framework.TearDownFunc) {
 	etcdArgs := []string{"--experimental-watch-progress-notify-interval", "1s"}
-	etcd0URL, stopEtcd0, err := framework.RunCustomEtcd("etcd_watchcache0", etcdArgs, nil)
+	etcd0URL, stopEtcd0, err := framework.RunCustomEtcd(klog.FromContext(ctx).WithName("etcd0"), "etcd_watchcache0", etcdArgs)
 	if err != nil {
 		t.Fatalf("Couldn't start etcd: %v", err)
 	}
 
-	etcd1URL, stopEtcd1, err := framework.RunCustomEtcd("etcd_watchcache1", etcdArgs, nil)
+	etcd1URL, stopEtcd1, err := framework.RunCustomEtcd(klog.FromContext(ctx).WithName("etcd1"), "etcd_watchcache1", etcdArgs)
 	if err != nil {
 		t.Fatalf("Couldn't start etcd: %v", err)
 	}
@@ -53,14 +55,14 @@ func multiEtcdSetup(t *testing.T) (clientset.Interface, framework.TearDownFunc) 
 	etcdOptions.EtcdServersOverrides = []string{fmt.Sprintf("/events#%s", etcd1URL)}
 	etcdOptions.EnableWatchCache = true
 
-	clientSet, _, tearDownFn := framework.StartTestServer(t, framework.TestServerSetup{
+	clientSet, _, tearDownFn := framework.StartTestServer(ctx, t, framework.TestServerSetup{
 		ModifyServerRunOptions: func(opts *options.ServerRunOptions) {
 			// Ensure we're using the same etcd across apiserver restarts.
 			opts.Etcd = etcdOptions
 		},
 		ModifyServerConfig: func(config *controlplane.Config) {
 			// Switch off endpoints reconciler to avoid unnecessary operations.
-			config.ExtraConfig.EndpointReconcilerType = reconcilers.NoneEndpointReconcilerType
+			config.Extra.EndpointReconcilerType = reconcilers.NoneEndpointReconcilerType
 		},
 	})
 
@@ -74,7 +76,6 @@ func multiEtcdSetup(t *testing.T) (clientset.Interface, framework.TearDownFunc) 
 	// Everything but default service creation is checked in StartTestServer above by
 	// waiting for post start hooks, so we just wait for default service to exist.
 	// TODO(wojtek-t): Figure out less fragile way.
-	ctx := context.Background()
 	if err := wait.Poll(100*time.Millisecond, wait.ForeverTestTimeout, func() (bool, error) {
 		_, err := clientSet.CoreV1().Services("default").Get(ctx, "kubernetes", metav1.GetOptions{})
 		return err == nil, nil
@@ -85,10 +86,9 @@ func multiEtcdSetup(t *testing.T) (clientset.Interface, framework.TearDownFunc) 
 }
 
 func TestWatchCacheUpdatedByEtcd(t *testing.T) {
-	c, closeFn := multiEtcdSetup(t)
+	tCtx := ktesting.Init(t)
+	c, closeFn := multiEtcdSetup(tCtx, t)
 	defer closeFn()
-
-	ctx := context.Background()
 
 	makeConfigMap := func(name string) *v1.ConfigMap {
 		return &v1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name}}
@@ -100,11 +100,11 @@ func TestWatchCacheUpdatedByEtcd(t *testing.T) {
 		return &v1.Event{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	}
 
-	cm, err := c.CoreV1().ConfigMaps("default").Create(ctx, makeConfigMap("name"), metav1.CreateOptions{})
+	cm, err := c.CoreV1().ConfigMaps("default").Create(tCtx, makeConfigMap("name"), metav1.CreateOptions{})
 	if err != nil {
 		t.Errorf("Couldn't create configmap: %v", err)
 	}
-	ev, err := c.CoreV1().Events("default").Create(ctx, makeEvent("name"), metav1.CreateOptions{})
+	ev, err := c.CoreV1().Events("default").Create(tCtx, makeEvent("name"), metav1.CreateOptions{})
 	if err != nil {
 		t.Errorf("Couldn't create event: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestWatchCacheUpdatedByEtcd(t *testing.T) {
 	// resources (being the last updates).
 	t.Logf("Waiting for configmaps watchcache synced to %s", cm.ResourceVersion)
 	if err := wait.Poll(100*time.Millisecond, wait.ForeverTestTimeout, func() (bool, error) {
-		res, err := c.CoreV1().ConfigMaps("default").List(ctx, listOptions)
+		res, err := c.CoreV1().ConfigMaps("default").List(tCtx, listOptions)
 		if err != nil {
 			return false, nil
 		}
@@ -128,7 +128,7 @@ func TestWatchCacheUpdatedByEtcd(t *testing.T) {
 	}
 	t.Logf("Waiting for events watchcache synced to %s", ev.ResourceVersion)
 	if err := wait.Poll(100*time.Millisecond, wait.ForeverTestTimeout, func() (bool, error) {
-		res, err := c.CoreV1().Events("default").List(ctx, listOptions)
+		res, err := c.CoreV1().Events("default").List(tCtx, listOptions)
 		if err != nil {
 			return false, nil
 		}
@@ -139,14 +139,14 @@ func TestWatchCacheUpdatedByEtcd(t *testing.T) {
 
 	// Create a secret, that is stored in the same etcd as configmap, but
 	// different than events.
-	se, err := c.CoreV1().Secrets("default").Create(ctx, makeSecret("name"), metav1.CreateOptions{})
+	se, err := c.CoreV1().Secrets("default").Create(tCtx, makeSecret("name"), metav1.CreateOptions{})
 	if err != nil {
 		t.Errorf("Couldn't create secret: %v", err)
 	}
 
 	t.Logf("Waiting for configmaps watchcache synced to %s", se.ResourceVersion)
 	if err := wait.Poll(100*time.Millisecond, wait.ForeverTestTimeout, func() (bool, error) {
-		res, err := c.CoreV1().ConfigMaps("default").List(ctx, listOptions)
+		res, err := c.CoreV1().ConfigMaps("default").List(tCtx, listOptions)
 		if err != nil {
 			return false, nil
 		}
@@ -156,7 +156,7 @@ func TestWatchCacheUpdatedByEtcd(t *testing.T) {
 	}
 	t.Logf("Waiting for events watchcache NOT synced to %s", se.ResourceVersion)
 	if err := wait.Poll(100*time.Millisecond, 5*time.Second, func() (bool, error) {
-		res, err := c.CoreV1().Events("default").List(ctx, listOptions)
+		res, err := c.CoreV1().Events("default").List(tCtx, listOptions)
 		if err != nil {
 			return false, nil
 		}
@@ -167,10 +167,11 @@ func TestWatchCacheUpdatedByEtcd(t *testing.T) {
 }
 
 func BenchmarkListFromWatchCache(b *testing.B) {
-	c, _, tearDownFn := framework.StartTestServer(b, framework.TestServerSetup{
+	tCtx := ktesting.Init(b)
+	c, _, tearDownFn := framework.StartTestServer(tCtx, b, framework.TestServerSetup{
 		ModifyServerConfig: func(config *controlplane.Config) {
 			// Switch off endpoints reconciler to avoid unnecessary operations.
-			config.ExtraConfig.EndpointReconcilerType = reconcilers.NoneEndpointReconcilerType
+			config.Extra.EndpointReconcilerType = reconcilers.NoneEndpointReconcilerType
 		},
 	})
 	defer tearDownFn()
@@ -185,11 +186,10 @@ func BenchmarkListFromWatchCache(b *testing.B) {
 		go func() {
 			defer wg.Done()
 
-			ctx := context.Background()
 			ns := &v1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("namespace-%d", index)},
 			}
-			ns, err := c.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{})
+			ns, err := c.CoreV1().Namespaces().Create(tCtx, ns, metav1.CreateOptions{})
 			if err != nil {
 				errCh <- err
 				return
@@ -201,7 +201,7 @@ func BenchmarkListFromWatchCache(b *testing.B) {
 						Name: fmt.Sprintf("secret-%d", j),
 					},
 				}
-				_, err := c.CoreV1().Secrets(ns.Name).Create(ctx, secret, metav1.CreateOptions{})
+				_, err := c.CoreV1().Secrets(ns.Name).Create(tCtx, secret, metav1.CreateOptions{})
 				if err != nil {
 					errCh <- err
 					return
@@ -218,12 +218,11 @@ func BenchmarkListFromWatchCache(b *testing.B) {
 
 	b.ResetTimer()
 
-	ctx := context.Background()
 	opts := metav1.ListOptions{
 		ResourceVersion: "0",
 	}
 	for i := 0; i < b.N; i++ {
-		secrets, err := c.CoreV1().Secrets("").List(ctx, opts)
+		secrets, err := c.CoreV1().Secrets("").List(tCtx, opts)
 		if err != nil {
 			b.Errorf("failed to list secrets: %v", err)
 		}

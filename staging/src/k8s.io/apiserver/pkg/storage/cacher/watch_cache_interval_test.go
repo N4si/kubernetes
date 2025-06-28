@@ -41,7 +41,7 @@ func intervalFromEvents(events []*watchCacheEvent) *watchCacheInterval {
 	}
 	indexValidator := func(_ int) bool { return true }
 
-	return newCacheInterval(startIndex, endIndex, indexer, indexValidator, locker)
+	return newCacheInterval(startIndex, endIndex, indexer, indexValidator, 0, locker)
 }
 
 func bufferFromEvents(events []*watchCacheEvent) *watchCacheIntervalBuffer {
@@ -286,7 +286,8 @@ func TestCacheIntervalNextFromWatchCache(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			wc := newTestWatchCache(capacity, &cache.Indexers{})
+			wc := newTestWatchCache(capacity, DefaultEventFreshDuration, &cache.Indexers{})
+			defer wc.Stop()
 			for i := 0; i < c.eventsAddedToWatchcache; i++ {
 				wc.Add(makeTestPod(fmt.Sprintf("pod%d", i), uint64(i)))
 			}
@@ -299,6 +300,7 @@ func TestCacheIntervalNextFromWatchCache(t *testing.T) {
 				wc.endIndex,
 				indexerFunc,
 				wc.isIndexValidLocked,
+				wc.resourceVersion,
 				&wc.RWMutex,
 			)
 
@@ -390,7 +392,7 @@ func TestCacheIntervalNextFromStore(t *testing.T) {
 		store.Add(elem)
 	}
 
-	wci, err := newCacheIntervalFromStore(rv, store, getAttrsFunc)
+	wci, err := newCacheIntervalFromStore(rv, store, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

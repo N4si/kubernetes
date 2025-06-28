@@ -28,11 +28,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
+	endpointsliceutil "k8s.io/endpointslice/util"
 	"k8s.io/klog/v2"
 	endpointsv1 "k8s.io/kubernetes/pkg/api/v1/endpoints"
 	"k8s.io/kubernetes/pkg/controller/endpointslicemirroring/metrics"
-	endpointutil "k8s.io/kubernetes/pkg/controller/util/endpoint"
-	endpointsliceutil "k8s.io/kubernetes/pkg/controller/util/endpointslice"
 )
 
 // reconciler is responsible for transforming current EndpointSlice state into
@@ -62,7 +61,7 @@ type reconciler struct {
 // reconcile takes an Endpoints resource and ensures that corresponding
 // EndpointSlices exist. It creates, updates, or deletes EndpointSlices to
 // ensure the desired set of addresses are represented by EndpointSlices.
-func (r *reconciler) reconcile(endpoints *corev1.Endpoints, existingSlices []*discovery.EndpointSlice) error {
+func (r *reconciler) reconcile(logger klog.Logger, endpoints *corev1.Endpoints, existingSlices []*discovery.EndpointSlice) error {
 	// Calculate desired state.
 	d := newDesiredCalc()
 
@@ -88,7 +87,7 @@ func (r *reconciler) reconcile(endpoints *corev1.Endpoints, existingSlices []*di
 				totalAddressesAdded++
 			} else {
 				numInvalidAddresses++
-				klog.Warningf("Address in %s/%s Endpoints is not a valid IP, it will not be mirrored to an EndpointSlice: %s", endpoints.Namespace, endpoints.Name, address.IP)
+				logger.Info("Address in Endpoints is not a valid IP, it will not be mirrored to an EndpointSlice", "endpoints", klog.KObj(endpoints), "IP", address.IP)
 			}
 		}
 
@@ -103,7 +102,7 @@ func (r *reconciler) reconcile(endpoints *corev1.Endpoints, existingSlices []*di
 				totalAddressesAdded++
 			} else {
 				numInvalidAddresses++
-				klog.Warningf("Address in %s/%s Endpoints is not a valid IP, it will not be mirrored to an EndpointSlice: %s", endpoints.Namespace, endpoints.Name, address.IP)
+				logger.Info("Address in Endpoints is not a valid IP, it will not be mirrored to an EndpointSlice", "endpoints", klog.KObj(endpoints), "IP", address.IP)
 			}
 		}
 
@@ -124,7 +123,7 @@ func (r *reconciler) reconcile(endpoints *corev1.Endpoints, existingSlices []*di
 	// Record a separate event if we skipped mirroring due to the number of
 	// addresses exceeding MaxEndpointsPerSubset.
 	if addressesSkipped > numInvalidAddresses {
-		klog.Warningf("%d addresses in %s/%s Endpoints were skipped due to exceeding MaxEndpointsPerSubset", addressesSkipped, endpoints.Namespace, endpoints.Name)
+		logger.Info("Addresses in Endpoints were skipped due to exceeding MaxEndpointsPerSubset", "skippedAddresses", addressesSkipped, "endpoints", klog.KObj(endpoints))
 		r.eventRecorder.Eventf(endpoints, corev1.EventTypeWarning, TooManyAddressesToMirror,
 			"A max of %d addresses can be mirrored to EndpointSlices per Endpoints subset. %d addresses were skipped", r.maxEndpointsPerSubset, addressesSkipped)
 	}
@@ -145,7 +144,7 @@ func (r *reconciler) reconcile(endpoints *corev1.Endpoints, existingSlices []*di
 		slices.append(pmSlices)
 		totals.add(pmTotals)
 
-		epMetrics.Set(endpointutil.PortMapKey(portKey), metrics.EfficiencyInfo{
+		epMetrics.Set(endpointsliceutil.PortMapKey(portKey), metrics.EfficiencyInfo{
 			Endpoints: numEndpoints,
 			Slices:    len(existingSlicesByKey[portKey]) + len(pmSlices.toCreate) - len(pmSlices.toDelete),
 		})
@@ -208,7 +207,11 @@ func (r *reconciler) reconcileByPortMapping(
 		totals = totalChanges(existingSlices[0], desiredSet)
 		if totals.added == 0 && totals.updated == 0 && totals.removed == 0 &&
 			apiequality.Semantic.DeepEqual(endpoints.Labels, compareLabels) &&
-			apiequality.Semantic.DeepEqual(compareAnnotations, existingSlices[0].Annotations) {
+			apiequality.Semantic.DeepEqual(compareAnnotations, existingSlices[0].Annotations) &&
+			!needRebuildExistingSlices(endpoints, existingSlices[0]) {
+			if !r.endpointSliceTracker.Has(existingSlices[0]) {
+				r.endpointSliceTracker.Update(existingSlices[0]) // Always ensure each EndpointSlice is being tracked.
+			}
 			return slices, totals
 		}
 	}
@@ -324,7 +327,7 @@ func totalChanges(existingSlice *discovery.EndpointSlice, desiredSet endpointsli
 
 			// If existing version of endpoint doesn't match desired version
 			// increment number of endpoints to be updated.
-			if !endpointutil.EndpointsEqualBeyondHash(got, &endpoint) {
+			if !endpointsliceutil.EndpointsEqualBeyondHash(got, &endpoint) {
 				totals.updated++
 			}
 		}
@@ -334,4 +337,14 @@ func totalChanges(existingSlice *discovery.EndpointSlice, desiredSet endpointsli
 	// be added.
 	totals.added = desiredSet.Len() - existingMatches
 	return totals
+}
+
+func needRebuildExistingSlices(endpoints *corev1.Endpoints, existingSlice *discovery.EndpointSlice) bool {
+	for index := range existingSlice.OwnerReferences {
+		owner := existingSlice.OwnerReferences[index]
+		if owner.Kind == "Endpoints" && owner.Name == endpoints.Name && owner.UID != endpoints.UID {
+			return true
+		}
+	}
+	return false
 }

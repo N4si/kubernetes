@@ -30,18 +30,20 @@ import (
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	autoscalingv2beta1 "k8s.io/api/autoscaling/v2beta1"
 	batchv1 "k8s.io/api/batch/v1"
-	batchv1beta1 "k8s.io/api/batch/v1beta1"
+	batchv1beta1 "k8s.io/api/batch/v1beta1" // should this change, too? there are still certv1beta1.CSR printers, but not their v1 versions
 	certificatesv1beta1 "k8s.io/api/certificates/v1beta1"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	coordinationv1alpha2 "k8s.io/api/coordination/v1alpha2"
 	apiv1 "k8s.io/api/core/v1"
 	discoveryv1beta1 "k8s.io/api/discovery/v1beta1"
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
-	flowcontrolv1beta3 "k8s.io/api/flowcontrol/v1beta3"
-	networkingv1alpha1 "k8s.io/api/networking/v1alpha1"
+	flowcontrolv1 "k8s.io/api/flowcontrol/v1"
+	networkingv1beta1 "k8s.io/api/networking/v1beta1"
 	rbacv1beta1 "k8s.io/api/rbac/v1beta1"
-	resourcev1alpha1 "k8s.io/api/resource/v1alpha1"
+	resourceapi "k8s.io/api/resource/v1beta2"
 	schedulingv1 "k8s.io/api/scheduling/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	storagev1beta1 "k8s.io/api/storage/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -49,6 +51,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/duration"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/certificate/csr"
+	"k8s.io/utils/ptr"
+
+	podutil "k8s.io/kubernetes/pkg/api/pod"
+	podutilv1 "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/apis/admissionregistration"
 	"k8s.io/kubernetes/pkg/apis/apiserverinternal"
 	"k8s.io/kubernetes/pkg/apis/apps"
@@ -69,6 +75,7 @@ import (
 	"k8s.io/kubernetes/pkg/apis/scheduling"
 	"k8s.io/kubernetes/pkg/apis/storage"
 	storageutil "k8s.io/kubernetes/pkg/apis/storage/util"
+	svmv1alpha1 "k8s.io/kubernetes/pkg/apis/storagemigration"
 	"k8s.io/kubernetes/pkg/printers"
 	"k8s.io/kubernetes/pkg/util/node"
 )
@@ -165,6 +172,7 @@ func AddHandlers(h printers.PrintHandler) {
 
 	jobColumnDefinitions := []metav1.TableColumnDefinition{
 		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
+		{Name: "Status", Type: "string", Description: "Status of the job."},
 		{Name: "Completions", Type: "string", Description: batchv1.JobStatus{}.SwaggerDoc()["succeeded"]},
 		{Name: "Duration", Type: "string", Description: "Time required to complete the job."},
 		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
@@ -178,6 +186,7 @@ func AddHandlers(h printers.PrintHandler) {
 	cronJobColumnDefinitions := []metav1.TableColumnDefinition{
 		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
 		{Name: "Schedule", Type: "string", Description: batchv1beta1.CronJobSpec{}.SwaggerDoc()["schedule"]},
+		{Name: "Timezone", Type: "string", Description: batchv1beta1.CronJobSpec{}.SwaggerDoc()["timeZone"]},
 		{Name: "Suspend", Type: "boolean", Description: batchv1beta1.CronJobSpec{}.SwaggerDoc()["suspend"]},
 		{Name: "Active", Type: "integer", Description: batchv1beta1.CronJobStatus{}.SwaggerDoc()["active"]},
 		{Name: "Last Schedule", Type: "string", Description: batchv1beta1.CronJobStatus{}.SwaggerDoc()["lastScheduleTime"]},
@@ -304,6 +313,7 @@ func AddHandlers(h printers.PrintHandler) {
 		{Name: "Status", Type: "string", Description: apiv1.PersistentVolumeStatus{}.SwaggerDoc()["phase"]},
 		{Name: "Claim", Type: "string", Description: apiv1.PersistentVolumeSpec{}.SwaggerDoc()["claimRef"]},
 		{Name: "StorageClass", Type: "string", Description: "StorageClass of the pv"},
+		{Name: "VolumeAttributesClass", Type: "string", Description: "VolumeAttributesClass of the pv"},
 		{Name: "Reason", Type: "string", Description: apiv1.PersistentVolumeStatus{}.SwaggerDoc()["reason"]},
 		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
 		{Name: "VolumeMode", Type: "string", Priority: 1, Description: apiv1.PersistentVolumeSpec{}.SwaggerDoc()["volumeMode"]},
@@ -318,6 +328,7 @@ func AddHandlers(h printers.PrintHandler) {
 		{Name: "Capacity", Type: "string", Description: apiv1.PersistentVolumeClaimStatus{}.SwaggerDoc()["capacity"]},
 		{Name: "Access Modes", Type: "string", Description: apiv1.PersistentVolumeClaimStatus{}.SwaggerDoc()["accessModes"]},
 		{Name: "StorageClass", Type: "string", Description: "StorageClass of the pvc"},
+		{Name: "VolumeAttributesClass", Type: "string", Description: "VolumeAttributesClass of the pvc"},
 		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
 		{Name: "VolumeMode", Type: "string", Priority: 1, Description: apiv1.PersistentVolumeClaimSpec{}.SwaggerDoc()["volumeMode"]},
 	}
@@ -407,6 +418,13 @@ func AddHandlers(h printers.PrintHandler) {
 	_ = h.TableHandler(certificateSigningRequestColumnDefinitions, printCertificateSigningRequest)
 	_ = h.TableHandler(certificateSigningRequestColumnDefinitions, printCertificateSigningRequestList)
 
+	clusterTrustBundleColumnDefinitions := []metav1.TableColumnDefinition{
+		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
+		{Name: "SignerName", Type: "string", Description: certificatesv1beta1.ClusterTrustBundleSpec{}.SwaggerDoc()["signerName"]},
+	}
+	h.TableHandler(clusterTrustBundleColumnDefinitions, printClusterTrustBundle)
+	h.TableHandler(clusterTrustBundleColumnDefinitions, printClusterTrustBundleList)
+
 	leaseColumnDefinitions := []metav1.TableColumnDefinition{
 		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
 		{Name: "Holder", Type: "string", Description: coordinationv1.LeaseSpec{}.SwaggerDoc()["holderIdentity"]},
@@ -414,6 +432,16 @@ func AddHandlers(h printers.PrintHandler) {
 	}
 	_ = h.TableHandler(leaseColumnDefinitions, printLease)
 	_ = h.TableHandler(leaseColumnDefinitions, printLeaseList)
+
+	leaseCandidateColumnDefinitions := []metav1.TableColumnDefinition{
+		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
+		{Name: "LeaseName", Type: "string", Description: coordinationv1alpha2.LeaseCandidateSpec{}.SwaggerDoc()["leaseName"]},
+		{Name: "BinaryVersion", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["binaryVersion"]},
+		{Name: "EmulationVersion", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["emulationVersion"]},
+		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
+	}
+	_ = h.TableHandler(leaseCandidateColumnDefinitions, printLeaseCandidate)
+	_ = h.TableHandler(leaseCandidateColumnDefinitions, printLeaseCandidateList)
 
 	storageClassColumnDefinitions := []metav1.TableColumnDefinition{
 		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
@@ -426,6 +454,15 @@ func AddHandlers(h printers.PrintHandler) {
 
 	_ = h.TableHandler(storageClassColumnDefinitions, printStorageClass)
 	_ = h.TableHandler(storageClassColumnDefinitions, printStorageClassList)
+
+	volumeAttributesClassColumnDefinitions := []metav1.TableColumnDefinition{
+		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
+		{Name: "DriverName", Type: "string", Description: storagev1beta1.VolumeAttributesClass{}.SwaggerDoc()["driverName"]},
+		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
+	}
+
+	_ = h.TableHandler(volumeAttributesClassColumnDefinitions, printVolumeAttributesClass)
+	_ = h.TableHandler(volumeAttributesClassColumnDefinitions, printVolumeAttributesClassList)
 
 	statusColumnDefinitions := []metav1.TableColumnDefinition{
 		{Name: "Status", Type: "string", Description: metav1.Status{}.SwaggerDoc()["status"]},
@@ -446,9 +483,9 @@ func AddHandlers(h printers.PrintHandler) {
 
 	resourceQuotaColumnDefinitions := []metav1.TableColumnDefinition{
 		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
-		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
 		{Name: "Request", Type: "string", Description: "Request represents a minimum amount of cpu/memory that a container may consume."},
 		{Name: "Limit", Type: "string", Description: "Limits control the maximum amount of cpu/memory that a container may use independent of contention on the node."},
+		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
 	}
 	_ = h.TableHandler(resourceQuotaColumnDefinitions, printResourceQuota)
 	_ = h.TableHandler(resourceQuotaColumnDefinitions, printResourceQuotaList)
@@ -458,6 +495,7 @@ func AddHandlers(h printers.PrintHandler) {
 		{Name: "Value", Type: "integer", Description: schedulingv1.PriorityClass{}.SwaggerDoc()["value"]},
 		{Name: "Global-Default", Type: "boolean", Description: schedulingv1.PriorityClass{}.SwaggerDoc()["globalDefault"]},
 		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
+		{Name: "PreemptionPolicy", Type: "string", Description: schedulingv1.PriorityClass{}.SwaggerDoc()["preemptionPolicy"]},
 	}
 	_ = h.TableHandler(priorityClassColumnDefinitions, printPriorityClass)
 	_ = h.TableHandler(priorityClassColumnDefinitions, printPriorityClassList)
@@ -559,11 +597,29 @@ func AddHandlers(h printers.PrintHandler) {
 	_ = h.TableHandler(validatingAdmissionPolicyBinding, printValidatingAdmissionPolicyBinding)
 	_ = h.TableHandler(validatingAdmissionPolicyBinding, printValidatingAdmissionPolicyBindingList)
 
+	mutatingAdmissionPolicy := []metav1.TableColumnDefinition{
+		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
+		{Name: "Mutations", Type: "integer", Description: "Mutation indicates the number of mutations rules defined in this configuration"},
+		{Name: "ParamKind", Type: "string", Description: "ParamKind specifies the kind of resources used to parameterize this policy"},
+		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
+	}
+	_ = h.TableHandler(mutatingAdmissionPolicy, printMutatingAdmissionPolicy)
+	_ = h.TableHandler(mutatingAdmissionPolicy, printMutatingAdmissionPolicyList)
+
+	mutatingAdmissionPolicyBinding := []metav1.TableColumnDefinition{
+		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
+		{Name: "PolicyName", Type: "string", Description: "PolicyName indicates the policy definition which the policy binding binded to"},
+		{Name: "ParamRef", Type: "string", Description: "ParamRef indicates the param resource which sets the configration param"},
+		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
+	}
+	_ = h.TableHandler(mutatingAdmissionPolicyBinding, printMutatingAdmissionPolicyBinding)
+	_ = h.TableHandler(mutatingAdmissionPolicyBinding, printMutatingAdmissionPolicyBindingList)
+
 	flowSchemaColumnDefinitions := []metav1.TableColumnDefinition{
 		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
-		{Name: "PriorityLevel", Type: "string", Description: flowcontrolv1beta3.PriorityLevelConfigurationReference{}.SwaggerDoc()["name"]},
-		{Name: "MatchingPrecedence", Type: "string", Description: flowcontrolv1beta3.FlowSchemaSpec{}.SwaggerDoc()["matchingPrecedence"]},
-		{Name: "DistinguisherMethod", Type: "string", Description: flowcontrolv1beta3.FlowSchemaSpec{}.SwaggerDoc()["distinguisherMethod"]},
+		{Name: "PriorityLevel", Type: "string", Description: flowcontrolv1.PriorityLevelConfigurationReference{}.SwaggerDoc()["name"]},
+		{Name: "MatchingPrecedence", Type: "string", Description: flowcontrolv1.FlowSchemaSpec{}.SwaggerDoc()["matchingPrecedence"]},
+		{Name: "DistinguisherMethod", Type: "string", Description: flowcontrolv1.FlowSchemaSpec{}.SwaggerDoc()["distinguisherMethod"]},
 		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
 		{Name: "MissingPL", Type: "string", Description: "references a broken or non-existent PriorityLevelConfiguration"},
 	}
@@ -572,11 +628,11 @@ func AddHandlers(h printers.PrintHandler) {
 
 	priorityLevelColumnDefinitions := []metav1.TableColumnDefinition{
 		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
-		{Name: "Type", Type: "string", Description: flowcontrolv1beta3.PriorityLevelConfigurationSpec{}.SwaggerDoc()["type"]},
-		{Name: "NominalConcurrencyShares", Type: "string", Description: flowcontrolv1beta3.LimitedPriorityLevelConfiguration{}.SwaggerDoc()["nominalConcurrencyShares"]},
-		{Name: "Queues", Type: "string", Description: flowcontrolv1beta3.QueuingConfiguration{}.SwaggerDoc()["queues"]},
-		{Name: "HandSize", Type: "string", Description: flowcontrolv1beta3.QueuingConfiguration{}.SwaggerDoc()["handSize"]},
-		{Name: "QueueLengthLimit", Type: "string", Description: flowcontrolv1beta3.QueuingConfiguration{}.SwaggerDoc()["queueLengthLimit"]},
+		{Name: "Type", Type: "string", Description: flowcontrolv1.PriorityLevelConfigurationSpec{}.SwaggerDoc()["type"]},
+		{Name: "NominalConcurrencyShares", Type: "string", Description: flowcontrolv1.LimitedPriorityLevelConfiguration{}.SwaggerDoc()["nominalConcurrencyShares"]},
+		{Name: "Queues", Type: "string", Description: flowcontrolv1.QueuingConfiguration{}.SwaggerDoc()["queues"]},
+		{Name: "HandSize", Type: "string", Description: flowcontrolv1.QueuingConfiguration{}.SwaggerDoc()["handSize"]},
+		{Name: "QueueLengthLimit", Type: "string", Description: flowcontrolv1.QueuingConfiguration{}.SwaggerDoc()["queueLengthLimit"]},
 		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
 	}
 	_ = h.TableHandler(priorityLevelColumnDefinitions, printPriorityLevelConfiguration)
@@ -599,30 +655,15 @@ func AddHandlers(h printers.PrintHandler) {
 	}
 	_ = h.TableHandler(scaleColumnDefinitions, printScale)
 
-	clusterCIDRColumnDefinitions := []metav1.TableColumnDefinition{
+	deviceClassColumnDefinitions := []metav1.TableColumnDefinition{
 		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
-		{Name: "PerNodeHostBits", Type: "string", Description: networkingv1alpha1.ClusterCIDRSpec{}.SwaggerDoc()["perNodeHostBits"]},
-		{Name: "IPv4", Type: "string", Description: networkingv1alpha1.ClusterCIDRSpec{}.SwaggerDoc()["ipv4"]},
-		{Name: "IPv6", Type: "string", Description: networkingv1alpha1.ClusterCIDRSpec{}.SwaggerDoc()["ipv6"]},
-		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
-		{Name: "NodeSelector", Type: "string", Priority: 1, Description: networkingv1alpha1.ClusterCIDRSpec{}.SwaggerDoc()["nodeSelector"]},
-	}
-
-	_ = h.TableHandler(clusterCIDRColumnDefinitions, printClusterCIDR)
-	_ = h.TableHandler(clusterCIDRColumnDefinitions, printClusterCIDRList)
-
-	resourceClassColumnDefinitions := []metav1.TableColumnDefinition{
-		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
-		{Name: "DriverName", Type: "string", Description: resourcev1alpha1.ResourceClass{}.SwaggerDoc()["driverName"]},
 		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
 	}
-	_ = h.TableHandler(resourceClassColumnDefinitions, printResourceClass)
-	_ = h.TableHandler(resourceClassColumnDefinitions, printResourceClassList)
+	_ = h.TableHandler(deviceClassColumnDefinitions, printDeviceClass)
+	_ = h.TableHandler(deviceClassColumnDefinitions, printDeviceClassList)
 
 	resourceClaimColumnDefinitions := []metav1.TableColumnDefinition{
 		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
-		{Name: "ResourceClassName", Type: "string", Description: resourcev1alpha1.ResourceClaimSpec{}.SwaggerDoc()["resourceClassName"]},
-		{Name: "AllocationMode", Type: "string", Description: resourcev1alpha1.ResourceClaimSpec{}.SwaggerDoc()["allocationMode"]},
 		{Name: "State", Type: "string", Description: "A summary of the current state (allocated, pending, reserved, etc.)."},
 		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
 	}
@@ -631,20 +672,60 @@ func AddHandlers(h printers.PrintHandler) {
 
 	resourceClaimTemplateColumnDefinitions := []metav1.TableColumnDefinition{
 		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
-		{Name: "ResourceClassName", Type: "string", Description: resourcev1alpha1.ResourceClaimSpec{}.SwaggerDoc()["resourceClassName"]},
-		{Name: "AllocationMode", Type: "string", Description: resourcev1alpha1.ResourceClaimSpec{}.SwaggerDoc()["allocationMode"]},
 		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
 	}
 	_ = h.TableHandler(resourceClaimTemplateColumnDefinitions, printResourceClaimTemplate)
 	_ = h.TableHandler(resourceClaimTemplateColumnDefinitions, printResourceClaimTemplateList)
 
-	podSchedulingColumnDefinitions := []metav1.TableColumnDefinition{
+	nodeResourceSliceColumnDefinitions := []metav1.TableColumnDefinition{
 		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
-		{Name: "SelectedNode", Type: "string", Description: resourcev1alpha1.PodSchedulingSpec{}.SwaggerDoc()["selectedNode"]},
+		{Name: "Node", Type: "string", Description: resourceapi.ResourceSliceSpec{}.SwaggerDoc()["nodeName"]},
+		{Name: "Driver", Type: "string", Description: resourceapi.ResourceSliceSpec{}.SwaggerDoc()["driver"]},
+		{Name: "Pool", Type: "string", Description: resourceapi.ResourcePool{}.SwaggerDoc()["name"]},
 		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
 	}
-	_ = h.TableHandler(podSchedulingColumnDefinitions, printPodScheduling)
-	_ = h.TableHandler(podSchedulingColumnDefinitions, printPodSchedulingList)
+	_ = h.TableHandler(nodeResourceSliceColumnDefinitions, printResourceSlice)
+	_ = h.TableHandler(nodeResourceSliceColumnDefinitions, printResourceSliceList)
+
+	deviceTaintColumnDefinitions := []metav1.TableColumnDefinition{
+		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
+		// The filter criteria are not printed. They could be lengthy (CEL!) and in practice many of them
+		// will be empty. Instead, the admin could pick a descriptive name.
+		//
+		// The taint is more useful.
+		{Name: "Key", Type: "string", Description: resourceapi.DeviceTaint{}.SwaggerDoc()["key"]},
+		{Name: "Value", Type: "string", Description: resourceapi.DeviceTaint{}.SwaggerDoc()["value"]},
+		{Name: "Effect", Type: "string", Description: resourceapi.DeviceTaint{}.SwaggerDoc()["effect"]},
+		// TimeAdded and Age are often the same, but not necessarily.
+		{Name: "TimeAdded", Type: "string", Description: resourceapi.DeviceTaint{}.SwaggerDoc()["timeAdded"]},
+		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
+	}
+	_ = h.TableHandler(deviceTaintColumnDefinitions, printDeviceTaint)
+	_ = h.TableHandler(deviceTaintColumnDefinitions, printDeviceTaintRuleList)
+
+	serviceCIDRColumnDefinitions := []metav1.TableColumnDefinition{
+		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
+		{Name: "CIDRs", Type: "string", Description: networkingv1beta1.ServiceCIDRSpec{}.SwaggerDoc()["cidrs"]},
+		{Name: "Age", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["creationTimestamp"]},
+	}
+
+	_ = h.TableHandler(serviceCIDRColumnDefinitions, printServiceCIDR)
+	_ = h.TableHandler(serviceCIDRColumnDefinitions, printServiceCIDRList)
+
+	ipAddressColumnDefinitions := []metav1.TableColumnDefinition{
+		{Name: "Name", Type: "string", Format: "name", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
+		{Name: "ParentRef", Type: "string", Description: networkingv1beta1.IPAddressSpec{}.SwaggerDoc()["parentRef"]},
+	}
+
+	_ = h.TableHandler(ipAddressColumnDefinitions, printIPAddress)
+	_ = h.TableHandler(ipAddressColumnDefinitions, printIPAddressList)
+
+	storageVersionMigrationColumnDefinitions := []metav1.TableColumnDefinition{
+		{Name: "Name", Type: "string", Description: metav1.ObjectMeta{}.SwaggerDoc()["name"]},
+		{Name: "Resource", Type: "string", Description: "Fully qualified resource to migrate"},
+	}
+	_ = h.TableHandler(storageVersionMigrationColumnDefinitions, printStorageVersionMigration)
+	_ = h.TableHandler(storageVersionMigrationColumnDefinitions, printStorageVersionMigrationList)
 }
 
 // Pass ports=nil for all ports.
@@ -799,19 +880,22 @@ func printPodList(podList *api.PodList, options printers.GenerateOptions) ([]met
 
 func printPod(pod *api.Pod, options printers.GenerateOptions) ([]metav1.TableRow, error) {
 	restarts := 0
+	restartableInitContainerRestarts := 0
 	totalContainers := len(pod.Spec.Containers)
 	readyContainers := 0
 	lastRestartDate := metav1.NewTime(time.Time{})
+	lastRestartableInitContainerRestartDate := metav1.NewTime(time.Time{})
 
-	reason := string(pod.Status.Phase)
+	podPhase := pod.Status.Phase
+	reason := string(podPhase)
 	if pod.Status.Reason != "" {
 		reason = pod.Status.Reason
 	}
 
-	// If the Pod carries {type:PodScheduled, reason:WaitingForGates}, set reason to 'SchedulingGated'.
+	// If the Pod carries {type:PodScheduled, reason:SchedulingGated}, set reason to 'SchedulingGated'.
 	for _, condition := range pod.Status.Conditions {
-		if condition.Type == api.PodScheduled && condition.Reason == api.PodReasonSchedulingGated {
-			reason = api.PodReasonSchedulingGated
+		if condition.Type == api.PodScheduled && condition.Reason == apiv1.PodReasonSchedulingGated {
+			reason = apiv1.PodReasonSchedulingGated
 		}
 	}
 
@@ -826,6 +910,14 @@ func printPod(pod *api.Pod, options printers.GenerateOptions) ([]metav1.TableRow
 		row.Conditions = podFailedConditions
 	}
 
+	initContainers := make(map[string]*api.Container)
+	for i := range pod.Spec.InitContainers {
+		initContainers[pod.Spec.InitContainers[i].Name] = &pod.Spec.InitContainers[i]
+		if podutil.IsRestartableInitContainer(&pod.Spec.InitContainers[i]) {
+			totalContainers++
+		}
+	}
+
 	initializing := false
 	for i := range pod.Status.InitContainerStatuses {
 		container := pod.Status.InitContainerStatuses[i]
@@ -836,8 +928,23 @@ func printPod(pod *api.Pod, options printers.GenerateOptions) ([]metav1.TableRow
 				lastRestartDate = terminatedDate
 			}
 		}
+		if podutil.IsRestartableInitContainer(initContainers[container.Name]) {
+			restartableInitContainerRestarts += int(container.RestartCount)
+			if container.LastTerminationState.Terminated != nil {
+				terminatedDate := container.LastTerminationState.Terminated.FinishedAt
+				if lastRestartableInitContainerRestartDate.Before(&terminatedDate) {
+					lastRestartableInitContainerRestartDate = terminatedDate
+				}
+			}
+		}
 		switch {
 		case container.State.Terminated != nil && container.State.Terminated.ExitCode == 0:
+			continue
+		case podutil.IsRestartableInitContainer(initContainers[container.Name]) &&
+			container.Started != nil && *container.Started:
+			if container.Ready {
+				readyContainers++
+			}
 			continue
 		case container.State.Terminated != nil:
 			// initialization is failed
@@ -860,8 +967,10 @@ func printPod(pod *api.Pod, options printers.GenerateOptions) ([]metav1.TableRow
 		}
 		break
 	}
-	if !initializing {
-		restarts = 0
+
+	if !initializing || isPodInitializedConditionTrue(&pod.Status) {
+		restarts = restartableInitContainerRestarts
+		lastRestartDate = lastRestartableInitContainerRestartDate
 		hasRunning := false
 		for i := len(pod.Status.ContainerStatuses) - 1; i >= 0; i-- {
 			container := pod.Status.ContainerStatuses[i]
@@ -901,12 +1010,12 @@ func printPod(pod *api.Pod, options printers.GenerateOptions) ([]metav1.TableRow
 
 	if pod.DeletionTimestamp != nil && pod.Status.Reason == node.NodeUnreachablePodReason {
 		reason = "Unknown"
-	} else if pod.DeletionTimestamp != nil {
+	} else if pod.DeletionTimestamp != nil && !podutilv1.IsPodPhaseTerminal(apiv1.PodPhase(podPhase)) {
 		reason = "Terminating"
 	}
 
 	restartsStr := strconv.Itoa(restarts)
-	if !lastRestartDate.IsZero() {
+	if restarts != 0 && !lastRestartDate.IsZero() {
 		restartsStr = fmt.Sprintf("%d (%s ago)", restarts, translateTimestampSince(lastRestartDate))
 	}
 
@@ -955,6 +1064,15 @@ func hasPodReadyCondition(conditions []api.PodCondition) bool {
 	for _, condition := range conditions {
 		if condition.Type == api.PodReady && condition.Status == api.ConditionTrue {
 			return true
+		}
+	}
+	return false
+}
+
+func hasJobCondition(conditions []batch.JobCondition, conditionType batch.JobConditionType) bool {
+	for _, condition := range conditions {
+		if condition.Type == conditionType {
+			return condition.Status == api.ConditionTrue
 		}
 	}
 	return false
@@ -1022,13 +1140,17 @@ func printReplicationController(obj *api.ReplicationController, options printers
 		Object: runtime.RawExtension{Object: obj},
 	}
 
-	desiredReplicas := obj.Spec.Replicas
+	desiredReplicas := ptr.Deref(obj.Spec.Replicas, 0)
 	currentReplicas := obj.Status.Replicas
 	readyReplicas := obj.Status.ReadyReplicas
 
 	row.Cells = append(row.Cells, obj.Name, int64(desiredReplicas), int64(currentReplicas), int64(readyReplicas), translateTimestampSince(obj.CreationTimestamp))
 	if options.Wide {
-		names, images := layoutContainerCells(obj.Spec.Template.Spec.Containers)
+		var containers []api.Container
+		if obj.Spec.Template != nil {
+			containers = obj.Spec.Template.Spec.Containers
+		}
+		names, images := layoutContainerCells(containers)
 		row.Cells = append(row.Cells, names, images, labels.FormatLabels(obj.Spec.Selector))
 	}
 	return []metav1.TableRow{row}, nil
@@ -1102,8 +1224,22 @@ func printJob(obj *batch.Job, options printers.GenerateOptions) ([]metav1.TableR
 	default:
 		jobDuration = duration.HumanDuration(obj.Status.CompletionTime.Sub(obj.Status.StartTime.Time))
 	}
+	var status string
+	if hasJobCondition(obj.Status.Conditions, batch.JobComplete) {
+		status = "Complete"
+	} else if hasJobCondition(obj.Status.Conditions, batch.JobFailed) {
+		status = "Failed"
+	} else if obj.ObjectMeta.DeletionTimestamp != nil {
+		status = "Terminating"
+	} else if hasJobCondition(obj.Status.Conditions, batch.JobSuspended) {
+		status = "Suspended"
+	} else if hasJobCondition(obj.Status.Conditions, batch.JobFailureTarget) {
+		status = "FailureTarget"
+	} else {
+		status = "Running"
+	}
 
-	row.Cells = append(row.Cells, obj.Name, completions, jobDuration, translateTimestampSince(obj.CreationTimestamp))
+	row.Cells = append(row.Cells, obj.Name, status, completions, jobDuration, translateTimestampSince(obj.CreationTimestamp))
 	if options.Wide {
 		names, images := layoutContainerCells(obj.Spec.Template.Spec.Containers)
 		row.Cells = append(row.Cells, names, images, metav1.FormatLabelSelector(obj.Spec.Selector))
@@ -1133,7 +1269,12 @@ func printCronJob(obj *batch.CronJob, options printers.GenerateOptions) ([]metav
 		lastScheduleTime = translateTimestampSince(*obj.Status.LastScheduleTime)
 	}
 
-	row.Cells = append(row.Cells, obj.Name, obj.Spec.Schedule, printBoolPtr(obj.Spec.Suspend), int64(len(obj.Status.Active)), lastScheduleTime, translateTimestampSince(obj.CreationTimestamp))
+	timeZone := "<none>"
+	if obj.Spec.TimeZone != nil {
+		timeZone = *obj.Spec.TimeZone
+	}
+
+	row.Cells = append(row.Cells, obj.Name, obj.Spec.Schedule, timeZone, printBoolPtr(obj.Spec.Suspend), int64(len(obj.Status.Active)), lastScheduleTime, translateTimestampSince(obj.CreationTimestamp))
 	if options.Wide {
 		names, images := layoutContainerCells(obj.Spec.JobTemplate.Spec.Template.Spec.Containers)
 		row.Cells = append(row.Cells, names, images, metav1.FormatLabelSelector(obj.Spec.JobTemplate.Spec.Selector))
@@ -1630,13 +1771,18 @@ func printValidatingAdmissionPolicyBinding(obj *admissionregistration.Validating
 		Object: runtime.RawExtension{Object: obj},
 	}
 	paramName := "<unset>"
-	if obj.Spec.ParamRef != nil {
-		if obj.Spec.ParamRef.Namespace != "" {
-			paramName = obj.Spec.ParamRef.Namespace + "/" + obj.Spec.ParamRef.Name
-		} else {
-			paramName = obj.Spec.ParamRef.Name
+	if pr := obj.Spec.ParamRef; pr != nil {
+		if len(pr.Name) > 0 {
+			if pr.Namespace != "" {
+				paramName = pr.Namespace + "/" + pr.Name
+			} else {
+				// Can't tell from here if param is cluster-scoped, so all
+				// params without names get * namespace
+				paramName = "*/" + pr.Name
+			}
+		} else if pr.Selector != nil {
+			paramName = pr.Selector.String()
 		}
-
 	}
 	row.Cells = append(row.Cells, obj.Name, obj.Spec.PolicyName, paramName, translateTimestampSince(obj.CreationTimestamp))
 	return []metav1.TableRow{row}, nil
@@ -1646,6 +1792,64 @@ func printValidatingAdmissionPolicyBindingList(list *admissionregistration.Valid
 	rows := make([]metav1.TableRow, 0, len(list.Items))
 	for i := range list.Items {
 		r, err := printValidatingAdmissionPolicyBinding(&list.Items[i], options)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, r...)
+	}
+	return rows, nil
+}
+
+func printMutatingAdmissionPolicy(obj *admissionregistration.MutatingAdmissionPolicy, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	row := metav1.TableRow{
+		Object: runtime.RawExtension{Object: obj},
+	}
+	paramKind := "<unset>"
+	if obj.Spec.ParamKind != nil {
+		paramKind = obj.Spec.ParamKind.APIVersion + "/" + obj.Spec.ParamKind.Kind
+	}
+	row.Cells = append(row.Cells, obj.Name, int64(len(obj.Spec.Mutations)), paramKind, translateTimestampSince(obj.CreationTimestamp))
+	return []metav1.TableRow{row}, nil
+}
+
+func printMutatingAdmissionPolicyList(list *admissionregistration.MutatingAdmissionPolicyList, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	rows := make([]metav1.TableRow, 0, len(list.Items))
+	for i := range list.Items {
+		r, err := printMutatingAdmissionPolicy(&list.Items[i], options)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, r...)
+	}
+	return rows, nil
+}
+
+func printMutatingAdmissionPolicyBinding(obj *admissionregistration.MutatingAdmissionPolicyBinding, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	row := metav1.TableRow{
+		Object: runtime.RawExtension{Object: obj},
+	}
+	paramName := "<unset>"
+	if pr := obj.Spec.ParamRef; pr != nil {
+		if len(pr.Name) > 0 {
+			if pr.Namespace != "" {
+				paramName = pr.Namespace + "/" + pr.Name
+			} else {
+				// Can't tell from here if param is cluster-scoped, so all
+				// params without names get * namespace
+				paramName = "*/" + pr.Name
+			}
+		} else if pr.Selector != nil {
+			paramName = pr.Selector.String()
+		}
+	}
+	row.Cells = append(row.Cells, obj.Name, obj.Spec.PolicyName, paramName, translateTimestampSince(obj.CreationTimestamp))
+	return []metav1.TableRow{row}, nil
+}
+
+func printMutatingAdmissionPolicyBindingList(list *admissionregistration.MutatingAdmissionPolicyBindingList, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	rows := make([]metav1.TableRow, 0, len(list.Items))
+	for i := range list.Items {
+		r, err := printMutatingAdmissionPolicyBinding(&list.Items[i], options)
 		if err != nil {
 			return nil, err
 		}
@@ -1846,8 +2050,13 @@ func printPersistentVolume(obj *api.PersistentVolume, options printers.GenerateO
 		volumeMode = string(*obj.Spec.VolumeMode)
 	}
 
+	volumeAttributeClass := "<unset>"
+	if obj.Spec.VolumeAttributesClassName != nil {
+		volumeAttributeClass = *obj.Spec.VolumeAttributesClassName
+	}
+
 	row.Cells = append(row.Cells, obj.Name, aSize, modesStr, reclaimPolicyStr,
-		string(phase), claimRefUID, helper.GetPersistentVolumeClass(obj),
+		string(phase), claimRefUID, helper.GetPersistentVolumeClass(obj), volumeAttributeClass,
 		obj.Status.Reason, translateTimestampSince(obj.CreationTimestamp), volumeMode)
 	return []metav1.TableRow{row}, nil
 }
@@ -1874,10 +2083,16 @@ func printPersistentVolumeClaim(obj *api.PersistentVolumeClaim, options printers
 		phase = "Terminating"
 	}
 
+	volumeAttributeClass := "<unset>"
 	storage := obj.Spec.Resources.Requests[api.ResourceStorage]
 	capacity := ""
 	accessModes := ""
 	volumeMode := "<unset>"
+
+	if obj.Spec.VolumeAttributesClassName != nil {
+		volumeAttributeClass = *obj.Spec.VolumeAttributesClassName
+	}
+
 	if obj.Spec.VolumeName != "" {
 		accessModes = helper.GetAccessModesAsString(obj.Status.AccessModes)
 		storage = obj.Status.Capacity[api.ResourceStorage]
@@ -1889,7 +2104,7 @@ func printPersistentVolumeClaim(obj *api.PersistentVolumeClaim, options printers
 	}
 
 	row.Cells = append(row.Cells, obj.Name, string(phase), obj.Spec.VolumeName, capacity, accessModes,
-		helper.GetPersistentVolumeClaimClass(obj), translateTimestampSince(obj.CreationTimestamp), volumeMode)
+		helper.GetPersistentVolumeClaimClass(obj), volumeAttributeClass, translateTimestampSince(obj.CreationTimestamp), volumeMode)
 	return []metav1.TableRow{row}, nil
 }
 
@@ -2087,6 +2302,30 @@ func printCertificateSigningRequestList(list *certificates.CertificateSigningReq
 	return rows, nil
 }
 
+func printClusterTrustBundle(obj *certificates.ClusterTrustBundle, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	row := metav1.TableRow{
+		Object: runtime.RawExtension{Object: obj},
+	}
+	signerName := "<none>"
+	if obj.Spec.SignerName != "" {
+		signerName = obj.Spec.SignerName
+	}
+	row.Cells = append(row.Cells, obj.Name, signerName)
+	return []metav1.TableRow{row}, nil
+}
+
+func printClusterTrustBundleList(list *certificates.ClusterTrustBundleList, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	rows := make([]metav1.TableRow, 0, len(list.Items))
+	for i := range list.Items {
+		r, err := printClusterTrustBundle(&list.Items[i], options)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, r...)
+	}
+	return rows, nil
+}
+
 func printComponentStatus(obj *api.ComponentStatus, options printers.GenerateOptions) ([]metav1.TableRow, error) {
 	row := metav1.TableRow{
 		Object: runtime.RawExtension{Object: obj},
@@ -2209,7 +2448,7 @@ func formatHPAMetrics(specs []autoscaling.MetricSpec, statuses []autoscaling.Met
 				if len(statuses) > i && statuses[i].Resource != nil {
 					current = statuses[i].Resource.Current.AverageValue.String()
 				}
-				list = append(list, fmt.Sprintf("%s/%s", current, spec.Resource.Target.AverageValue.String()))
+				list = append(list, fmt.Sprintf("%s: %s/%s", spec.Resource.Name.String(), current, spec.Resource.Target.AverageValue.String()))
 			} else {
 				current := "<unknown>"
 				if len(statuses) > i && statuses[i].Resource != nil && statuses[i].Resource.Current.AverageUtilization != nil {
@@ -2220,7 +2459,7 @@ func formatHPAMetrics(specs []autoscaling.MetricSpec, statuses []autoscaling.Met
 				if spec.Resource.Target.AverageUtilization != nil {
 					target = fmt.Sprintf("%d%%", *spec.Resource.Target.AverageUtilization)
 				}
-				list = append(list, fmt.Sprintf("%s/%s", current, target))
+				list = append(list, fmt.Sprintf("%s: %s/%s", spec.Resource.Name.String(), current, target))
 			}
 		case autoscaling.ContainerResourceMetricSourceType:
 			if spec.ContainerResource.Target.AverageValue != nil {
@@ -2228,7 +2467,7 @@ func formatHPAMetrics(specs []autoscaling.MetricSpec, statuses []autoscaling.Met
 				if len(statuses) > i && statuses[i].ContainerResource != nil {
 					current = statuses[i].ContainerResource.Current.AverageValue.String()
 				}
-				list = append(list, fmt.Sprintf("%s/%s", current, spec.ContainerResource.Target.AverageValue.String()))
+				list = append(list, fmt.Sprintf("%s: %s/%s", spec.ContainerResource.Name.String(), current, spec.ContainerResource.Target.AverageValue.String()))
 			} else {
 				current := "<unknown>"
 				if len(statuses) > i && statuses[i].ContainerResource != nil && statuses[i].ContainerResource.Current.AverageUtilization != nil {
@@ -2239,7 +2478,7 @@ func formatHPAMetrics(specs []autoscaling.MetricSpec, statuses []autoscaling.Met
 				if spec.ContainerResource.Target.AverageUtilization != nil {
 					target = fmt.Sprintf("%d%%", *spec.ContainerResource.Target.AverageUtilization)
 				}
-				list = append(list, fmt.Sprintf("%s/%s", current, target))
+				list = append(list, fmt.Sprintf("%s: %s/%s", spec.ContainerResource.Name.String(), current, target))
 			}
 		default:
 			list = append(list, "<unknown type>")
@@ -2374,6 +2613,28 @@ func printStorageClassList(list *storage.StorageClassList, options printers.Gene
 	return rows, nil
 }
 
+func printVolumeAttributesClass(obj *storage.VolumeAttributesClass, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	row := metav1.TableRow{
+		Object: runtime.RawExtension{Object: obj},
+	}
+
+	row.Cells = append(row.Cells, obj.Name, obj.DriverName, translateTimestampSince(obj.CreationTimestamp))
+
+	return []metav1.TableRow{row}, nil
+}
+
+func printVolumeAttributesClassList(list *storage.VolumeAttributesClassList, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	rows := make([]metav1.TableRow, 0, len(list.Items))
+	for i := range list.Items {
+		r, err := printVolumeAttributesClass(&list.Items[i], options)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, r...)
+	}
+	return rows, nil
+}
+
 func printLease(obj *coordination.Lease, options printers.GenerateOptions) ([]metav1.TableRow, error) {
 	row := metav1.TableRow{
 		Object: runtime.RawExtension{Object: obj},
@@ -2391,6 +2652,27 @@ func printLeaseList(list *coordination.LeaseList, options printers.GenerateOptio
 	rows := make([]metav1.TableRow, 0, len(list.Items))
 	for i := range list.Items {
 		r, err := printLease(&list.Items[i], options)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, r...)
+	}
+	return rows, nil
+}
+
+func printLeaseCandidate(obj *coordination.LeaseCandidate, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	row := metav1.TableRow{
+		Object: runtime.RawExtension{Object: obj},
+	}
+
+	row.Cells = append(row.Cells, obj.Name, obj.Spec.LeaseName, obj.Spec.BinaryVersion, obj.Spec.EmulationVersion, translateTimestampSince(obj.CreationTimestamp))
+	return []metav1.TableRow{row}, nil
+}
+
+func printLeaseCandidateList(list *coordination.LeaseCandidateList, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	rows := make([]metav1.TableRow, 0, len(list.Items))
+	for i := range list.Items {
+		r, err := printLeaseCandidate(&list.Items[i], options)
 		if err != nil {
 			return nil, err
 		}
@@ -2521,7 +2803,7 @@ func printResourceQuota(resourceQuota *api.ResourceQuota, options printers.Gener
 	}
 
 	age := translateTimestampSince(resourceQuota.CreationTimestamp)
-	row.Cells = append(row.Cells, resourceQuota.Name, age, strings.TrimSuffix(requestColumn.String(), ", "), strings.TrimSuffix(limitColumn.String(), ", "))
+	row.Cells = append(row.Cells, resourceQuota.Name, strings.TrimSuffix(requestColumn.String(), ", "), strings.TrimSuffix(limitColumn.String(), ", "), age)
 	return []metav1.TableRow{row}, nil
 }
 
@@ -2546,7 +2828,13 @@ func printPriorityClass(obj *scheduling.PriorityClass, options printers.Generate
 	value := obj.Value
 	globalDefault := obj.GlobalDefault
 	row.Cells = append(row.Cells, name, int64(value), globalDefault, translateTimestampSince(obj.CreationTimestamp))
-
+	if options.Wide {
+		var preemptionPolicy string
+		if obj.PreemptionPolicy != nil {
+			preemptionPolicy = string(*obj.PreemptionPolicy)
+		}
+		row.Cells = append(row.Cells, preemptionPolicy)
+	}
 	return []metav1.TableRow{row}, nil
 }
 
@@ -2728,49 +3016,55 @@ func printPriorityLevelConfigurationList(list *flowcontrol.PriorityLevelConfigur
 	return rows, nil
 }
 
-func printClusterCIDR(obj *networking.ClusterCIDR, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+func printServiceCIDR(obj *networking.ServiceCIDR, options printers.GenerateOptions) ([]metav1.TableRow, error) {
 	row := metav1.TableRow{
 		Object: runtime.RawExtension{Object: obj},
 	}
-	ipv4 := "<none>"
-	ipv6 := "<none>"
 
-	if obj.Spec.IPv4 != "" {
-		ipv4 = obj.Spec.IPv4
-	}
-	if obj.Spec.IPv6 != "" {
-		ipv6 = obj.Spec.IPv6
-	}
+	cidrs := strings.Join(obj.Spec.CIDRs, ",")
+	row.Cells = append(row.Cells, obj.Name, cidrs, translateTimestampSince(obj.CreationTimestamp))
+	return []metav1.TableRow{row}, nil
+}
 
-	row.Cells = append(row.Cells, obj.Name, fmt.Sprint(obj.Spec.PerNodeHostBits), ipv4, ipv6, translateTimestampSince(obj.CreationTimestamp))
-	if options.Wide {
-		nodeSelector := "<none>"
-		if obj.Spec.NodeSelector != nil {
-			allTerms := make([]string, 0)
-			for _, term := range obj.Spec.NodeSelector.NodeSelectorTerms {
-				if len(term.MatchExpressions) > 0 {
-					matchExpressions := fmt.Sprintf("MatchExpressions: %v", term.MatchExpressions)
-					allTerms = append(allTerms, matchExpressions)
-				}
-
-				if len(term.MatchFields) > 0 {
-					matchFields := fmt.Sprintf("MatchFields: %v", term.MatchFields)
-					allTerms = append(allTerms, matchFields)
-				}
-			}
-			nodeSelector = strings.Join(allTerms, ",")
+func printServiceCIDRList(list *networking.ServiceCIDRList, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	rows := make([]metav1.TableRow, 0, len(list.Items))
+	for i := range list.Items {
+		r, err := printServiceCIDR(&list.Items[i], options)
+		if err != nil {
+			return nil, err
 		}
-
-		row.Cells = append(row.Cells, nodeSelector)
+		rows = append(rows, r...)
 	}
+	return rows, nil
+}
+
+func printIPAddress(obj *networking.IPAddress, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	row := metav1.TableRow{
+		Object: runtime.RawExtension{Object: obj},
+	}
+
+	parentRefName := "<none>"
+	if obj.Spec.ParentRef != nil {
+		gr := schema.GroupResource{
+			Group:    obj.Spec.ParentRef.Group,
+			Resource: obj.Spec.ParentRef.Resource,
+		}
+		parentRefName = strings.ToLower(gr.String())
+		if obj.Spec.ParentRef.Namespace != "" {
+			parentRefName += "/" + obj.Spec.ParentRef.Namespace
+		}
+		parentRefName += "/" + obj.Spec.ParentRef.Name
+	}
+	age := translateTimestampSince(obj.CreationTimestamp)
+	row.Cells = append(row.Cells, obj.Name, parentRefName, age)
 
 	return []metav1.TableRow{row}, nil
 }
 
-func printClusterCIDRList(list *networking.ClusterCIDRList, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+func printIPAddressList(list *networking.IPAddressList, options printers.GenerateOptions) ([]metav1.TableRow, error) {
 	rows := make([]metav1.TableRow, 0, len(list.Items))
 	for i := range list.Items {
-		r, err := printClusterCIDR(&list.Items[i], options)
+		r, err := printIPAddress(&list.Items[i], options)
 		if err != nil {
 			return nil, err
 		}
@@ -2787,19 +3081,19 @@ func printScale(obj *autoscaling.Scale, options printers.GenerateOptions) ([]met
 	return []metav1.TableRow{row}, nil
 }
 
-func printResourceClass(obj *resource.ResourceClass, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+func printDeviceClass(obj *resource.DeviceClass, options printers.GenerateOptions) ([]metav1.TableRow, error) {
 	row := metav1.TableRow{
 		Object: runtime.RawExtension{Object: obj},
 	}
-	row.Cells = append(row.Cells, obj.Name, obj.DriverName, translateTimestampSince(obj.CreationTimestamp))
+	row.Cells = append(row.Cells, obj.Name, translateTimestampSince(obj.CreationTimestamp))
 
 	return []metav1.TableRow{row}, nil
 }
 
-func printResourceClassList(list *resource.ResourceClassList, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+func printDeviceClassList(list *resource.DeviceClassList, options printers.GenerateOptions) ([]metav1.TableRow, error) {
 	rows := make([]metav1.TableRow, 0, len(list.Items))
 	for i := range list.Items {
-		r, err := printResourceClass(&list.Items[i], options)
+		r, err := printDeviceClass(&list.Items[i], options)
 		if err != nil {
 			return nil, err
 		}
@@ -2812,7 +3106,7 @@ func printResourceClaim(obj *resource.ResourceClaim, options printers.GenerateOp
 	row := metav1.TableRow{
 		Object: runtime.RawExtension{Object: obj},
 	}
-	row.Cells = append(row.Cells, obj.Name, obj.Spec.ResourceClassName, string(obj.Spec.AllocationMode), resourceClaimState(obj), translateTimestampSince(obj.CreationTimestamp))
+	row.Cells = append(row.Cells, obj.Name, resourceClaimState(obj), translateTimestampSince(obj.CreationTimestamp))
 
 	return []metav1.TableRow{row}, nil
 }
@@ -2830,8 +3124,6 @@ func resourceClaimState(obj *resource.ResourceClaim) string {
 		states = append(states, "allocated")
 		if len(obj.Status.ReservedFor) > 0 {
 			states = append(states, "reserved")
-		} else if obj.DeletionTimestamp != nil || obj.Status.DeallocationRequested {
-			states = append(states, "deallocating")
 		}
 	}
 	return strings.Join(states, ",")
@@ -2853,7 +3145,7 @@ func printResourceClaimTemplate(obj *resource.ResourceClaimTemplate, options pri
 	row := metav1.TableRow{
 		Object: runtime.RawExtension{Object: obj},
 	}
-	row.Cells = append(row.Cells, obj.Name, obj.Spec.Spec.ResourceClassName, string(obj.Spec.Spec.AllocationMode), translateTimestampSince(obj.CreationTimestamp))
+	row.Cells = append(row.Cells, obj.Name, translateTimestampSince(obj.CreationTimestamp))
 
 	return []metav1.TableRow{row}, nil
 }
@@ -2870,19 +3162,74 @@ func printResourceClaimTemplateList(list *resource.ResourceClaimTemplateList, op
 	return rows, nil
 }
 
-func printPodScheduling(obj *resource.PodScheduling, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+func printResourceSlice(obj *resource.ResourceSlice, options printers.GenerateOptions) ([]metav1.TableRow, error) {
 	row := metav1.TableRow{
 		Object: runtime.RawExtension{Object: obj},
 	}
-	row.Cells = append(row.Cells, obj.Name, obj.Spec.SelectedNode, translateTimestampSince(obj.CreationTimestamp))
+	nodeName := ""
+	if obj.Spec.NodeName != nil {
+		nodeName = *obj.Spec.NodeName
+	}
+	row.Cells = append(row.Cells, obj.Name, nodeName, obj.Spec.Driver, obj.Spec.Pool.Name, translateTimestampSince(obj.CreationTimestamp))
 
 	return []metav1.TableRow{row}, nil
 }
 
-func printPodSchedulingList(list *resource.PodSchedulingList, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+func printResourceSliceList(list *resource.ResourceSliceList, options printers.GenerateOptions) ([]metav1.TableRow, error) {
 	rows := make([]metav1.TableRow, 0, len(list.Items))
 	for i := range list.Items {
-		r, err := printPodScheduling(&list.Items[i], options)
+		r, err := printResourceSlice(&list.Items[i], options)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, r...)
+	}
+	return rows, nil
+}
+
+func printDeviceTaint(obj *resource.DeviceTaintRule, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	row := metav1.TableRow{
+		Object: runtime.RawExtension{Object: obj},
+	}
+
+	timeAdded := ""
+	if added := obj.Spec.Taint.TimeAdded; added != nil {
+		timeAdded = translateTimestampSince(*added)
+	}
+	row.Cells = append(row.Cells, obj.Name, string(obj.Spec.Taint.Key), obj.Spec.Taint.Value, string(obj.Spec.Taint.Effect), timeAdded, translateTimestampSince(obj.CreationTimestamp))
+
+	return []metav1.TableRow{row}, nil
+}
+
+func printDeviceTaintRuleList(list *resource.DeviceTaintRuleList, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	rows := make([]metav1.TableRow, 0, len(list.Items))
+	for i := range list.Items {
+		r, err := printDeviceTaint(&list.Items[i], options)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, r...)
+	}
+	return rows, nil
+}
+
+func printStorageVersionMigration(obj *svmv1alpha1.StorageVersionMigration, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	row := metav1.TableRow{
+		Object: runtime.RawExtension{Object: obj},
+	}
+
+	migrationGVR := obj.Spec.Resource.Resource + "." + obj.Spec.Resource.Version + "." + obj.Spec.Resource.Group
+	row.Cells = append(row.Cells, obj.Name, migrationGVR)
+	//ToDo: add migration condition 'status' and 'type' (migration successful | failed)
+
+	return []metav1.TableRow{row}, nil
+}
+
+func printStorageVersionMigrationList(list *svmv1alpha1.StorageVersionMigrationList, options printers.GenerateOptions) ([]metav1.TableRow, error) {
+	rows := make([]metav1.TableRow, 0, len(list.Items))
+
+	for i := range list.Items {
+		r, err := printStorageVersionMigration(&list.Items[i], options)
 		if err != nil {
 			return nil, err
 		}
@@ -2920,4 +3267,15 @@ func (list SortableResourceNames) Swap(i, j int) {
 
 func (list SortableResourceNames) Less(i, j int) bool {
 	return list[i] < list[j]
+}
+
+func isPodInitializedConditionTrue(status *api.PodStatus) bool {
+	for _, condition := range status.Conditions {
+		if condition.Type != api.PodInitialized {
+			continue
+		}
+
+		return condition.Status == api.ConditionTrue
+	}
+	return false
 }

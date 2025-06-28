@@ -20,91 +20,142 @@ import (
 	"context"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/kubernetes/pkg/apis/autoscaling"
-	"k8s.io/kubernetes/pkg/apis/core"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/features"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
-func makeTestContainerMetricsHPA(hasContainerMetric bool) *autoscaling.HorizontalPodAutoscaler {
-	testHPA := &autoscaling.HorizontalPodAutoscaler{
-		Spec: autoscaling.HorizontalPodAutoscalerSpec{
-			Metrics: []autoscaling.MetricSpec{},
-		},
+type toleranceSet bool
+type zeroMinReplicasSet bool
+
+const (
+	withTolerance    toleranceSet       = true
+	withoutTolerance                    = false
+	zeroMinReplicas  zeroMinReplicasSet = true
+	oneMinReplicas                      = false
+)
+
+func TestPrepareForCreateConfigurableToleranceEnabled(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.HPAConfigurableTolerance, true)
+	hpa := prepareHPA(oneMinReplicas, withTolerance)
+
+	Strategy.PrepareForCreate(context.Background(), &hpa)
+	if hpa.Spec.Behavior.ScaleUp.Tolerance == nil {
+		t.Error("Expected tolerance field, got none")
 	}
-	if hasContainerMetric {
-		testHPA.Spec.Metrics = append(testHPA.Spec.Metrics, autoscaling.MetricSpec{
-			Type: autoscaling.ContainerResourceMetricSourceType,
-			ContainerResource: &autoscaling.ContainerResourceMetricSource{
-				Name:      core.ResourceCPU,
-				Container: "test-container",
-				Target: autoscaling.MetricTarget{
-					Type:               autoscaling.UtilizationMetricType,
-					AverageUtilization: pointer.Int32Ptr(30),
+}
+
+func TestPrepareForCreateConfigurableToleranceDisabled(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.HPAConfigurableTolerance, false)
+	hpa := prepareHPA(oneMinReplicas, withTolerance)
+
+	Strategy.PrepareForCreate(context.Background(), &hpa)
+	if hpa.Spec.Behavior.ScaleUp.Tolerance != nil {
+		t.Errorf("Expected tolerance field wiped out, got %v", hpa.Spec.Behavior.ScaleUp.Tolerance)
+	}
+}
+
+func TestPrepareForUpdateConfigurableToleranceEnabled(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.HPAConfigurableTolerance, true)
+	newHPA := prepareHPA(oneMinReplicas, withTolerance)
+	oldHPA := prepareHPA(oneMinReplicas, withTolerance)
+
+	Strategy.PrepareForUpdate(context.Background(), &newHPA, &oldHPA)
+	if newHPA.Spec.Behavior.ScaleUp.Tolerance == nil {
+		t.Error("Expected tolerance field, got none")
+	}
+}
+
+func TestPrepareForUpdateConfigurableToleranceDisabled(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.HPAConfigurableTolerance, false)
+	newHPA := prepareHPA(oneMinReplicas, withTolerance)
+	oldHPA := prepareHPA(oneMinReplicas, withoutTolerance)
+
+	Strategy.PrepareForUpdate(context.Background(), &newHPA, &oldHPA)
+	if newHPA.Spec.Behavior.ScaleUp.Tolerance != nil {
+		t.Errorf("Expected tolerance field wiped out, got %v", newHPA.Spec.Behavior.ScaleUp.Tolerance)
+	}
+
+	newHPA = prepareHPA(oneMinReplicas, withTolerance)
+	oldHPA = prepareHPA(oneMinReplicas, withTolerance)
+	Strategy.PrepareForUpdate(context.Background(), &newHPA, &oldHPA)
+	if newHPA.Spec.Behavior.ScaleUp.Tolerance == nil {
+		t.Errorf("Expected tolerance field not wiped out, got nil")
+	}
+}
+
+func TestValidateOptionsScaleToZeroEnabled(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.HPAScaleToZero, true)
+	oneReplicasHPA := prepareHPA(oneMinReplicas, withoutTolerance)
+
+	opts := validationOptionsForHorizontalPodAutoscaler(&oneReplicasHPA, &oneReplicasHPA)
+	if opts.MinReplicasLowerBound != 0 {
+		t.Errorf("Expected zero minReplicasLowerBound, got %v", opts.MinReplicasLowerBound)
+	}
+}
+
+func TestValidateOptionsScaleToZeroDisabled(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.HPAScaleToZero, false)
+	zeroReplicasHPA := prepareHPA(zeroMinReplicas, withoutTolerance)
+	oneReplicasHPA := prepareHPA(oneMinReplicas, withoutTolerance)
+
+	// MinReplicas should be 0 despite the gate being disabled since the old HPA
+	// had MinReplicas set to 0 already.
+	opts := validationOptionsForHorizontalPodAutoscaler(&zeroReplicasHPA, &zeroReplicasHPA)
+	if opts.MinReplicasLowerBound != 0 {
+		t.Errorf("Expected zero minReplicasLowerBound, got %v", opts.MinReplicasLowerBound)
+	}
+
+	opts = validationOptionsForHorizontalPodAutoscaler(&zeroReplicasHPA, &oneReplicasHPA)
+	if opts.MinReplicasLowerBound == 0 {
+		t.Errorf("Expected non-zero minReplicasLowerBound, got 0")
+	}
+}
+
+func prepareHPA(hasZeroMinReplicas zeroMinReplicasSet, hasTolerance toleranceSet) autoscaling.HorizontalPodAutoscaler {
+	tolerance := ptr.To(resource.MustParse("0.1"))
+	if !hasTolerance {
+		tolerance = nil
+	}
+
+	minReplicas := int32(0)
+	if !hasZeroMinReplicas {
+		minReplicas = 1
+	}
+
+	return autoscaling.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "myautoscaler",
+			Namespace:       metav1.NamespaceDefault,
+			ResourceVersion: "1",
+		},
+		Spec: autoscaling.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscaling.CrossVersionObjectReference{
+				Kind: "ReplicationController",
+				Name: "myrc",
+			},
+			MinReplicas: &minReplicas,
+			MaxReplicas: 5,
+			Metrics: []autoscaling.MetricSpec{{
+				Type: autoscaling.ResourceMetricSourceType,
+				Resource: &autoscaling.ResourceMetricSource{
+					Name: api.ResourceCPU,
+					Target: autoscaling.MetricTarget{
+						Type:               autoscaling.UtilizationMetricType,
+						AverageUtilization: ptr.To(int32(70)),
+					},
+				},
+			}},
+			Behavior: &autoscaling.HorizontalPodAutoscalerBehavior{
+				ScaleUp: &autoscaling.HPAScalingRules{
+					Tolerance: tolerance,
 				},
 			},
-		})
-	}
-	return testHPA
-}
-
-func TestCreateWithFeatureEnabled(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.HPAContainerMetrics, true)()
-	testHPA := makeTestContainerMetricsHPA(true)
-	Strategy.PrepareForCreate(context.Background(), testHPA)
-	if testHPA.Spec.Metrics[0].ContainerResource == nil {
-		t.Errorf("container metrics was set to nil")
-	}
-}
-
-func TestCreateWithFeatureDisabled(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.HPAContainerMetrics, false)()
-	testHPA := makeTestContainerMetricsHPA(true)
-	Strategy.PrepareForCreate(context.Background(), testHPA)
-	if testHPA.Spec.Metrics[0].ContainerResource != nil {
-		t.Errorf("container metrics is not nil")
-	}
-}
-
-func TestAutoscalerStatusStrategy_PrepareForUpdate(t *testing.T) {
-	for _, tc := range []struct {
-		name           string
-		featureEnabled bool
-		old            bool
-		expectedNew    bool
-	}{
-		{
-			name:           "feature disabled with existing container metrics",
-			featureEnabled: false,
-			old:            true,
-			expectedNew:    true,
 		},
-		{
-			name:           "feature enabled with no container metrics",
-			featureEnabled: true,
-			old:            false,
-			expectedNew:    true,
-		},
-		{
-			name:           "feature enabled with existing container metrics",
-			featureEnabled: true,
-			old:            true,
-			expectedNew:    true,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.HPAContainerMetrics, tc.featureEnabled)()
-			oldHPA := makeTestContainerMetricsHPA(tc.old)
-			newHPA := makeTestContainerMetricsHPA(true)
-			Strategy.PrepareForUpdate(context.Background(), newHPA, oldHPA)
-			if tc.expectedNew && newHPA.Spec.Metrics[0].ContainerResource == nil {
-				t.Errorf("container metric source is nil")
-			}
-			if !tc.expectedNew && newHPA.Spec.Metrics[0].ContainerResource != nil {
-				t.Errorf("container metric source is not nil")
-			}
-		})
 	}
 }

@@ -37,11 +37,19 @@ status:
   - lastProbeTime: "2003-01-01T01:01:01Z"
     lastTransitionTime: "2004-01-01T01:01:01Z"
     message: messageValue
+    observedGeneration: 7
     reason: reasonValue
     status: statusValue
     type: typeValue
   containerStatuses:
-  - containerID: containerIDValue
+  - allocatedResources:
+      allocatedResourcesKey: "0"
+    allocatedResourcesStatus:
+    - name: nameValue
+      resources:
+      - health: healthValue
+        resourceID: resourceIDValue
+    containerID: containerIDValue
     image: imageValue
     imageID: imageIDValue
     lastState:
@@ -63,12 +71,11 @@ status:
     resources:
       claims:
       - name: nameValue
+        request: requestValue
       limits:
         limitsKey: "0"
       requests:
         requestsKey: "0"
-    resourcesAllocated:
-      resourcesAllocatedKey: "0"
     restartCount: 5
     started: true
     state:
@@ -85,8 +92,27 @@ status:
       waiting:
         message: messageValue
         reason: reasonValue
+    stopSignal: stopSignalValue
+    user:
+      linux:
+        gid: 2
+        supplementalGroups:
+        - 3
+        uid: 1
+    volumeMounts:
+    - mountPath: mountPathValue
+      name: nameValue
+      readOnly: true
+      recursiveReadOnly: recursiveReadOnlyValue
   ephemeralContainerStatuses:
-  - containerID: containerIDValue
+  - allocatedResources:
+      allocatedResourcesKey: "0"
+    allocatedResourcesStatus:
+    - name: nameValue
+      resources:
+      - health: healthValue
+        resourceID: resourceIDValue
+    containerID: containerIDValue
     image: imageValue
     imageID: imageIDValue
     lastState:
@@ -108,12 +134,11 @@ status:
     resources:
       claims:
       - name: nameValue
+        request: requestValue
       limits:
         limitsKey: "0"
       requests:
         requestsKey: "0"
-    resourcesAllocated:
-      resourcesAllocatedKey: "0"
     restartCount: 5
     started: true
     state:
@@ -130,9 +155,30 @@ status:
       waiting:
         message: messageValue
         reason: reasonValue
+    stopSignal: stopSignalValue
+    user:
+      linux:
+        gid: 2
+        supplementalGroups:
+        - 3
+        uid: 1
+    volumeMounts:
+    - mountPath: mountPathValue
+      name: nameValue
+      readOnly: true
+      recursiveReadOnly: recursiveReadOnlyValue
   hostIP: hostIPValue
+  hostIPs:
+  - ip: ipValue
   initContainerStatuses:
-  - containerID: containerIDValue
+  - allocatedResources:
+      allocatedResourcesKey: "0"
+    allocatedResourcesStatus:
+    - name: nameValue
+      resources:
+      - health: healthValue
+        resourceID: resourceIDValue
+    containerID: containerIDValue
     image: imageValue
     imageID: imageIDValue
     lastState:
@@ -154,12 +200,11 @@ status:
     resources:
       claims:
       - name: nameValue
+        request: requestValue
       limits:
         limitsKey: "0"
       requests:
         requestsKey: "0"
-    resourcesAllocated:
-      resourcesAllocatedKey: "0"
     restartCount: 5
     started: true
     state:
@@ -176,8 +221,21 @@ status:
       waiting:
         message: messageValue
         reason: reasonValue
+    stopSignal: stopSignalValue
+    user:
+      linux:
+        gid: 2
+        supplementalGroups:
+        - 3
+        uid: 1
+    volumeMounts:
+    - mountPath: mountPathValue
+      name: nameValue
+      readOnly: true
+      recursiveReadOnly: recursiveReadOnlyValue
   message: messageValue
   nominatedNodeName: nominatedNodeNameValue
+  observedGeneration: 17
   phase: phaseValue
   podIP: podIPValue
   podIPs:
@@ -185,4 +243,7 @@ status:
   qosClass: qosClassValue
   reason: reasonValue
   resize: resizeValue
+  resourceClaimStatuses:
+  - name: nameValue
+    resourceClaimName: resourceClaimNameValue
   startTime: "2007-01-01T01:01:01Z"

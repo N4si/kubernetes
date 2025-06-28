@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
@@ -67,12 +68,12 @@ func GetEarliestPodStartTime(victims *extenderv1.Victims) *metav1.Time {
 	maxPriority := corev1helpers.PodPriority(victims.Pods[0])
 
 	for _, pod := range victims.Pods {
-		if corev1helpers.PodPriority(pod) == maxPriority {
-			if GetPodStartTime(pod).Before(earliestPodStartTime) {
-				earliestPodStartTime = GetPodStartTime(pod)
+		if podPriority := corev1helpers.PodPriority(pod); podPriority == maxPriority {
+			if podStartTime := GetPodStartTime(pod); podStartTime.Before(earliestPodStartTime) {
+				earliestPodStartTime = podStartTime
 			}
-		} else if corev1helpers.PodPriority(pod) > maxPriority {
-			maxPriority = corev1helpers.PodPriority(pod)
+		} else if podPriority > maxPriority {
+			maxPriority = podPriority
 			earliestPodStartTime = GetPodStartTime(pod)
 		}
 	}
@@ -81,9 +82,8 @@ func GetEarliestPodStartTime(victims *extenderv1.Victims) *metav1.Time {
 }
 
 // MoreImportantPod return true when priority of the first pod is higher than
-// the second one. If two pods' priorities are equal, compare their StartTime.
-// It takes arguments of the type "interface{}" to be used with SortableList,
-// but expects those arguments to be *v1.Pod.
+// the second one. If two pods' priorities are equal, compare their StartTime,
+// treating the older pod as more important.
 func MoreImportantPod(pod1, pod2 *v1.Pod) bool {
 	p1 := corev1helpers.PodPriority(pod1)
 	p2 := corev1helpers.PodPriority(pod2)
@@ -158,4 +158,68 @@ func ClearNominatedNodeName(ctx context.Context, cs kubernetes.Interface, pods .
 func IsScalarResourceName(name v1.ResourceName) bool {
 	return v1helper.IsExtendedResourceName(name) || v1helper.IsHugePageResourceName(name) ||
 		v1helper.IsPrefixedNativeResource(name) || v1helper.IsAttachableVolumeResourceName(name)
+}
+
+// As converts two objects to the given type.
+// Both objects must be of the same type. If not, an error is returned.
+// nil objects are allowed and will be converted to nil.
+// For oldObj, cache.DeletedFinalStateUnknown is handled and the
+// object stored in it will be converted instead.
+func As[T any](oldObj, newobj interface{}) (T, T, error) {
+	var oldTyped T
+	var newTyped T
+	var ok bool
+	if newobj != nil {
+		newTyped, ok = newobj.(T)
+		if !ok {
+			return oldTyped, newTyped, fmt.Errorf("expected %T, but got %T", newTyped, newobj)
+		}
+	}
+
+	if oldObj != nil {
+		if realOldObj, ok := oldObj.(cache.DeletedFinalStateUnknown); ok {
+			oldObj = realOldObj.Obj
+		}
+		oldTyped, ok = oldObj.(T)
+		if !ok {
+			return oldTyped, newTyped, fmt.Errorf("expected %T, but got %T", oldTyped, oldObj)
+		}
+	}
+	return oldTyped, newTyped, nil
+}
+
+// GetHostPorts returns the used host ports of pod containers and
+// initContainers with restartPolicy: Always.
+func GetHostPorts(pod *v1.Pod) []v1.ContainerPort {
+	var ports []v1.ContainerPort
+	if pod == nil {
+		return ports
+	}
+
+	hostPort := func(p v1.ContainerPort) bool {
+		return p.HostPort > 0
+	}
+
+	for _, c := range pod.Spec.InitContainers {
+		// Only consider initContainers that will be running the entire
+		// duration of the Pod.
+		if c.RestartPolicy == nil || *c.RestartPolicy != v1.ContainerRestartPolicyAlways {
+			continue
+		}
+		for _, p := range c.Ports {
+			if !hostPort(p) {
+				continue
+			}
+			ports = append(ports, p)
+		}
+	}
+	for _, c := range pod.Spec.Containers {
+		for _, p := range c.Ports {
+			if !hostPort(p) {
+				continue
+			}
+			ports = append(ports, p)
+		}
+	}
+	return ports
 }

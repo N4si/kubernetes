@@ -22,7 +22,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+
 	"k8s.io/apimachinery/pkg/util/sets"
+	st "k8s.io/kubernetes/pkg/scheduler/testing"
 )
 
 var errorStatus = NewStatus(Error, "internal error")
@@ -123,22 +125,6 @@ func TestStatus(t *testing.T) {
 	}
 }
 
-// The String() method relies on the value and order of the status codes to function properly.
-func TestStatusCodes(t *testing.T) {
-	assertStatusCode(t, Success, 0)
-	assertStatusCode(t, Error, 1)
-	assertStatusCode(t, Unschedulable, 2)
-	assertStatusCode(t, UnschedulableAndUnresolvable, 3)
-	assertStatusCode(t, Wait, 4)
-	assertStatusCode(t, Skip, 5)
-}
-
-func assertStatusCode(t *testing.T, code Code, value int) {
-	if int(code) != value {
-		t.Errorf("Status code %q should have a value of %v but got %v", code.String(), value, int(code))
-	}
-}
-
 func TestPreFilterResultMerge(t *testing.T) {
 	tests := map[string]struct {
 		receiver *PreFilterResult
@@ -147,41 +133,41 @@ func TestPreFilterResultMerge(t *testing.T) {
 	}{
 		"all nil": {},
 		"nil receiver empty input": {
-			in:   &PreFilterResult{NodeNames: sets.NewString()},
-			want: &PreFilterResult{NodeNames: sets.NewString()},
+			in:   &PreFilterResult{NodeNames: sets.New[string]()},
+			want: &PreFilterResult{NodeNames: sets.New[string]()},
 		},
 		"empty receiver nil input": {
-			receiver: &PreFilterResult{NodeNames: sets.NewString()},
-			want:     &PreFilterResult{NodeNames: sets.NewString()},
+			receiver: &PreFilterResult{NodeNames: sets.New[string]()},
+			want:     &PreFilterResult{NodeNames: sets.New[string]()},
 		},
 		"empty receiver empty input": {
-			receiver: &PreFilterResult{NodeNames: sets.NewString()},
-			in:       &PreFilterResult{NodeNames: sets.NewString()},
-			want:     &PreFilterResult{NodeNames: sets.NewString()},
+			receiver: &PreFilterResult{NodeNames: sets.New[string]()},
+			in:       &PreFilterResult{NodeNames: sets.New[string]()},
+			want:     &PreFilterResult{NodeNames: sets.New[string]()},
 		},
 		"nil receiver populated input": {
-			in:   &PreFilterResult{NodeNames: sets.NewString("node1")},
-			want: &PreFilterResult{NodeNames: sets.NewString("node1")},
+			in:   &PreFilterResult{NodeNames: sets.New("node1")},
+			want: &PreFilterResult{NodeNames: sets.New("node1")},
 		},
 		"empty receiver populated input": {
-			receiver: &PreFilterResult{NodeNames: sets.NewString()},
-			in:       &PreFilterResult{NodeNames: sets.NewString("node1")},
-			want:     &PreFilterResult{NodeNames: sets.NewString()},
+			receiver: &PreFilterResult{NodeNames: sets.New[string]()},
+			in:       &PreFilterResult{NodeNames: sets.New("node1")},
+			want:     &PreFilterResult{NodeNames: sets.New[string]()},
 		},
 
 		"populated receiver nil input": {
-			receiver: &PreFilterResult{NodeNames: sets.NewString("node1")},
-			want:     &PreFilterResult{NodeNames: sets.NewString("node1")},
+			receiver: &PreFilterResult{NodeNames: sets.New("node1")},
+			want:     &PreFilterResult{NodeNames: sets.New("node1")},
 		},
 		"populated receiver empty input": {
-			receiver: &PreFilterResult{NodeNames: sets.NewString("node1")},
-			in:       &PreFilterResult{NodeNames: sets.NewString()},
-			want:     &PreFilterResult{NodeNames: sets.NewString()},
+			receiver: &PreFilterResult{NodeNames: sets.New("node1")},
+			in:       &PreFilterResult{NodeNames: sets.New[string]()},
+			want:     &PreFilterResult{NodeNames: sets.New[string]()},
 		},
 		"populated receiver and input": {
-			receiver: &PreFilterResult{NodeNames: sets.NewString("node1", "node2")},
-			in:       &PreFilterResult{NodeNames: sets.NewString("node2", "node3")},
-			want:     &PreFilterResult{NodeNames: sets.NewString("node2")},
+			receiver: &PreFilterResult{NodeNames: sets.New("node1", "node2")},
+			in:       &PreFilterResult{NodeNames: sets.New("node2", "node3")},
+			want:     &PreFilterResult{NodeNames: sets.New("node2")},
 		},
 	}
 	for name, test := range tests {
@@ -271,6 +257,121 @@ func TestIsStatusEqual(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := tt.x.Equal(tt.y); got != tt.want {
 				t.Errorf("cmp.Equal() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+type nodeInfoLister []*NodeInfo
+
+func (nodes nodeInfoLister) Get(nodeName string) (*NodeInfo, error) {
+	for _, node := range nodes {
+		if node != nil && node.Node().Name == nodeName {
+			return node, nil
+		}
+	}
+	return nil, fmt.Errorf("unable to find node: %s", nodeName)
+}
+
+func (nodes nodeInfoLister) List() ([]*NodeInfo, error) {
+	return nodes, nil
+}
+
+func (nodes nodeInfoLister) HavePodsWithAffinityList() ([]*NodeInfo, error) {
+	return nodes, nil
+}
+
+func (nodes nodeInfoLister) HavePodsWithRequiredAntiAffinityList() ([]*NodeInfo, error) {
+	return nodes, nil
+}
+
+func TestNodesForStatusCode(t *testing.T) {
+	// Prepare 4 nodes names.
+	nodeNames := []string{"node1", "node2", "node3", "node4"}
+	tests := []struct {
+		name          string
+		nodesStatuses *NodeToStatus
+		code          Code
+		expected      sets.Set[string] // set of expected node names.
+	}{
+		{
+			name: "No node should be attempted",
+			nodesStatuses: NewNodeToStatus(map[string]*Status{
+				"node1": NewStatus(UnschedulableAndUnresolvable),
+				"node2": NewStatus(UnschedulableAndUnresolvable),
+				"node3": NewStatus(UnschedulableAndUnresolvable),
+				"node4": NewStatus(UnschedulableAndUnresolvable),
+			}, NewStatus(UnschedulableAndUnresolvable)),
+			code:     Unschedulable,
+			expected: sets.New[string](),
+		},
+		{
+			name: "All nodes should be attempted",
+			nodesStatuses: NewNodeToStatus(map[string]*Status{
+				"node1": NewStatus(UnschedulableAndUnresolvable),
+				"node2": NewStatus(UnschedulableAndUnresolvable),
+				"node3": NewStatus(UnschedulableAndUnresolvable),
+				"node4": NewStatus(UnschedulableAndUnresolvable),
+			}, NewStatus(UnschedulableAndUnresolvable)),
+			code:     UnschedulableAndUnresolvable,
+			expected: sets.New[string]("node1", "node2", "node3", "node4"),
+		},
+		{
+			name:          "No node should be attempted, as all are implicitly not matching the code",
+			nodesStatuses: NewDefaultNodeToStatus(),
+			code:          Unschedulable,
+			expected:      sets.New[string](),
+		},
+		{
+			name:          "All nodes should be attempted, as all are implicitly matching the code",
+			nodesStatuses: NewDefaultNodeToStatus(),
+			code:          UnschedulableAndUnresolvable,
+			expected:      sets.New[string]("node1", "node2", "node3", "node4"),
+		},
+		{
+			name: "UnschedulableAndUnresolvable status should be skipped but Unschedulable should be tried",
+			nodesStatuses: NewNodeToStatus(map[string]*Status{
+				"node1": NewStatus(Unschedulable),
+				"node2": NewStatus(UnschedulableAndUnresolvable),
+				"node3": NewStatus(Unschedulable),
+				// node4 is UnschedulableAndUnresolvable by absence
+			}, NewStatus(UnschedulableAndUnresolvable)),
+			code:     Unschedulable,
+			expected: sets.New("node1", "node3"),
+		},
+		{
+			name: "Unschedulable status should be skipped but UnschedulableAndUnresolvable should be tried",
+			nodesStatuses: NewNodeToStatus(map[string]*Status{
+				"node1": NewStatus(Unschedulable),
+				"node2": NewStatus(UnschedulableAndUnresolvable),
+				"node3": NewStatus(Unschedulable),
+				// node4 is UnschedulableAndUnresolvable by absence
+			}, NewStatus(UnschedulableAndUnresolvable)),
+			code:     UnschedulableAndUnresolvable,
+			expected: sets.New("node2", "node4"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var nodeInfos nodeInfoLister
+			for _, name := range nodeNames {
+				ni := NewNodeInfo()
+				ni.SetNode(st.MakeNode().Name(name).Obj())
+				nodeInfos = append(nodeInfos, ni)
+			}
+			nodes, err := tt.nodesStatuses.NodesForStatusCode(nodeInfos, tt.code)
+			if err != nil {
+				t.Fatalf("Failed to get nodes for status code: %s", err)
+			}
+			if len(tt.expected) != len(nodes) {
+				t.Errorf("Number of nodes is not the same as expected. expected: %d, got: %d. Nodes: %v", len(tt.expected), len(nodes), nodes)
+			}
+			for _, node := range nodes {
+				name := node.Node().Name
+				if _, found := tt.expected[name]; !found {
+					t.Errorf("Node %v is not expected", name)
+				}
 			}
 		})
 	}

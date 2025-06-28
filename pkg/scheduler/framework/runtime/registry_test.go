@@ -17,9 +17,10 @@ limitations under the License.
 package runtime
 
 import (
-	"reflect"
+	"context"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -65,9 +66,8 @@ func TestDecodeInto(t *testing.T) {
 			if err := DecodeInto(test.args, &pluginFooConf); err != nil {
 				t.Errorf("DecodeInto(): failed to decode args %+v: %v", test.args, err)
 			}
-			if !reflect.DeepEqual(test.expected, pluginFooConf) {
-				t.Errorf("DecodeInto(): failed to decode plugin config, expected: %+v, got: %+v",
-					test.expected, pluginFooConf)
+			if diff := cmp.Diff(test.expected, pluginFooConf); diff != "" {
+				t.Errorf("DecodeInto(): failed to decode plugin config (-want,+got):\n%s", diff)
 			}
 		})
 	}
@@ -78,8 +78,8 @@ func TestDecodeInto(t *testing.T) {
 func isRegistryEqual(registryX, registryY Registry) bool {
 	for name, pluginFactory := range registryY {
 		if val, ok := registryX[name]; ok {
-			p1, _ := pluginFactory(nil, nil)
-			p2, _ := val(nil, nil)
+			p1, _ := pluginFactory(nil, nil, nil)
+			p2, _ := val(nil, nil, nil)
 			if p1.Name() != p2.Name() {
 				// pluginFactory functions are not the same.
 				return false
@@ -110,7 +110,7 @@ func (p *mockNoopPlugin) Name() string {
 
 func NewMockNoopPluginFactory() PluginFactory {
 	uuid := uuid.New().String()
-	return func(_ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
+	return func(_ context.Context, _ runtime.Object, _ framework.Handle) (framework.Plugin, error) {
 		return &mockNoopPlugin{uuid}, nil
 	}
 }

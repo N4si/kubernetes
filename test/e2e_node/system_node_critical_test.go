@@ -18,6 +18,7 @@ package e2enode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -28,6 +29,7 @@ import (
 	kubeapi "k8s.io/kubernetes/pkg/apis/core"
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	evictionapi "k8s.io/kubernetes/pkg/kubelet/eviction/api"
+	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	admissionapi "k8s.io/pod-security-admission/api"
 
@@ -35,20 +37,20 @@ import (
 	"github.com/onsi/gomega"
 )
 
-var _ = SIGDescribe("SystemNodeCriticalPod [Slow] [Serial] [Disruptive] [NodeFeature:SystemNodeCriticalPod]", func() {
+var _ = SIGDescribe("SystemNodeCriticalPod", framework.WithSlow(), framework.WithSerial(), framework.WithDisruptive(), feature.SystemNodeCriticalPod, feature.Eviction, func() {
 	f := framework.NewDefaultFramework("system-node-critical-pod-test")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 	// this test only manipulates pods in kube-system
 	f.SkipNamespaceCreation = true
 
-	ginkgo.AfterEach(func() {
+	ginkgo.AfterEach(func(ctx context.Context) {
 		if framework.TestContext.PrepullImages {
 			// The test may cause the prepulled images to be evicted,
 			// prepull those images again to ensure this test not affect following tests.
-			PrePullAllImages()
+			err := PrePullAllImages(ctx)
+			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		}
 	})
-
 	ginkgo.Context("when create a system-node-critical pod", func() {
 		tempSetCurrentKubeletConfig(f, func(ctx context.Context, initialConfig *kubeletconfig.KubeletConfiguration) {
 			diskConsumed := resource.MustParse("200Mi")
@@ -67,7 +69,7 @@ var _ = SIGDescribe("SystemNodeCriticalPod [Slow] [Serial] [Disruptive] [NodeFea
 				ginkgo.By("create a static system-node-critical pod")
 				staticPodName = "static-disk-hog-" + string(uuid.NewUUID())
 				mirrorPodName = staticPodName + "-" + framework.TestContext.NodeName
-				podPath = framework.TestContext.KubeletConfig.StaticPodPath
+				podPath = kubeletCfg.StaticPodPath
 				// define a static pod consuming disk gradually
 				// the upper limit is 1024 (iterations) * 10485760 bytes (10MB) = 10GB
 				err := createStaticSystemNodeCriticalPod(
@@ -89,8 +91,7 @@ var _ = SIGDescribe("SystemNodeCriticalPod [Slow] [Serial] [Disruptive] [NodeFea
 						return nil
 					}
 					msg := fmt.Sprintf("NodeCondition: %s not encountered yet", v1.NodeDiskPressure)
-					framework.Logf(msg)
-					return fmt.Errorf(msg)
+					return errors.New(msg)
 				}, time.Minute*2, time.Second*4).Should(gomega.Succeed())
 
 				ginkgo.By("check if it's running all the time")
@@ -99,7 +100,7 @@ var _ = SIGDescribe("SystemNodeCriticalPod [Slow] [Serial] [Disruptive] [NodeFea
 					if err == nil {
 						framework.Logf("mirror pod %q is running", mirrorPodName)
 					} else {
-						framework.Logf(err.Error())
+						framework.Logf("%s", err.Error())
 					}
 					return err
 				}, time.Minute*8, time.Second*4).ShouldNot(gomega.HaveOccurred())
@@ -109,7 +110,8 @@ var _ = SIGDescribe("SystemNodeCriticalPod [Slow] [Serial] [Disruptive] [NodeFea
 					if framework.TestContext.PrepullImages {
 						// The test may cause the prepulled images to be evicted,
 						// prepull those images again to ensure this test not affect following tests.
-						PrePullAllImages()
+						err := PrePullAllImages(ctx)
+						gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 					}
 				}()
 				ginkgo.By("delete the static pod")
@@ -146,11 +148,11 @@ spec:
   containers:
   - name: %s
     image: %s
-    restartPolicy: %s
     command: ["sh", "-c", "i=0; while [ $i -lt %d ]; do %s i=$(($i+1)); done; while true; do sleep 5; done"]
+  restartPolicy: %s
 `
 	file := staticPodPath(dir, name, namespace)
-	podYaml := fmt.Sprintf(template, name, namespace, name, image, string(restart), iterations, command)
+	podYaml := fmt.Sprintf(template, name, namespace, name, image, iterations, command, string(restart))
 
 	f, err := os.OpenFile(file, os.O_RDWR|os.O_TRUNC|os.O_CREATE, 0666)
 	if err != nil {

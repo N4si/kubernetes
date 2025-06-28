@@ -19,6 +19,8 @@ package metrics
 import (
 	"testing"
 
+	"k8s.io/klog/v2/ktesting"
+
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -62,19 +64,20 @@ func TestMetricCollection(t *testing.T) {
 		t.Fatalf("AddPodToVolume failed. Expected: <no error> Actual: <%v>", err)
 	}
 
-	mounter, err := fakePlugin.NewMounter(volumeSpec, pod, volume.VolumeOptions{})
+	mounter, err := fakePlugin.NewMounter(volumeSpec, pod)
 	if err != nil {
 		t.Fatalf("NewMounter failed. Expected: <no error> Actual: <%v>", err)
 	}
 
-	mapper, err := fakePlugin.NewBlockVolumeMapper(volumeSpec, pod, volume.VolumeOptions{})
+	mapper, err := fakePlugin.NewBlockVolumeMapper(volumeSpec, pod)
 	if err != nil {
 		t.Fatalf("NewBlockVolumeMapper failed. Expected: <no error> Actual: <%v>", err)
 	}
 
 	// Add one volume to ActualStateOfWorld
 	devicePath := "fake/device/path"
-	err = asw.MarkVolumeAsAttached("", volumeSpec, "", devicePath)
+	logger, _ := ktesting.NewTestContext(t)
+	err = asw.MarkVolumeAsAttached(logger, "", volumeSpec, "", devicePath)
 	if err != nil {
 		t.Fatalf("MarkVolumeAsAttached failed. Expected: <no error> Actual: <%v>", err)
 	}

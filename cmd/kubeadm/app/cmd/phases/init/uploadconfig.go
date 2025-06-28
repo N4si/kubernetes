@@ -19,8 +19,6 @@ package phases
 import (
 	"fmt"
 
-	"github.com/pkg/errors"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
@@ -30,9 +28,11 @@ import (
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases/workflow"
 	cmdutil "k8s.io/kubernetes/cmd/kubeadm/app/cmd/util"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	"k8s.io/kubernetes/cmd/kubeadm/app/features"
 	kubeletphase "k8s.io/kubernetes/cmd/kubeadm/app/phases/kubelet"
 	patchnodephase "k8s.io/kubernetes/cmd/kubeadm/app/phases/patchnode"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/uploadconfig"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 var (
@@ -45,7 +45,7 @@ var (
 
 	uploadKubeadmConfigExample = cmdutil.Examples(`
 		# upload the configuration of your cluster
-		kubeadm init phase upload-config --config=myConfig.yaml
+		kubeadm init phase upload-config kubeadm --config=myConfig.yaml
 		`)
 
 	uploadKubeletConfigLongDesc = cmdutil.LongDesc(`
@@ -65,7 +65,6 @@ func NewUploadConfigPhase() workflow.Phase {
 		Name:    "upload-config",
 		Aliases: []string{"uploadconfig"},
 		Short:   "Upload the kubeadm and kubelet configuration to a ConfigMap",
-		Long:    cmdutil.MacroCommandLongDescription,
 		Phases: []workflow.Phase{
 			{
 				Name:           "all",
@@ -104,7 +103,7 @@ func getUploadConfigPhaseFlags() []string {
 
 // runUploadKubeadmConfig uploads the kubeadm configuration to a ConfigMap
 func runUploadKubeadmConfig(c workflow.RunData) error {
-	cfg, client, _, err := getUploadConfigData(c)
+	cfg, client, err := getUploadConfigData(c)
 	if err != nil {
 		return err
 	}
@@ -118,32 +117,34 @@ func runUploadKubeadmConfig(c workflow.RunData) error {
 
 // runUploadKubeletConfig uploads the kubelet configuration to a ConfigMap
 func runUploadKubeletConfig(c workflow.RunData) error {
-	cfg, client, patchesDir, err := getUploadConfigData(c)
+	cfg, client, err := getUploadConfigData(c)
 	if err != nil {
 		return err
 	}
 
 	klog.V(1).Infoln("[upload-config] Uploading the kubelet component config to a ConfigMap")
-	if err = kubeletphase.CreateConfigMap(&cfg.ClusterConfiguration, patchesDir, client); err != nil {
+	if err = kubeletphase.CreateConfigMap(&cfg.ClusterConfiguration, client); err != nil {
 		return errors.Wrap(err, "error creating kubelet configuration ConfigMap")
 	}
 
-	klog.V(1).Infoln("[upload-config] Preserving the CRISocket information for the control-plane node")
-	if err := patchnodephase.AnnotateCRISocket(client, cfg.NodeRegistration.Name, cfg.NodeRegistration.CRISocket); err != nil {
-		return errors.Wrap(err, "Error writing Crisocket information for the control-plane node")
+	if !features.Enabled(cfg.FeatureGates, features.NodeLocalCRISocket) {
+		klog.V(1).Infoln("[upload-config] Preserving the CRISocket information for the control-plane node")
+		if err := patchnodephase.AnnotateCRISocket(client, cfg.NodeRegistration.Name, cfg.NodeRegistration.CRISocket); err != nil {
+			return errors.Wrap(err, "error writing CRISocket for this node")
+		}
 	}
 	return nil
 }
 
-func getUploadConfigData(c workflow.RunData) (*kubeadmapi.InitConfiguration, clientset.Interface, string, error) {
+func getUploadConfigData(c workflow.RunData) (*kubeadmapi.InitConfiguration, clientset.Interface, error) {
 	data, ok := c.(InitData)
 	if !ok {
-		return nil, nil, "", errors.New("upload-config phase invoked with an invalid data struct")
+		return nil, nil, errors.New("upload-config phase invoked with an invalid data struct")
 	}
 	cfg := data.Cfg()
 	client, err := data.Client()
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, err
 	}
-	return cfg, client, data.PatchesDir(), err
+	return cfg, client, err
 }

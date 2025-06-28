@@ -24,12 +24,15 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/time/rate"
 
-	"github.com/golang/groupcache/lru"
+	"k8s.io/klog/v2"
+	"k8s.io/utils/lru"
+
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 
@@ -47,6 +50,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -58,9 +62,12 @@ import (
 	clientgotesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
+	metricsutil "k8s.io/component-base/metrics/testutil"
 	"k8s.io/controller-manager/pkg/informerfactory"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	c "k8s.io/kubernetes/pkg/controller"
+	"k8s.io/kubernetes/pkg/controller/garbagecollector/metrics"
+	"k8s.io/kubernetes/test/utils/ktesting"
 )
 
 type testRESTMapper struct {
@@ -95,43 +102,41 @@ func TestGarbageCollectorConstruction(t *testing.T) {
 	// construction will not fail.
 	alwaysStarted := make(chan struct{})
 	close(alwaysStarted)
-	gc, err := NewGarbageCollector(client, metadataClient, rm, map[schema.GroupResource]struct{}{},
+	logger, tCtx := ktesting.NewTestContext(t)
+	gc, err := NewGarbageCollector(tCtx, client, metadataClient, rm, map[schema.GroupResource]struct{}{},
 		informerfactory.NewInformerFactory(sharedInformers, metadataInformers), alwaysStarted)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assert.Equal(t, 0, len(gc.dependencyGraphBuilder.monitors))
+	assert.Empty(t, gc.dependencyGraphBuilder.monitors)
 
 	// Make sure resource monitor syncing creates and stops resource monitors.
 	tweakableRM.Add(schema.GroupVersionKind{Group: "tpr.io", Version: "v1", Kind: "unknown"}, nil)
-	err = gc.resyncMonitors(twoResources)
+	err = gc.resyncMonitors(logger, twoResources)
 	if err != nil {
 		t.Errorf("Failed adding a monitor: %v", err)
 	}
-	assert.Equal(t, 2, len(gc.dependencyGraphBuilder.monitors))
+	assert.Len(t, gc.dependencyGraphBuilder.monitors, 2)
 
-	err = gc.resyncMonitors(podResource)
+	err = gc.resyncMonitors(logger, podResource)
 	if err != nil {
 		t.Errorf("Failed removing a monitor: %v", err)
 	}
-	assert.Equal(t, 1, len(gc.dependencyGraphBuilder.monitors))
+	assert.Len(t, gc.dependencyGraphBuilder.monitors, 1)
 
-	// Make sure the syncing mechanism also works after Run() has been called
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go gc.Run(ctx, 1)
+	go gc.Run(tCtx, 1, 5*time.Second)
 
-	err = gc.resyncMonitors(twoResources)
+	err = gc.resyncMonitors(logger, twoResources)
 	if err != nil {
 		t.Errorf("Failed adding a monitor: %v", err)
 	}
-	assert.Equal(t, 2, len(gc.dependencyGraphBuilder.monitors))
+	assert.Len(t, gc.dependencyGraphBuilder.monitors, 2)
 
-	err = gc.resyncMonitors(podResource)
+	err = gc.resyncMonitors(logger, podResource)
 	if err != nil {
 		t.Errorf("Failed removing a monitor: %v", err)
 	}
-	assert.Equal(t, 1, len(gc.dependencyGraphBuilder.monitors))
+	assert.Len(t, gc.dependencyGraphBuilder.monitors, 1)
 }
 
 // fakeAction records information about requests to aid in testing.
@@ -207,6 +212,7 @@ type garbageCollector struct {
 }
 
 func setupGC(t *testing.T, config *restclient.Config) garbageCollector {
+	_, ctx := ktesting.NewTestContext(t)
 	metadataClient, err := metadata.NewForConfig(config)
 	if err != nil {
 		t.Fatal(err)
@@ -216,12 +222,12 @@ func setupGC(t *testing.T, config *restclient.Config) garbageCollector {
 	sharedInformers := informers.NewSharedInformerFactory(client, 0)
 	alwaysStarted := make(chan struct{})
 	close(alwaysStarted)
-	gc, err := NewGarbageCollector(client, metadataClient, &testRESTMapper{testrestmapper.TestOnlyStaticRESTMapper(legacyscheme.Scheme)}, ignoredResources, sharedInformers, alwaysStarted)
+	gc, err := NewGarbageCollector(ctx, client, metadataClient, &testRESTMapper{testrestmapper.TestOnlyStaticRESTMapper(legacyscheme.Scheme)}, ignoredResources, sharedInformers, alwaysStarted)
 	if err != nil {
 		t.Fatal(err)
 	}
 	stop := make(chan struct{})
-	go sharedInformers.Start(stop)
+	sharedInformers.Start(stop)
 	return garbageCollector{gc, stop}
 }
 
@@ -408,19 +414,21 @@ func TestProcessEvent(t *testing.T) {
 	alwaysStarted := make(chan struct{})
 	close(alwaysStarted)
 	for _, scenario := range testScenarios {
+		logger, _ := ktesting.NewTestContext(t)
+
 		dependencyGraphBuilder := &GraphBuilder{
 			informersStarted: alwaysStarted,
-			graphChanges:     workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
+			graphChanges:     workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[*event]()),
 			uidToNode: &concurrentUIDToNode{
 				uidToNodeLock: sync.RWMutex{},
 				uidToNode:     make(map[types.UID]*node),
 			},
-			attemptToDelete:  workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
+			attemptToDelete:  workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[*node]()),
 			absentOwnerCache: NewReferenceCache(2),
 		}
 		for i := 0; i < len(scenario.events); i++ {
 			dependencyGraphBuilder.graphChanges.Add(&scenario.events[i])
-			dependencyGraphBuilder.processGraphChanges()
+			dependencyGraphBuilder.processGraphChanges(logger)
 			verifyGraphInvariants(scenario.name, dependencyGraphBuilder.uidToNode.uidToNode, t)
 		}
 	}
@@ -439,6 +447,8 @@ func BenchmarkReferencesDiffs(t *testing.B) {
 // TestDependentsRace relies on golang's data race detector to check if there is
 // data race among in the dependents field.
 func TestDependentsRace(t *testing.T) {
+	logger, _ := ktesting.NewTestContext(t)
+
 	gc := setupGC(t, &restclient.Config{})
 	defer close(gc.stop)
 
@@ -452,7 +462,7 @@ func TestDependentsRace(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < updates; i++ {
 			dependent := &node{}
-			gc.dependencyGraphBuilder.addDependentToOwners(dependent, []metav1.OwnerReference{{UID: ownerUID}})
+			gc.dependencyGraphBuilder.addDependentToOwners(logger, dependent, []metav1.OwnerReference{{UID: ownerUID}})
 			gc.dependencyGraphBuilder.removeDependentFromOwners(dependent, []metav1.OwnerReference{{UID: ownerUID}})
 		}
 	}()
@@ -460,7 +470,7 @@ func TestDependentsRace(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < updates; i++ {
 			gc.attemptToOrphan.Add(owner)
-			gc.processAttemptToOrphanWorker()
+			gc.processAttemptToOrphanWorker(logger)
 		}
 	}()
 	wg.Wait()
@@ -672,6 +682,8 @@ func TestUnblockOwnerReference(t *testing.T) {
 }
 
 func TestOrphanDependentsFailure(t *testing.T) {
+	logger, _ := ktesting.NewTestContext(t)
+
 	testHandler := &fakeActionHandler{
 		response: map[string]FakeResponse{
 			"PATCH" + "/api/v1/namespaces/ns1/pods/pod": {
@@ -698,7 +710,7 @@ func TestOrphanDependentsFailure(t *testing.T) {
 			},
 		},
 	}
-	err := gc.orphanDependents(objectReference{}, dependents)
+	err := gc.orphanDependents(logger, objectReference{}, dependents)
 	expected := `the server reported a conflict`
 	if err == nil || !strings.Contains(err.Error(), expected) {
 		if err != nil {
@@ -788,21 +800,26 @@ func TestGetDeletableResources(t *testing.T) {
 		},
 	}
 
+	logger, _ := ktesting.NewTestContext(t)
 	for name, test := range tests {
 		t.Logf("testing %q", name)
 		client := &fakeServerResources{
 			PreferredResources: test.serverResources,
 			Error:              test.err,
 		}
-		actual := GetDeletableResources(client)
+		actual, actualErr := GetDeletableResources(logger, client)
 		if !reflect.DeepEqual(test.deletableResources, actual) {
 			t.Errorf("expected resources:\n%v\ngot:\n%v", test.deletableResources, actual)
+		}
+		if !reflect.DeepEqual(test.err, actualErr) {
+			t.Errorf("expected error:\n%v\ngot:\n%v", test.err, actualErr)
 		}
 	}
 }
 
 // TestGarbageCollectorSync ensures that a discovery client error
-// will not cause the garbage collector to block infinitely.
+// or an informer sync error will not cause the garbage collector
+// to block infinitely.
 func TestGarbageCollectorSync(t *testing.T) {
 	serverResources := []*metav1.APIResourceList{
 		{
@@ -811,7 +828,15 @@ func TestGarbageCollectorSync(t *testing.T) {
 				{Name: "pods", Namespaced: true, Kind: "Pod", Verbs: metav1.Verbs{"delete", "list", "watch"}},
 			},
 		},
+		{
+			GroupVersion: "apps/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "deployments", Namespaced: true, Kind: "Deployment", Verbs: metav1.Verbs{"delete", "list", "watch"}},
+			},
+		},
 	}
+	appsV1Error := &discovery.ErrGroupDiscoveryFailed{Groups: map[schema.GroupVersion]error{{Group: "apps", Version: "v1"}: fmt.Errorf(":-/")}}
+
 	unsyncableServerResources := []*metav1.APIResourceList{
 		{
 			GroupVersion: "v1",
@@ -825,12 +850,15 @@ func TestGarbageCollectorSync(t *testing.T) {
 		PreferredResources: serverResources,
 		Error:              nil,
 		Lock:               sync.Mutex{},
-		InterfaceUsedCount: 0,
 	}
 
 	testHandler := &fakeActionHandler{
 		response: map[string]FakeResponse{
 			"GET" + "/api/v1/pods": {
+				200,
+				[]byte("{}"),
+			},
+			"GET" + "/apis/apps/v1/deployments": {
 				200,
 				[]byte("{}"),
 			},
@@ -840,7 +868,24 @@ func TestGarbageCollectorSync(t *testing.T) {
 			},
 		},
 	}
-	srv, clientConfig := testServerAndClientConfig(testHandler.ServeHTTP)
+
+	testHandler2 := &fakeActionHandler{
+		response: map[string]FakeResponse{
+			"GET" + "/api/v1/secrets": {
+				200,
+				[]byte("{}"),
+			},
+		},
+	}
+	var secretSyncOK atomic.Bool
+	var alternativeTestHandler = func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/v1/secrets" && secretSyncOK.Load() {
+			testHandler2.ServeHTTP(response, request)
+			return
+		}
+		testHandler.ServeHTTP(response, request)
+	}
+	srv, clientConfig := testServerAndClientConfig(alternativeTestHandler)
 	defer srv.Close()
 	clientConfig.ContentConfig.NegotiatedSerializer = nil
 	client, err := kubernetes.NewForConfig(clientConfig)
@@ -848,23 +893,29 @@ func TestGarbageCollectorSync(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rm := &testRESTMapper{testrestmapper.TestOnlyStaticRESTMapper(legacyscheme.Scheme)}
+	tweakableRM := meta.NewDefaultRESTMapper(nil)
+	tweakableRM.AddSpecific(schema.GroupVersionKind{Version: "v1", Kind: "Pod"}, schema.GroupVersionResource{Version: "v1", Resource: "pods"}, schema.GroupVersionResource{Version: "v1", Resource: "pod"}, meta.RESTScopeNamespace)
+	tweakableRM.AddSpecific(schema.GroupVersionKind{Version: "v1", Kind: "Secret"}, schema.GroupVersionResource{Version: "v1", Resource: "secrets"}, schema.GroupVersionResource{Version: "v1", Resource: "secret"}, meta.RESTScopeNamespace)
+	tweakableRM.AddSpecific(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}, schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}, schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployment"}, meta.RESTScopeNamespace)
+	rm := &testRESTMapper{meta.MultiRESTMapper{tweakableRM, testrestmapper.TestOnlyStaticRESTMapper(legacyscheme.Scheme)}}
 	metadataClient, err := metadata.NewForConfig(clientConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	sharedInformers := informers.NewSharedInformerFactory(client, 0)
+
+	logger, tCtx := ktesting.NewTestContext(t)
+	defer tCtx.Cancel("test has completed")
 	alwaysStarted := make(chan struct{})
 	close(alwaysStarted)
-	gc, err := NewGarbageCollector(client, metadataClient, rm, map[schema.GroupResource]struct{}{}, sharedInformers, alwaysStarted)
+	gc, err := NewGarbageCollector(tCtx, client, metadataClient, rm, map[schema.GroupResource]struct{}{}, sharedInformers, alwaysStarted)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go gc.Run(ctx, 1)
+	syncPeriod := 200 * time.Millisecond
+	go gc.Run(tCtx, 1, syncPeriod)
 	// The pseudo-code of GarbageCollector.Sync():
 	// GarbageCollector.Sync(client, period, stopCh):
 	//    wait.Until() loops with `period` until the `stopCh` is closed :
@@ -879,70 +930,111 @@ func TestGarbageCollectorSync(t *testing.T) {
 	// The 1s sleep in the test allows GetDeletableResources and
 	// gc.resyncMonitors to run ~5 times to ensure the changes to the
 	// fakeDiscoveryClient are picked up.
-	go gc.Sync(fakeDiscoveryClient, 200*time.Millisecond, ctx.Done())
+	go gc.Sync(tCtx, fakeDiscoveryClient, syncPeriod)
 
 	// Wait until the sync discovers the initial resources
 	time.Sleep(1 * time.Second)
 
-	err = expectSyncNotBlocked(fakeDiscoveryClient, &gc.workerLock)
+	err = expectSyncNotBlocked(fakeDiscoveryClient)
 	if err != nil {
-		t.Fatalf("Expected garbagecollector.Sync to be running but it is blocked: %v", err)
+		t.Fatalf("Expected garbagecollector.Sync to still be running but it is blocked: %v", err)
 	}
+	assertMonitors(t, gc, "pods", "deployments")
 
 	// Simulate the discovery client returning an error
-	fakeDiscoveryClient.setPreferredResources(nil)
-	fakeDiscoveryClient.setError(fmt.Errorf("error calling discoveryClient.ServerPreferredResources()"))
+	fakeDiscoveryClient.setPreferredResources(nil, fmt.Errorf("error calling discoveryClient.ServerPreferredResources()"))
 
 	// Wait until sync discovers the change
 	time.Sleep(1 * time.Second)
+	// No monitor changes
+	assertMonitors(t, gc, "pods", "deployments")
 
 	// Remove the error from being returned and see if the garbage collector sync is still working
-	fakeDiscoveryClient.setPreferredResources(serverResources)
-	fakeDiscoveryClient.setError(nil)
+	fakeDiscoveryClient.setPreferredResources(serverResources, nil)
 
-	err = expectSyncNotBlocked(fakeDiscoveryClient, &gc.workerLock)
+	err = expectSyncNotBlocked(fakeDiscoveryClient)
 	if err != nil {
 		t.Fatalf("Expected garbagecollector.Sync to still be running but it is blocked: %v", err)
 	}
+	assertMonitors(t, gc, "pods", "deployments")
 
 	// Simulate the discovery client returning a resource the restmapper can resolve, but will not sync caches
-	fakeDiscoveryClient.setPreferredResources(unsyncableServerResources)
-	fakeDiscoveryClient.setError(nil)
+	fakeDiscoveryClient.setPreferredResources(unsyncableServerResources, nil)
 
 	// Wait until sync discovers the change
 	time.Sleep(1 * time.Second)
+	assertMonitors(t, gc, "pods", "secrets")
 
 	// Put the resources back to normal and ensure garbage collector sync recovers
-	fakeDiscoveryClient.setPreferredResources(serverResources)
-	fakeDiscoveryClient.setError(nil)
+	fakeDiscoveryClient.setPreferredResources(serverResources, nil)
 
-	err = expectSyncNotBlocked(fakeDiscoveryClient, &gc.workerLock)
+	err = expectSyncNotBlocked(fakeDiscoveryClient)
 	if err != nil {
 		t.Fatalf("Expected garbagecollector.Sync to still be running but it is blocked: %v", err)
+	}
+	assertMonitors(t, gc, "pods", "deployments")
+
+	// Partial discovery failure
+	fakeDiscoveryClient.setPreferredResources(unsyncableServerResources, appsV1Error)
+	// Wait until sync discovers the change
+	time.Sleep(1 * time.Second)
+	// Deployments monitor kept
+	assertMonitors(t, gc, "pods", "deployments", "secrets")
+
+	// Put the resources back to normal and ensure garbage collector sync recovers
+	fakeDiscoveryClient.setPreferredResources(serverResources, nil)
+	// Wait until sync discovers the change
+	time.Sleep(1 * time.Second)
+	err = expectSyncNotBlocked(fakeDiscoveryClient)
+	if err != nil {
+		t.Fatalf("Expected garbagecollector.Sync to still be running but it is blocked: %v", err)
+	}
+	// Unsyncable monitor removed
+	assertMonitors(t, gc, "pods", "deployments")
+
+	// Simulate initial not-synced informer which will be synced at the end.
+	metrics.GarbageCollectorResourcesSyncError.Reset()
+	fakeDiscoveryClient.setPreferredResources(unsyncableServerResources, nil)
+	time.Sleep(1 * time.Second)
+	assertMonitors(t, gc, "pods", "secrets")
+	if gc.IsSynced(logger) {
+		t.Fatal("cache from garbage collector should not be synced")
+	}
+	val, _ := metricsutil.GetCounterMetricValue(metrics.GarbageCollectorResourcesSyncError)
+	if val < 1 {
+		t.Fatalf("expect sync error metric > 0")
+	}
+
+	// The informer is synced now.
+	secretSyncOK.Store(true)
+	if err := wait.PollUntilContextTimeout(tCtx, time.Second, wait.ForeverTestTimeout, true, func(ctx context.Context) (bool, error) {
+		return gc.IsSynced(logger), nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func expectSyncNotBlocked(fakeDiscoveryClient *fakeServerResources, workerLock *sync.RWMutex) error {
+func assertMonitors(t *testing.T, gc *GarbageCollector, resources ...string) {
+	t.Helper()
+	expected := sets.NewString(resources...)
+	actual := sets.NewString()
+	for m := range gc.dependencyGraphBuilder.monitors {
+		actual.Insert(m.Resource)
+	}
+	if !actual.Equal(expected) {
+		t.Fatalf("expected monitors %v, got %v", expected.List(), actual.List())
+	}
+}
+
+func expectSyncNotBlocked(fakeDiscoveryClient *fakeServerResources) error {
 	before := fakeDiscoveryClient.getInterfaceUsedCount()
 	t := 1 * time.Second
 	time.Sleep(t)
 	after := fakeDiscoveryClient.getInterfaceUsedCount()
 	if before == after {
-		return fmt.Errorf("discoveryClient.ServerPreferredResources() called %d times over %v", after-before, t)
+		return fmt.Errorf("discoveryClient.ServerPreferredResources() not called over %v", t)
 	}
-
-	workerLockAcquired := make(chan struct{})
-	go func() {
-		workerLock.Lock()
-		defer workerLock.Unlock()
-		close(workerLockAcquired)
-	}()
-	select {
-	case <-workerLockAcquired:
-		return nil
-	case <-time.After(t):
-		return fmt.Errorf("workerLock blocked for at least %v", t)
-	}
+	return nil
 }
 
 type fakeServerResources struct {
@@ -967,15 +1059,10 @@ func (f *fakeServerResources) ServerPreferredResources() ([]*metav1.APIResourceL
 	return f.PreferredResources, f.Error
 }
 
-func (f *fakeServerResources) setPreferredResources(resources []*metav1.APIResourceList) {
+func (f *fakeServerResources) setPreferredResources(resources []*metav1.APIResourceList, err error) {
 	f.Lock.Lock()
 	defer f.Lock.Unlock()
 	f.PreferredResources = resources
-}
-
-func (f *fakeServerResources) setError(err error) {
-	f.Lock.Lock()
-	defer f.Lock.Unlock()
 	f.Error = err
 }
 
@@ -2262,9 +2349,9 @@ func TestConflictingData(t *testing.T) {
 			restMapper := &testRESTMapper{meta.MultiRESTMapper{tweakableRM, testrestmapper.TestOnlyStaticRESTMapper(legacyscheme.Scheme)}}
 
 			// set up our workqueues
-			attemptToDelete := newTrackingWorkqueue()
-			attemptToOrphan := newTrackingWorkqueue()
-			graphChanges := newTrackingWorkqueue()
+			attemptToDelete := newTrackingWorkqueue[*node]()
+			attemptToOrphan := newTrackingWorkqueue[*node]()
+			graphChanges := newTrackingWorkqueue[*event]()
 
 			gc := &GarbageCollector{
 				metadataClient:   metadataClient,
@@ -2286,8 +2373,11 @@ func TestConflictingData(t *testing.T) {
 				},
 			}
 
+			logger, _ := ktesting.NewTestContext(t)
+
 			ctx := stepContext{
 				t:               t,
+				logger:          logger,
 				gc:              gc,
 				eventRecorder:   eventRecorder,
 				metadataClient:  metadataClient,
@@ -2396,12 +2486,13 @@ func makeMetadataObj(identity objectReference, owners ...objectReference) *metav
 
 type stepContext struct {
 	t               *testing.T
+	logger          klog.Logger
 	gc              *GarbageCollector
 	eventRecorder   *record.FakeRecorder
 	metadataClient  *fakemetadata.FakeMetadataClient
-	attemptToDelete *trackingWorkqueue
-	attemptToOrphan *trackingWorkqueue
-	graphChanges    *trackingWorkqueue
+	attemptToDelete *trackingWorkqueue[*node]
+	attemptToOrphan *trackingWorkqueue[*node]
+	graphChanges    *trackingWorkqueue[*event]
 }
 
 type step struct {
@@ -2417,7 +2508,7 @@ func processPendingGraphChanges(count int) step {
 			if count <= 0 {
 				// process all
 				for ctx.gc.dependencyGraphBuilder.graphChanges.Len() != 0 {
-					ctx.gc.dependencyGraphBuilder.processGraphChanges()
+					ctx.gc.dependencyGraphBuilder.processGraphChanges(ctx.logger)
 				}
 			} else {
 				for i := 0; i < count; i++ {
@@ -2425,7 +2516,7 @@ func processPendingGraphChanges(count int) step {
 						ctx.t.Errorf("expected at least %d pending changes, got %d", count, i+1)
 						return
 					}
-					ctx.gc.dependencyGraphBuilder.processGraphChanges()
+					ctx.gc.dependencyGraphBuilder.processGraphChanges(ctx.logger)
 				}
 			}
 		},
@@ -2461,7 +2552,7 @@ func insertEvent(e *event) step {
 		check: func(ctx stepContext) {
 			ctx.t.Helper()
 			// drain queue into items
-			var items []interface{}
+			var items []*event
 			for ctx.gc.dependencyGraphBuilder.graphChanges.Len() > 0 {
 				item, _ := ctx.gc.dependencyGraphBuilder.graphChanges.Get()
 				ctx.gc.dependencyGraphBuilder.graphChanges.Done(item)
@@ -2488,7 +2579,7 @@ func processEvent(e *event) step {
 				ctx.t.Fatalf("events present in graphChanges, must process pending graphChanges before calling processEvent")
 			}
 			ctx.gc.dependencyGraphBuilder.graphChanges.Add(e)
-			ctx.gc.dependencyGraphBuilder.processGraphChanges()
+			ctx.gc.dependencyGraphBuilder.processGraphChanges(ctx.logger)
 		},
 	}
 }
@@ -2563,7 +2654,7 @@ func assertState(s state) step {
 				}
 				if len(s.absentOwnerCache) != ctx.gc.absentOwnerCache.cache.Len() {
 					// only way to inspect is to drain them all, but that's ok because we're failing the test anyway
-					ctx.gc.absentOwnerCache.cache.OnEvicted = func(key lru.Key, item interface{}) {
+					err := ctx.gc.absentOwnerCache.cache.SetEvictionFunc(func(key lru.Key, item interface{}) {
 						found := false
 						for _, absent := range s.absentOwnerCache {
 							if absent == key {
@@ -2574,6 +2665,9 @@ func assertState(s state) step {
 						if !found {
 							ctx.t.Errorf("unexpected item in absent owner cache: %s", key)
 						}
+					})
+					if err != nil {
+						ctx.t.Error("unexpected error setting eviction function: %w", err)
 					}
 					ctx.gc.absentOwnerCache.cache.Clear()
 					ctx.t.Error("unexpected items in absent owner cache")
@@ -2651,7 +2745,7 @@ func assertState(s state) step {
 						break
 					}
 
-					a := ctx.graphChanges.pendingList[i].(*event)
+					a := ctx.graphChanges.pendingList[i]
 					if !reflect.DeepEqual(e, a) {
 						objectDiff := ""
 						if !reflect.DeepEqual(e.obj, a.obj) {
@@ -2679,18 +2773,18 @@ func assertState(s state) step {
 						ctx.t.Errorf("attemptToDelete: expected %d events, got %d", len(s.pendingAttemptToDelete), ctx.attemptToDelete.Len())
 						break
 					}
-					a := ctx.attemptToDelete.pendingList[i].(*node).identity
-					a_virtual := ctx.attemptToDelete.pendingList[i].(*node).virtual
+					a := ctx.attemptToDelete.pendingList[i].identity
+					aVirtual := ctx.attemptToDelete.pendingList[i].virtual
 					if !reflect.DeepEqual(e, a) {
 						ctx.t.Errorf("attemptToDelete[%d]: expected %v, got %v", i, e, a)
 					}
-					if e_virtual != a_virtual {
+					if e_virtual != aVirtual {
 						ctx.t.Errorf("attemptToDelete[%d]: expected virtual node %v, got non-virtual node %v", i, e, a)
 					}
 				}
 				if ctx.attemptToDelete.Len() > len(s.pendingAttemptToDelete) {
 					for i, a := range ctx.attemptToDelete.pendingList[len(s.pendingAttemptToDelete):] {
-						ctx.t.Errorf("attemptToDelete[%d]: unexpected node: %v", len(s.pendingAttemptToDelete)+i, a.(*node).identity)
+						ctx.t.Errorf("attemptToDelete[%d]: unexpected node: %v", len(s.pendingAttemptToDelete)+i, a.identity)
 					}
 				}
 			}
@@ -2702,14 +2796,14 @@ func assertState(s state) step {
 						ctx.t.Errorf("attemptToOrphan: expected %d events, got %d", len(s.pendingAttemptToOrphan), ctx.attemptToOrphan.Len())
 						break
 					}
-					a := ctx.attemptToOrphan.pendingList[i].(*node).identity
+					a := ctx.attemptToOrphan.pendingList[i].identity
 					if !reflect.DeepEqual(e, a) {
 						ctx.t.Errorf("attemptToOrphan[%d]: expected %v, got %v", i, e, a)
 					}
 				}
 				if ctx.attemptToOrphan.Len() > len(s.pendingAttemptToOrphan) {
 					for i, a := range ctx.attemptToOrphan.pendingList[len(s.pendingAttemptToOrphan):] {
-						ctx.t.Errorf("attemptToOrphan[%d]: unexpected node: %v", len(s.pendingAttemptToOrphan)+i, a.(*node).identity)
+						ctx.t.Errorf("attemptToOrphan[%d]: unexpected node: %v", len(s.pendingAttemptToOrphan)+i, a.identity)
 					}
 				}
 			}
@@ -2722,46 +2816,46 @@ func assertState(s state) step {
 // allows introspection of the items in the queue,
 // and treats AddAfter and AddRateLimited the same as Add
 // so they are always synchronous.
-type trackingWorkqueue struct {
-	limiter     workqueue.RateLimitingInterface
-	pendingList []interface{}
-	pendingMap  map[interface{}]struct{}
+type trackingWorkqueue[T comparable] struct {
+	limiter     workqueue.TypedRateLimitingInterface[T]
+	pendingList []T
+	pendingMap  map[T]struct{}
 }
 
-var _ = workqueue.RateLimitingInterface(&trackingWorkqueue{})
+var _ = workqueue.TypedRateLimitingInterface[string](&trackingWorkqueue[string]{})
 
-func newTrackingWorkqueue() *trackingWorkqueue {
-	return &trackingWorkqueue{
-		limiter:    workqueue.NewRateLimitingQueue(&workqueue.BucketRateLimiter{Limiter: rate.NewLimiter(rate.Inf, 100)}),
-		pendingMap: map[interface{}]struct{}{},
+func newTrackingWorkqueue[T comparable]() *trackingWorkqueue[T] {
+	return &trackingWorkqueue[T]{
+		limiter:    workqueue.NewTypedRateLimitingQueue[T](&workqueue.TypedBucketRateLimiter[T]{Limiter: rate.NewLimiter(rate.Inf, 100)}),
+		pendingMap: map[T]struct{}{},
 	}
 }
 
-func (t *trackingWorkqueue) Add(item interface{}) {
+func (t *trackingWorkqueue[T]) Add(item T) {
 	t.queue(item)
 	t.limiter.Add(item)
 }
-func (t *trackingWorkqueue) AddAfter(item interface{}, duration time.Duration) {
+func (t *trackingWorkqueue[T]) AddAfter(item T, duration time.Duration) {
 	t.Add(item)
 }
-func (t *trackingWorkqueue) AddRateLimited(item interface{}) {
+func (t *trackingWorkqueue[T]) AddRateLimited(item T) {
 	t.Add(item)
 }
-func (t *trackingWorkqueue) Get() (interface{}, bool) {
+func (t *trackingWorkqueue[T]) Get() (T, bool) {
 	item, shutdown := t.limiter.Get()
 	t.dequeue(item)
 	return item, shutdown
 }
-func (t *trackingWorkqueue) Done(item interface{}) {
+func (t *trackingWorkqueue[T]) Done(item T) {
 	t.limiter.Done(item)
 }
-func (t *trackingWorkqueue) Forget(item interface{}) {
+func (t *trackingWorkqueue[T]) Forget(item T) {
 	t.limiter.Forget(item)
 }
-func (t *trackingWorkqueue) NumRequeues(item interface{}) int {
+func (t *trackingWorkqueue[T]) NumRequeues(item T) int {
 	return 0
 }
-func (t *trackingWorkqueue) Len() int {
+func (t *trackingWorkqueue[T]) Len() int {
 	if e, a := len(t.pendingList), len(t.pendingMap); e != a {
 		panic(fmt.Errorf("pendingList != pendingMap: %d / %d", e, a))
 	}
@@ -2770,17 +2864,17 @@ func (t *trackingWorkqueue) Len() int {
 	}
 	return len(t.pendingList)
 }
-func (t *trackingWorkqueue) ShutDown() {
+func (t *trackingWorkqueue[T]) ShutDown() {
 	t.limiter.ShutDown()
 }
-func (t *trackingWorkqueue) ShutDownWithDrain() {
+func (t *trackingWorkqueue[T]) ShutDownWithDrain() {
 	t.limiter.ShutDownWithDrain()
 }
-func (t *trackingWorkqueue) ShuttingDown() bool {
+func (t *trackingWorkqueue[T]) ShuttingDown() bool {
 	return t.limiter.ShuttingDown()
 }
 
-func (t *trackingWorkqueue) queue(item interface{}) {
+func (t *trackingWorkqueue[T]) queue(item T) {
 	if _, queued := t.pendingMap[item]; queued {
 		// fmt.Printf("already queued: %#v\n", item)
 		return
@@ -2788,13 +2882,13 @@ func (t *trackingWorkqueue) queue(item interface{}) {
 	t.pendingMap[item] = struct{}{}
 	t.pendingList = append(t.pendingList, item)
 }
-func (t *trackingWorkqueue) dequeue(item interface{}) {
+func (t *trackingWorkqueue[T]) dequeue(item T) {
 	if _, queued := t.pendingMap[item]; !queued {
 		// fmt.Printf("not queued: %#v\n", item)
 		return
 	}
 	delete(t.pendingMap, item)
-	newPendingList := []interface{}{}
+	newPendingList := []T{}
 	for _, p := range t.pendingList {
 		if p == item {
 			continue

@@ -21,10 +21,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
 	"strings"
-
-	"github.com/pkg/errors"
 
 	v1 "k8s.io/api/core/v1"
 	rbac "k8s.io/api/rbac/v1"
@@ -43,6 +41,7 @@ import (
 	nodebootstraptokenphase "k8s.io/kubernetes/cmd/kubeadm/app/phases/bootstraptoken/node"
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/apiclient"
 	cryptoutil "k8s.io/kubernetes/cmd/kubeadm/app/util/crypto"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 const (
@@ -85,7 +84,7 @@ func CreateCertificateKey() (string, error) {
 	return hex.EncodeToString(randBytes), nil
 }
 
-// UploadCerts save certs needs to join a new control-plane on kubeadm-certs sercret.
+// UploadCerts save certs needs to join a new control-plane on kubeadm-certs secret.
 func UploadCerts(client clientset.Interface, cfg *kubeadmapi.InitConfiguration, key string) error {
 	fmt.Printf("[upload-certs] Storing the certificates in Secret %q in the %q Namespace\n", kubeadmconstants.KubeadmCertsSecret, metav1.NamespaceSystem)
 	decodedKey, err := hex.DecodeString(key)
@@ -106,7 +105,7 @@ func UploadCerts(client clientset.Interface, cfg *kubeadmapi.InitConfiguration, 
 		return err
 	}
 
-	err = apiclient.CreateOrUpdateSecret(client, &v1.Secret{
+	err = apiclient.CreateOrUpdate(client.CoreV1().Secrets(metav1.NamespaceSystem), &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            kubeadmconstants.KubeadmCertsSecret,
 			Namespace:       metav1.NamespaceSystem,
@@ -122,7 +121,7 @@ func UploadCerts(client clientset.Interface, cfg *kubeadmapi.InitConfiguration, 
 }
 
 func createRBAC(client clientset.Interface) error {
-	err := apiclient.CreateOrUpdateRole(client, &rbac.Role{
+	err := apiclient.CreateOrUpdate(client.RbacV1().Roles(metav1.NamespaceSystem), &rbac.Role{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      kubeadmconstants.KubeadmCertsClusterRoleName,
 			Namespace: metav1.NamespaceSystem,
@@ -140,7 +139,7 @@ func createRBAC(client clientset.Interface) error {
 		return err
 	}
 
-	return apiclient.CreateOrUpdateRoleBinding(client, &rbac.RoleBinding{
+	return apiclient.CreateOrUpdate(client.RbacV1().RoleBindings(metav1.NamespaceSystem), &rbac.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      kubeadmconstants.KubeadmCertsClusterRoleName,
 			Namespace: metav1.NamespaceSystem,
@@ -182,17 +181,17 @@ func loadAndEncryptCert(certPath string, key []byte) ([]byte, error) {
 func certsToTransfer(cfg *kubeadmapi.InitConfiguration) map[string]string {
 	certsDir := cfg.CertificatesDir
 	certs := map[string]string{
-		kubeadmconstants.CACertName:                   path.Join(certsDir, kubeadmconstants.CACertName),
-		kubeadmconstants.CAKeyName:                    path.Join(certsDir, kubeadmconstants.CAKeyName),
-		kubeadmconstants.FrontProxyCACertName:         path.Join(certsDir, kubeadmconstants.FrontProxyCACertName),
-		kubeadmconstants.FrontProxyCAKeyName:          path.Join(certsDir, kubeadmconstants.FrontProxyCAKeyName),
-		kubeadmconstants.ServiceAccountPublicKeyName:  path.Join(certsDir, kubeadmconstants.ServiceAccountPublicKeyName),
-		kubeadmconstants.ServiceAccountPrivateKeyName: path.Join(certsDir, kubeadmconstants.ServiceAccountPrivateKeyName),
+		kubeadmconstants.CACertName:                   filepath.Join(certsDir, kubeadmconstants.CACertName),
+		kubeadmconstants.CAKeyName:                    filepath.Join(certsDir, kubeadmconstants.CAKeyName),
+		kubeadmconstants.FrontProxyCACertName:         filepath.Join(certsDir, kubeadmconstants.FrontProxyCACertName),
+		kubeadmconstants.FrontProxyCAKeyName:          filepath.Join(certsDir, kubeadmconstants.FrontProxyCAKeyName),
+		kubeadmconstants.ServiceAccountPublicKeyName:  filepath.Join(certsDir, kubeadmconstants.ServiceAccountPublicKeyName),
+		kubeadmconstants.ServiceAccountPrivateKeyName: filepath.Join(certsDir, kubeadmconstants.ServiceAccountPrivateKeyName),
 	}
 
 	if cfg.Etcd.External == nil {
-		certs[kubeadmconstants.EtcdCACertName] = path.Join(certsDir, kubeadmconstants.EtcdCACertName)
-		certs[kubeadmconstants.EtcdCAKeyName] = path.Join(certsDir, kubeadmconstants.EtcdCAKeyName)
+		certs[kubeadmconstants.EtcdCACertName] = filepath.Join(certsDir, kubeadmconstants.EtcdCACertName)
+		certs[kubeadmconstants.EtcdCAKeyName] = filepath.Join(certsDir, kubeadmconstants.EtcdCAKeyName)
 	} else {
 		certs[externalEtcdCA] = cfg.Etcd.External.CAFile
 		certs[externalEtcdCert] = cfg.Etcd.External.CertFile

@@ -18,7 +18,6 @@ package options
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"reflect"
 	"strings"
@@ -67,9 +66,9 @@ func TestValidateTracingOptions(t *testing.T) {
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
 			errs := tc.contents.Validate()
-			if tc.expectError == false && len(errs) != 0 {
+			if !tc.expectError && len(errs) != 0 {
 				t.Errorf("Calling Validate expected no error, got %v", errs)
-			} else if tc.expectError == true && len(errs) == 0 {
+			} else if tc.expectError && len(errs) == 0 {
 				t.Errorf("Calling Validate expected error, got no error")
 			}
 		})
@@ -97,6 +96,32 @@ func TestReadTracingConfiguration(t *testing.T) {
 			contents:       ``,
 			expectedResult: nil,
 			expectedError:  strptr("unable to read tracing configuration from \"test-tracing-config-absent\": open test-tracing-config-absent: no such file or directory"),
+		},
+		{
+			name:       "duplicate field error; strict validation",
+			createFile: true,
+			contents: `
+apiVersion: apiserver.config.k8s.io/v1alpha1
+kind: TracingConfiguration
+endpoint: localhost:4317
+endpoint: localhost:4318
+samplingRatePerMillion: 12345
+`,
+			expectedResult: nil,
+			expectedError:  strptr("unable to decode tracing configuration data: strict decoding error"),
+		},
+		{
+			name:       "unknown field error; strict validation",
+			createFile: true,
+			contents: `
+apiVersion: apiserver.config.k8s.io/v1alpha1
+kind: TracingConfiguration
+foo: bar
+endpoint: localhost:4318
+samplingRatePerMillion: 12345
+`,
+			expectedResult: nil,
+			expectedError:  strptr("unable to decode tracing configuration data: strict decoding error"),
 		},
 		{
 			name:       "v1alpha1",
@@ -156,12 +181,12 @@ spec:
 		t.Run(tc.name, func(t *testing.T) {
 			proxyConfig := fmt.Sprintf("test-tracing-config-%s", tc.name)
 			if tc.createFile {
-				f, err := ioutil.TempFile("", proxyConfig)
+				f, err := os.CreateTemp("", proxyConfig)
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer os.Remove(f.Name())
-				if err := ioutil.WriteFile(f.Name(), []byte(tc.contents), os.FileMode(0755)); err != nil {
+				if err := os.WriteFile(f.Name(), []byte(tc.contents), os.FileMode(0755)); err != nil {
 					t.Fatal(err)
 				}
 				proxyConfig = f.Name()

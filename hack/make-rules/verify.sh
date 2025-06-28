@@ -14,12 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Indirect calls through kube::util::run-in aren't interpreted
+# shellcheck disable=SC2317
+
 set -o errexit
 set -o nounset
 set -o pipefail
 
 KUBE_ROOT=$(dirname "${BASH_SOURCE[0]}")/../..
-source "${KUBE_ROOT}/hack/lib/util.sh"
+source "${KUBE_ROOT}/hack/lib/init.sh"
+
+kube::golang::setup_env
 
 # If KUBE_JUNIT_REPORT_DIR is unset, and ARTIFACTS is set, then have them match.
 if [[ -z "${KUBE_JUNIT_REPORT_DIR:-}" && -n "${ARTIFACTS:-}" ]]; then
@@ -33,15 +38,16 @@ source "${KUBE_ROOT}/third_party/forked/shell2junit/sh2ju.sh"
 EXCLUDED_PATTERNS=(
   "verify-all.sh"                # this script calls the make rule and would cause a loop
   "verify-*-dockerized.sh"       # Don't run any scripts that intended to be run dockerized
-  "verify-govet-levee.sh"        # Do not run levee analysis by default while KEP-1933 implementation is in alpha.
+  "verify-golangci-lint-pr.sh"       # Runs in a separate job for PRs.
+  "verify-golangci-lint-pr-hints.sh" # Runs in a separate job for PRs.
   "verify-licenses.sh"           # runs in a separate job to monitor availability of the dependencies periodically
+  "verify-openapi-docs-urls.sh"  # Spams docs URLs, don't run in CI.
   )
 
 # Exclude typecheck in certain cases, if they're running in a separate job.
 if [[ ${EXCLUDE_TYPECHECK:-} =~ ^[yY]$ ]]; then
   EXCLUDED_PATTERNS+=(
     "verify-typecheck.sh"              # runs in separate typecheck job
-    "verify-typecheck-providerless.sh" # runs in separate typecheck job
     )
 fi
 
@@ -53,6 +59,13 @@ if [[ ${EXCLUDE_GODEP:-} =~ ^[yY]$ ]]; then
     "verify-external-dependencies-version.sh" # runs in separate dependencies job
     "verify-vendor.sh"                        # runs in separate dependencies job
     "verify-vendor-licenses.sh"               # runs in separate dependencies job
+    )
+fi
+
+# Exclude golangci-lint if requested, for example in pull-kubernetes-verify.
+if [[ ${EXCLUDE_GOLANGCI_LINT:-} =~ ^[yY]$ ]]; then
+  EXCLUDED_PATTERNS+=(
+    "verify-golangci-lint.sh"              # runs in separate pull-kubernetes-verify-lint
     )
 fi
 
@@ -69,7 +82,8 @@ QUICK_PATTERNS+=(
   "verify-api-groups.sh"
   "verify-boilerplate.sh"
   "verify-external-dependencies-version.sh"
-  "verify-vendor-licenses.sh"
+  "verify-featuregates.sh"
+  "verify-fieldname-docs.sh"
   "verify-gofmt.sh"
   "verify-imports.sh"
   "verify-non-mutating-validation.sh"
@@ -80,6 +94,7 @@ QUICK_PATTERNS+=(
   "verify-staging-meta-files.sh"
   "verify-test-featuregates.sh"
   "verify-test-images.sh"
+  "verify-vendor-licenses.sh"
 )
 
 while IFS='' read -r line; do EXCLUDED_CHECKS+=("$line"); done < <(ls "${EXCLUDED_PATTERNS[@]/#/${KUBE_ROOT}/hack/}" 2>/dev/null || true)
@@ -111,7 +126,7 @@ function is-explicitly-chosen {
   index=0
   for e in "${TARGET_LIST[@]}"; do
     if [[ "${e}" == "${name}" ]]; then
-      TARGET_LIST[${index}]=""
+      TARGET_LIST[index]=""
       return
     fi
     index=$((index + 1))
@@ -126,13 +141,13 @@ function run-cmd {
   local tr
 
   if ${SILENT}; then
-    juLog -output="${output}" -class="verify" -name="${testname}" "$@" &> /dev/null
+    juLog -output="${output}" -class="verify" -name="${testname}" -fail="^ERROR: " "$@" &> /dev/null
     tr=$?
   else
-    juLog -output="${output}" -class="verify" -name="${testname}" "$@"
+    juLog -output="${output}" -class="verify" -name="${testname}" -fail="^ERROR: " "$@"
     tr=$?
   fi
-  return ${tr}
+  return "${tr}"
 }
 
 # Collect Failed tests in this Array , initialize it to nil
@@ -154,6 +169,10 @@ function run-checks {
   local t
   for t in ${pattern}
   do
+    if [ "$t" = "$pattern" ]; then
+      # The pattern didn't match any files
+      continue
+    fi
     local check_name
     check_name="$(basename "${t}")"
     if [[ -n ${WHAT:-} ]]; then
@@ -180,7 +199,7 @@ function run-checks {
     else
       echo -e "${color_red}FAILED${color_norm}   ${check_name}\t${elapsed}s"
       ret=1
-      FAILED_TESTS+=("${t}")
+      FAILED_TESTS+=("${PWD}/${t}")
     fi
   done
 }
@@ -210,9 +229,20 @@ if ${QUICK} ; then
   echo "Running in quick mode (QUICK=true). Only fast checks will run."
 fi
 
+shopt -s globstar
+export API_KNOWN_VIOLATIONS_DIR="${KUBE_ROOT}"/api/api-rules
 ret=0
-run-checks "${KUBE_ROOT}/hack/verify-*.sh" bash
-run-checks "${KUBE_ROOT}/hack/verify-*.py" python3
+# Modules are discovered by looking for go.mod rather than asking go
+# to ensure that modules that aren't part of the workspace and/or are
+# not dependencies are checked too.
+# . and staging are listed explicitly here to avoid _output
+for module in ./go.mod ./staging/**/go.mod; do
+  module="${module%/go.mod}"
+  if [ -d "$module/hack" ]; then
+    kube::util::run-in "$module" run-checks "hack/verify-*.sh" bash
+    kube::util::run-in "$module" run-checks "hack/verify-*.py" python3
+  fi
+done
 missing-target-checks
 
 if [[ ${ret} -eq 1 ]]; then

@@ -33,7 +33,6 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	auditinternal "k8s.io/apiserver/pkg/apis/audit"
 	"k8s.io/apiserver/pkg/audit"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
 	"k8s.io/apiserver/pkg/warning"
@@ -197,15 +196,11 @@ func (a *cachedTokenAuthenticator) doAuthenticateToken(ctx context.Context, toke
 		recorder := &recorder{}
 		ctx = warning.WithWarningRecorder(ctx, recorder)
 
-		// since this is shared work between multiple requests, we have no way of knowing if any
-		// particular request supports audit annotations.  thus we always attempt to record them.
-		ev := &auditinternal.Event{Level: auditinternal.LevelMetadata}
 		ctx = audit.WithAuditContext(ctx)
 		ac := audit.AuditContextFrom(ctx)
-		ac.Event = ev
 
 		record.resp, record.ok, record.err = a.authenticator.AuthenticateToken(ctx, token)
-		record.annotations = ev.Annotations
+		record.annotations = ac.GetEventAnnotations()
 		record.warnings = recorder.extractWarnings()
 
 		if !a.cacheErrs && record.err != nil {
@@ -277,12 +272,24 @@ func writeLength(w io.Writer, b []byte, length int) {
 
 // toBytes performs unholy acts to avoid allocations
 func toBytes(s string) []byte {
-	return *(*[]byte)(unsafe.Pointer(&s))
+	// unsafe.StringData is unspecified for the empty string, so we provide a strict interpretation
+	if len(s) == 0 {
+		return nil
+	}
+	// Copied from go 1.20.1 os.File.WriteString
+	// https://github.com/golang/go/blob/202a1a57064127c3f19d96df57b9f9586145e21c/src/os/file.go#L246
+	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
 // toString performs unholy acts to avoid allocations
 func toString(b []byte) string {
-	return *(*string)(unsafe.Pointer(&b))
+	// unsafe.SliceData relies on cap whereas we want to rely on len
+	if len(b) == 0 {
+		return ""
+	}
+	// Copied from go 1.20.1 strings.Builder.String
+	// https://github.com/golang/go/blob/202a1a57064127c3f19d96df57b9f9586145e21c/src/strings/builder.go#L48
+	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
 // simple recorder that only appends warning

@@ -24,10 +24,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/diff"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/util/certificate/csr"
 	"k8s.io/kubernetes/pkg/apis/admissionregistration"
@@ -44,11 +46,15 @@ import (
 	nodeapi "k8s.io/kubernetes/pkg/apis/node"
 	"k8s.io/kubernetes/pkg/apis/policy"
 	"k8s.io/kubernetes/pkg/apis/rbac"
+	resourceapis "k8s.io/kubernetes/pkg/apis/resource"
 	"k8s.io/kubernetes/pkg/apis/scheduling"
 	"k8s.io/kubernetes/pkg/apis/storage"
+	"k8s.io/kubernetes/pkg/apis/storagemigration"
 	"k8s.io/kubernetes/pkg/printers"
-	utilpointer "k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
+
+var containerRestartPolicyAlways = api.ContainerRestartPolicyAlways
 
 func TestFormatResourceName(t *testing.T) {
 	tests := []struct {
@@ -293,7 +299,7 @@ func TestPrintEvent(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -394,7 +400,7 @@ func TestPrintNamespace(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -442,7 +448,7 @@ func TestPrintSecret(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -490,7 +496,7 @@ func TestPrintServiceAccount(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -590,7 +596,7 @@ func TestPrintNodeStatus(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -639,7 +645,7 @@ func TestPrintNodeRole(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -691,7 +697,7 @@ func TestPrintNodeOSImage(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -743,7 +749,7 @@ func TestPrintNodeKernelVersion(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -795,7 +801,7 @@ func TestPrintNodeContainerRuntimeVersion(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -832,7 +838,7 @@ func TestPrintNodeName(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -893,7 +899,7 @@ func TestPrintNodeExternalIP(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -955,7 +961,7 @@ func TestPrintNodeInternalIP(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -964,10 +970,10 @@ func TestPrintIngress(t *testing.T) {
 	ingress := networking.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "test1",
-			CreationTimestamp: metav1.Time{Time: time.Now().AddDate(-10, 0, 0)},
+			CreationTimestamp: metav1.Time{Time: time.Now().Add(time.Duration(-10 * 365 * 24 * time.Hour))},
 		},
 		Spec: networking.IngressSpec{
-			IngressClassName: utilpointer.StringPtr("foo"),
+			IngressClassName: ptr.To("foo"),
 			DefaultBackend: &networking.IngressBackend{
 				Service: &networking.IngressServiceBackend{
 					Name: "default-backend",
@@ -998,7 +1004,7 @@ func TestPrintIngress(t *testing.T) {
 	}
 	rows[0].Object.Object = nil
 	if !reflect.DeepEqual(expected, rows) {
-		t.Errorf("mismatch: %s", diff.ObjectReflectDiff(expected, rows))
+		t.Errorf("mismatch: %s", cmp.Diff(expected, rows))
 	}
 }
 
@@ -1012,7 +1018,7 @@ func TestPrintIngressClass(t *testing.T) {
 		ingressClass: &networking.IngressClass{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "test1",
-				CreationTimestamp: metav1.Time{Time: time.Now().AddDate(-10, 0, 0)},
+				CreationTimestamp: metav1.Time{Time: time.Now().Add(time.Duration(-10 * 365 * 24 * time.Hour))},
 			},
 			Spec: networking.IngressClassSpec{
 				Controller: "example.com/controller",
@@ -1025,12 +1031,12 @@ func TestPrintIngressClass(t *testing.T) {
 		ingressClass: &networking.IngressClass{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "test1",
-				CreationTimestamp: metav1.Time{Time: time.Now().AddDate(-10, 0, 0)},
+				CreationTimestamp: metav1.Time{Time: time.Now().Add(time.Duration(-10 * 365 * 24 * time.Hour))},
 			},
 			Spec: networking.IngressClassSpec{
 				Controller: "example.com/controller",
 				Parameters: &networking.IngressClassParametersReference{
-					APIGroup: utilpointer.StringPtr("example.com"),
+					APIGroup: ptr.To("example.com"),
 					Kind:     "customgroup",
 					Name:     "example",
 				},
@@ -1042,7 +1048,7 @@ func TestPrintIngressClass(t *testing.T) {
 		ingressClass: &networking.IngressClass{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "test2",
-				CreationTimestamp: metav1.Time{Time: time.Now().AddDate(-11, 0, 0)},
+				CreationTimestamp: metav1.Time{Time: time.Now().Add(time.Duration(-11 * 365 * 24 * time.Hour))},
 			},
 			Spec: networking.IngressClassSpec{
 				Controller: "example.com/controller2",
@@ -1061,7 +1067,7 @@ func TestPrintIngressClass(t *testing.T) {
 				rows[i].Object.Object = nil
 			}
 			if !reflect.DeepEqual(testCase.expected, rows) {
-				t.Errorf("mismatch: %s", diff.ObjectReflectDiff(testCase.expected, rows))
+				t.Errorf("mismatch: %s", cmp.Diff(testCase.expected, rows))
 			}
 		})
 	}
@@ -1171,12 +1177,13 @@ func TestPrintServiceLoadBalancer(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
 
 func TestPrintPod(t *testing.T) {
+	deleteTime := metav1.NewTime(time.Now().Add(-10 * time.Second))
 	tests := []struct {
 		pod    api.Pod
 		expect []metav1.TableRow
@@ -1503,7 +1510,7 @@ func TestPrintPod(t *testing.T) {
 			[]metav1.TableRow{{Cells: []interface{}{"test14", "2/2", "Running", "9 (5d ago)", "<unknown>"}}},
 		},
 		{
-			// Test PodScheduled condition with reason WaitingForGates
+			// Test PodScheduled condition with reason SchedulingGated
 			api.Pod{
 				ObjectMeta: metav1.ObjectMeta{Name: "test15"},
 				Spec:       api.PodSpec{Containers: make([]api.Container, 2)},
@@ -1513,12 +1520,94 @@ func TestPrintPod(t *testing.T) {
 						{
 							Type:   api.PodScheduled,
 							Status: api.ConditionFalse,
-							Reason: api.PodReasonSchedulingGated,
+							Reason: apiv1.PodReasonSchedulingGated,
 						},
 					},
 				},
 			},
-			[]metav1.TableRow{{Cells: []interface{}{"test15", "0/2", api.PodReasonSchedulingGated, "0", "<unknown>"}}},
+			[]metav1.TableRow{{Cells: []interface{}{"test15", "0/2", apiv1.PodReasonSchedulingGated, "0", "<unknown>"}}},
+		},
+		{
+			// Test pod condition succeed
+			api.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test16"},
+				Spec:       api.PodSpec{Containers: make([]api.Container, 1)},
+				Status: api.PodStatus{
+					Phase: api.PodSucceeded,
+					ContainerStatuses: []api.ContainerStatus{
+						{
+							Ready:        false,
+							RestartCount: 0,
+							State:        api.ContainerState{Terminated: &api.ContainerStateTerminated{Reason: "Completed", ExitCode: 0}},
+						},
+					},
+				},
+			},
+			[]metav1.TableRow{{Conditions: podSuccessConditions, Cells: []interface{}{"test16", "0/1", "Completed", "0", "<unknown>"}}},
+		},
+		{
+			// Test pod condition failed
+			api.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test17"},
+				Spec:       api.PodSpec{Containers: make([]api.Container, 1)},
+				Status: api.PodStatus{
+					Phase: api.PodFailed,
+					ContainerStatuses: []api.ContainerStatus{
+						{
+							Ready:        false,
+							RestartCount: 0,
+							State:        api.ContainerState{Terminated: &api.ContainerStateTerminated{Reason: "Error", ExitCode: 1}},
+						},
+					},
+				},
+			},
+			[]metav1.TableRow{{Conditions: podFailedConditions, Cells: []interface{}{"test17", "0/1", "Error", "0", "<unknown>"}}},
+		},
+		{
+			// Test pod condition succeed with deletion
+			api.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test18", DeletionTimestamp: &deleteTime},
+				Spec:       api.PodSpec{Containers: make([]api.Container, 1)},
+				Status: api.PodStatus{
+					Phase: api.PodSucceeded,
+					ContainerStatuses: []api.ContainerStatus{
+						{
+							Ready:        false,
+							RestartCount: 0,
+							State:        api.ContainerState{Terminated: &api.ContainerStateTerminated{Reason: "Completed", ExitCode: 0}},
+						},
+					},
+				},
+			},
+			[]metav1.TableRow{{Conditions: podSuccessConditions, Cells: []interface{}{"test18", "0/1", "Completed", "0", "<unknown>"}}},
+		},
+		{
+			// Test pod condition running with deletion
+			api.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test19", DeletionTimestamp: &deleteTime},
+				Spec:       api.PodSpec{Containers: make([]api.Container, 1)},
+				Status: api.PodStatus{
+					Phase: "Running",
+					ContainerStatuses: []api.ContainerStatus{
+						{
+							Ready:        false,
+							RestartCount: 0,
+							State:        api.ContainerState{Running: &api.ContainerStateRunning{}},
+						},
+					},
+				},
+			},
+			[]metav1.TableRow{{Cells: []interface{}{"test19", "0/1", "Terminating", "0", "<unknown>"}}},
+		},
+		{ // Test pod condition pending with deletion
+			api.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test20", DeletionTimestamp: &deleteTime},
+				Spec:       api.PodSpec{Containers: make([]api.Container, 1)},
+				Status: api.PodStatus{
+					Phase: "Pending",
+				},
+			},
+			[]metav1.TableRow{{Cells: []interface{}{"test20", "0/1", "Terminating", "0", "<unknown>"}}},
 		},
 	}
 
@@ -1531,7 +1620,227 @@ func TestPrintPod(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expect, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expect, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expect, rows))
+		}
+	}
+}
+
+func TestPrintPodWithRestartableInitContainer(t *testing.T) {
+	tests := []struct {
+		pod    api.Pod
+		expect []metav1.TableRow
+	}{
+		{
+			// Test pod has 2 restartable init containers, the first one running but not started.
+			api.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test1"},
+				Spec: api.PodSpec{
+					InitContainers: []api.Container{
+						{Name: "restartable-init-1", RestartPolicy: &containerRestartPolicyAlways},
+						{Name: "restartable-init-2", RestartPolicy: &containerRestartPolicyAlways},
+					}, Containers: make([]api.Container, 1)},
+				Status: api.PodStatus{
+					Phase: "Pending",
+					InitContainerStatuses: []api.ContainerStatus{
+						{
+							Name:                 "restartable-init-1",
+							Ready:                false,
+							RestartCount:         3,
+							State:                api.ContainerState{Running: &api.ContainerStateRunning{}},
+							Started:              ptr.To(false),
+							LastTerminationState: api.ContainerState{Terminated: &api.ContainerStateTerminated{FinishedAt: metav1.NewTime(time.Now().Add(-10 * time.Second))}},
+						},
+						{
+							Name:    "restartable-init-2",
+							Ready:   false,
+							State:   api.ContainerState{Waiting: &api.ContainerStateWaiting{}},
+							Started: ptr.To(false),
+						},
+					},
+					ContainerStatuses: []api.ContainerStatus{
+						{
+							Ready:        false,
+							RestartCount: 0,
+							State:        api.ContainerState{Waiting: &api.ContainerStateWaiting{}},
+						},
+					},
+					Conditions: []api.PodCondition{
+						{Type: api.PodInitialized, Status: api.ConditionFalse},
+					},
+				},
+			},
+			[]metav1.TableRow{{Cells: []interface{}{"test1", "0/3", "Init:0/2", "3 (10s ago)", "<unknown>"}}},
+		},
+		{
+			// Test pod has 2 restartable init containers, the first one started and the second one running but not started.
+			api.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test1"},
+				Spec: api.PodSpec{
+					InitContainers: []api.Container{
+						{Name: "restartable-init-1", RestartPolicy: &containerRestartPolicyAlways},
+						{Name: "restartable-init-2", RestartPolicy: &containerRestartPolicyAlways},
+					}, Containers: make([]api.Container, 1)},
+				Status: api.PodStatus{
+					Phase: "Pending",
+					InitContainerStatuses: []api.ContainerStatus{
+						{
+							Name:                 "restartable-init-1",
+							Ready:                false,
+							RestartCount:         3,
+							State:                api.ContainerState{Running: &api.ContainerStateRunning{}},
+							Started:              ptr.To(true),
+							LastTerminationState: api.ContainerState{Terminated: &api.ContainerStateTerminated{FinishedAt: metav1.NewTime(time.Now().Add(-10 * time.Second))}},
+						},
+						{
+							Name:    "restartable-init-2",
+							Ready:   false,
+							State:   api.ContainerState{Running: &api.ContainerStateRunning{}},
+							Started: ptr.To(false),
+						},
+					},
+					ContainerStatuses: []api.ContainerStatus{
+						{
+							Ready:        false,
+							RestartCount: 0,
+							State:        api.ContainerState{Waiting: &api.ContainerStateWaiting{}},
+						},
+					},
+					Conditions: []api.PodCondition{
+						{Type: api.PodInitialized, Status: api.ConditionFalse},
+					},
+				},
+			},
+			[]metav1.TableRow{{Cells: []interface{}{"test1", "0/3", "Init:1/2", "3 (10s ago)", "<unknown>"}}},
+		},
+		{
+			// Test pod has 2 restartable init containers started and 1 container running
+			api.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test2"},
+				Spec: api.PodSpec{
+					InitContainers: []api.Container{
+						{Name: "restartable-init-1", RestartPolicy: &containerRestartPolicyAlways},
+						{Name: "restartable-init-2", RestartPolicy: &containerRestartPolicyAlways},
+					}, Containers: make([]api.Container, 1)},
+				Status: api.PodStatus{
+					Phase: "Running",
+					InitContainerStatuses: []api.ContainerStatus{
+						{
+							Name:                 "restartable-init-1",
+							Ready:                false,
+							RestartCount:         3,
+							State:                api.ContainerState{Running: &api.ContainerStateRunning{}},
+							Started:              ptr.To(true),
+							LastTerminationState: api.ContainerState{Terminated: &api.ContainerStateTerminated{FinishedAt: metav1.NewTime(time.Now().Add(-10 * time.Second))}},
+						},
+						{
+							Name:    "restartable-init-2",
+							Ready:   false,
+							State:   api.ContainerState{Running: &api.ContainerStateRunning{}},
+							Started: ptr.To(true),
+						},
+					},
+					ContainerStatuses: []api.ContainerStatus{
+						{
+							Ready:                true,
+							RestartCount:         4,
+							State:                api.ContainerState{Running: &api.ContainerStateRunning{}},
+							LastTerminationState: api.ContainerState{Terminated: &api.ContainerStateTerminated{FinishedAt: metav1.NewTime(time.Now().Add(-20 * time.Second))}},
+						},
+					},
+					Conditions: []api.PodCondition{
+						{Type: api.PodInitialized, Status: api.ConditionTrue},
+					},
+				},
+			},
+			[]metav1.TableRow{{Cells: []interface{}{"test2", "1/3", "Running", "7 (10s ago)", "<unknown>"}}},
+		},
+		{
+			// Test pod has 2 restartable init containers completed with non-zero and 1 container completed
+			api.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test3"},
+				Spec: api.PodSpec{
+					InitContainers: []api.Container{
+						{Name: "restartable-init-1", RestartPolicy: &containerRestartPolicyAlways},
+						{Name: "restartable-init-2", RestartPolicy: &containerRestartPolicyAlways},
+					}, Containers: make([]api.Container, 1)},
+				Status: api.PodStatus{
+					Phase: "Succeeded",
+					InitContainerStatuses: []api.ContainerStatus{
+						{
+							Name:                 "restartable-init-1",
+							Ready:                false,
+							RestartCount:         3,
+							State:                api.ContainerState{Terminated: &api.ContainerStateTerminated{Reason: "Error", ExitCode: 137}},
+							Started:              ptr.To(false),
+							LastTerminationState: api.ContainerState{Terminated: &api.ContainerStateTerminated{FinishedAt: metav1.NewTime(time.Now().Add(-10 * time.Second))}},
+						},
+						{
+							Name:    "restartable-init-2",
+							Ready:   false,
+							State:   api.ContainerState{Terminated: &api.ContainerStateTerminated{Reason: "Error", ExitCode: 137}},
+							Started: ptr.To(false),
+						},
+					},
+					ContainerStatuses: []api.ContainerStatus{
+						{
+							Ready:                false,
+							RestartCount:         4,
+							State:                api.ContainerState{Terminated: &api.ContainerStateTerminated{Reason: "Completed", ExitCode: 0}},
+							LastTerminationState: api.ContainerState{Terminated: &api.ContainerStateTerminated{FinishedAt: metav1.NewTime(time.Now().Add(-20 * time.Second))}},
+						},
+					},
+					Conditions: []api.PodCondition{
+						{Type: api.PodInitialized, Status: api.ConditionTrue},
+					},
+				},
+			},
+			[]metav1.TableRow{
+				{
+					Cells: []interface{}{"test3", "0/3", "Completed", "7 (10s ago)", "<unknown>"},
+					Conditions: []metav1.TableRowCondition{
+						{Type: metav1.RowCompleted, Status: metav1.ConditionTrue, Reason: "Succeeded", Message: "The pod has completed successfully."},
+					},
+				},
+			},
+		},
+		{
+			// Test pod has container statuses for non-existent initContainers and containers
+			api.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test4"},
+				Spec: api.PodSpec{
+					InitContainers: []api.Container{
+						{Name: "init1", Image: "initimage"},
+						{Name: "sidecar1", Image: "sidecarimage", RestartPolicy: ptr.To(api.ContainerRestartPolicyAlways)},
+					},
+					Containers: []api.Container{{Name: "container1", Image: "containerimage"}},
+				},
+				Status: api.PodStatus{
+					Phase: "Running",
+					InitContainerStatuses: []api.ContainerStatus{
+						{Name: "initinvalid"},
+						{Name: "init1"},
+						{Name: "sidecar1"},
+					},
+					ContainerStatuses: []api.ContainerStatus{
+						{Name: "containerinvalid"},
+						{Name: "container1"},
+					},
+				},
+			},
+			[]metav1.TableRow{{Cells: []interface{}{"test4", "0/2", "Init:0/2", "0", "<unknown>"}}},
+		},
+	}
+
+	for i, test := range tests {
+		rows, err := printPod(&test.pod, printers.GenerateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range rows {
+			rows[i].Object.Object = nil
+		}
+		if !reflect.DeepEqual(test.expect, rows) {
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expect, rows))
 		}
 	}
 }
@@ -1655,7 +1964,7 @@ func TestPrintPodwide(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expect, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expect, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expect, rows))
 		}
 	}
 }
@@ -1737,7 +2046,7 @@ func TestPrintPodConditions(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expect, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expect, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expect, rows))
 		}
 	}
 }
@@ -1788,7 +2097,7 @@ func TestPrintPodList(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expect, rows) {
-			t.Errorf("mismatch: %s", diff.ObjectReflectDiff(test.expect, rows))
+			t.Errorf("mismatch: %s", cmp.Diff(test.expect, rows))
 		}
 	}
 }
@@ -1899,7 +2208,7 @@ func TestPrintNonTerminatedPod(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expect, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expect, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expect, rows))
 		}
 	}
 }
@@ -1981,7 +2290,7 @@ func TestPrintPodTemplate(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -2031,7 +2340,7 @@ func TestPrintPodTemplateList(t *testing.T) {
 		rows[i].Object.Object = nil
 	}
 	if !reflect.DeepEqual(expectedRows, rows) {
-		t.Errorf("mismatch: %s", diff.ObjectReflectDiff(expectedRows, rows))
+		t.Errorf("mismatch: %s", cmp.Diff(expectedRows, rows))
 	}
 }
 
@@ -2050,7 +2359,7 @@ func TestTranslateTimestampSince(t *testing.T) {
 		{"an hour ago", translateTimestampSince(metav1.Time{Time: time.Now().Add(-6e12)}), "100m"},
 		{"2 days ago", translateTimestampSince(metav1.Time{Time: time.Now().UTC().AddDate(0, 0, -2)}), "2d"},
 		{"months ago", translateTimestampSince(metav1.Time{Time: time.Now().UTC().AddDate(0, 0, -90)}), "90d"},
-		{"10 years ago", translateTimestampSince(metav1.Time{Time: time.Now().UTC().AddDate(-10, 0, 0)}), "10y"},
+		{"10 years ago", translateTimestampSince(metav1.Time{Time: time.Now().UTC().Add(time.Duration(-10 * 365 * 24 * time.Hour))}), "10y"},
 	}
 	for _, test := range tl {
 		if test.got != test.exp {
@@ -2075,7 +2384,7 @@ func TestTranslateTimestampUntil(t *testing.T) {
 		{"in an hour", translateTimestampUntil(metav1.Time{Time: time.Now().Add(6e12 + buf)}), "100m"},
 		{"in 2 days", translateTimestampUntil(metav1.Time{Time: time.Now().UTC().AddDate(0, 0, 2).Add(buf)}), "2d"},
 		{"in months", translateTimestampUntil(metav1.Time{Time: time.Now().UTC().AddDate(0, 0, 90).Add(buf)}), "90d"},
-		{"in 10 years", translateTimestampUntil(metav1.Time{Time: time.Now().UTC().AddDate(10, 0, 0).Add(buf)}), "10y"},
+		{"in 10 years", translateTimestampUntil(metav1.Time{Time: time.Now().UTC().Add(time.Duration(10 * 365 * 24 * time.Hour)).Add(buf)}), "10y"},
 	}
 	for _, test := range tl {
 		if test.got != test.exp {
@@ -2148,7 +2457,7 @@ func TestPrintDeployment(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -2216,7 +2525,7 @@ func TestPrintDaemonSet(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -2288,7 +2597,7 @@ func TestPrintDaemonSetList(t *testing.T) {
 		rows[i].Object.Object = nil
 	}
 	if !reflect.DeepEqual(expectedRows, rows) {
-		t.Errorf("mismatch: %s", diff.ObjectReflectDiff(expectedRows, rows))
+		t.Errorf("mismatch: %s", cmp.Diff(expectedRows, rows))
 	}
 }
 
@@ -2330,8 +2639,8 @@ func TestPrintJob(t *testing.T) {
 				},
 			},
 			options: printers.GenerateOptions{},
-			// Columns: Name, Completions, Duration, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"job1", "1/2", "", "0s"}}},
+			// Columns: Name, Status, Completions, Duration, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"job1", "Running", "1/2", "", "0s"}}},
 		},
 		// Generate table rows for Job with generate options "Wide".
 		{
@@ -2363,10 +2672,10 @@ func TestPrintJob(t *testing.T) {
 				},
 			},
 			options: printers.GenerateOptions{Wide: true},
-			// Columns: Name, Completions, Duration, Age, Containers, Images, Selectors
+			// Columns: Name, Status, Completions, Duration, Age, Containers, Images, Selectors
 			expected: []metav1.TableRow{
 				{
-					Cells: []interface{}{"job1", "1/2", "", "0s", "fake-job-container1,fake-job-container2", "fake-job-image1,fake-job-image2", "job-label=job-label-value"},
+					Cells: []interface{}{"job1", "Running", "1/2", "", "0s", "fake-job-container1,fake-job-container2", "fake-job-image1,fake-job-image2", "job-label=job-label-value"},
 				},
 			},
 		},
@@ -2385,15 +2694,15 @@ func TestPrintJob(t *testing.T) {
 				},
 			},
 			options: printers.GenerateOptions{},
-			// Columns: Name, Completions, Duration, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"job2", "0/1", "", "10y"}}},
+			// Columns: Name, Status, Completions, Duration, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"job2", "Running", "0/1", "", "10y"}}},
 		},
 		// Job with duration.
 		{
 			job: batch.Job{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "job3",
-					CreationTimestamp: metav1.Time{Time: time.Now().AddDate(-10, 0, 0)},
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(time.Duration(-10 * 365 * 24 * time.Hour))},
 				},
 				Spec: batch.JobSpec{
 					Completions: nil,
@@ -2405,14 +2714,14 @@ func TestPrintJob(t *testing.T) {
 				},
 			},
 			options: printers.GenerateOptions{},
-			// Columns: Name, Completions, Duration, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"job3", "0/1", "30m", "10y"}}},
+			// Columns: Name, Status, Completions, Duration, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"job3", "Running", "0/1", "30m", "10y"}}},
 		},
 		{
 			job: batch.Job{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "job4",
-					CreationTimestamp: metav1.Time{Time: time.Now().AddDate(-10, 0, 0)},
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(time.Duration(-10 * 365 * 24 * time.Hour))},
 				},
 				Spec: batch.JobSpec{
 					Completions: nil,
@@ -2423,8 +2732,115 @@ func TestPrintJob(t *testing.T) {
 				},
 			},
 			options: printers.GenerateOptions{},
-			// Columns: Name, Completions, Duration, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"job4", "0/1", "20m", "10y"}}},
+			// Columns: Name, Status, Completions, Duration, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"job4", "Running", "0/1", "20m", "10y"}}},
+		},
+		{
+			job: batch.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "job5",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(1.9e9)},
+				},
+				Spec: batch.JobSpec{
+					Completions: nil,
+				},
+				Status: batch.JobStatus{
+					Succeeded: 0,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			options: printers.GenerateOptions{},
+			// Columns: Name, Status, Completions, Duration, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"job5", "Complete", "0/1", "", "0s"}}},
+		},
+		{
+			job: batch.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "job6",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(1.9e9)},
+				},
+				Spec: batch.JobSpec{
+					Completions: nil,
+				},
+				Status: batch.JobStatus{
+					Succeeded: 0,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailed,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			options: printers.GenerateOptions{},
+			// Columns: Name, Status, Completions, Duration, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"job6", "Failed", "0/1", "", "0s"}}},
+		},
+		{
+			job: batch.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "job7",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(1.9e9)},
+				},
+				Spec: batch.JobSpec{
+					Completions: nil,
+				},
+				Status: batch.JobStatus{
+					Succeeded: 0,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuspended,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			options: printers.GenerateOptions{},
+			// Columns: Name, Status, Completions, Duration, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"job7", "Suspended", "0/1", "", "0s"}}},
+		},
+		{
+			job: batch.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "job8",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(1.9e9)},
+				},
+				Spec: batch.JobSpec{
+					Completions: nil,
+				},
+				Status: batch.JobStatus{
+					Succeeded: 0,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailureTarget,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			options: printers.GenerateOptions{},
+			// Columns: Name, Status, Completions, Duration, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"job8", "FailureTarget", "0/1", "", "0s"}}},
+		},
+		{
+			job: batch.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "job9",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(1.9e9)},
+					DeletionTimestamp: &metav1.Time{Time: time.Now().Add(1.9e9)},
+				},
+				Spec: batch.JobSpec{
+					Completions: nil,
+				},
+			},
+			options: printers.GenerateOptions{},
+			// Columns: Name, Status, Completions, Duration, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"job9", "Terminating", "0/1", "", "0s"}}},
 		},
 	}
 
@@ -2437,7 +2853,7 @@ func TestPrintJob(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -2504,10 +2920,10 @@ func TestPrintJobList(t *testing.T) {
 		},
 	}
 
-	// Columns: Name, Completions, Duration, Age
+	// Columns: Name, Status, Completions, Duration, Age
 	expectedRows := []metav1.TableRow{
-		{Cells: []interface{}{"job1", "1/2", "", "0s"}},
-		{Cells: []interface{}{"job2", "2/2", "20m", "0s"}},
+		{Cells: []interface{}{"job1", "Running", "1/2", "", "0s"}},
+		{Cells: []interface{}{"job2", "Running", "2/2", "20m", "0s"}},
 	}
 
 	rows, err := printJobList(&jobList, printers.GenerateOptions{})
@@ -2518,7 +2934,7 @@ func TestPrintJobList(t *testing.T) {
 		rows[i].Object.Object = nil
 	}
 	if !reflect.DeepEqual(expectedRows, rows) {
-		t.Errorf("mismatch: %s", diff.ObjectReflectDiff(expectedRows, rows))
+		t.Errorf("mismatch: %s", cmp.Diff(expectedRows, rows))
 	}
 }
 
@@ -2924,7 +3340,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "<unknown>/100m", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: <unknown>/100m", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// resource source type, targetVal
 		{
@@ -2967,7 +3383,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "50m/100m", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: 50m/100m", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// resource source type, targetUtil (no current)
 		{
@@ -2999,7 +3415,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "<unknown>/80%", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: <unknown>/80%", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// resource source type, targetUtil
 		{
@@ -3043,7 +3459,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "50%/80%", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: 50%/80%", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// container resource source type, targetVal (no current)
 		{
@@ -3076,7 +3492,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "<unknown>/100m", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: <unknown>/100m", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// container resource source type, targetVal
 		{
@@ -3120,7 +3536,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "50m/100m", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: 50m/100m", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// container resource source type, targetUtil (no current)
 		{
@@ -3153,7 +3569,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "<unknown>/80%", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: <unknown>/80%", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// container resource source type, targetUtil
 		{
@@ -3198,7 +3614,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "50%/80%", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "cpu: 50%/80%", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 		// multiple specs
 		{
@@ -3277,7 +3693,7 @@ func TestPrintHPA(t *testing.T) {
 				},
 			},
 			// Columns: Name, Reference, Targets, MinPods, MaxPods, Replicas, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "50m/100m, 50%/80% + 1 more...", "2", int64(10), int64(4), "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"some-hpa", "ReplicationController/some-rc", "50m/100m, cpu: 50%/80% + 1 more...", "2", int64(10), int64(4), "<unknown>"}}},
 		},
 	}
 
@@ -3290,7 +3706,7 @@ func TestPrintHPA(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -3490,7 +3906,7 @@ func TestPrintService(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -3541,13 +3957,13 @@ func TestPrintServiceList(t *testing.T) {
 		rows[i].Object.Object = nil
 	}
 	if !reflect.DeepEqual(expectedRows, rows) {
-		t.Errorf("mismatch: %s", diff.ObjectReflectDiff(expectedRows, rows))
+		t.Errorf("mismatch: %s", cmp.Diff(expectedRows, rows))
 	}
 }
 
 func TestPrintPodDisruptionBudget(t *testing.T) {
-	minAvailable := intstr.FromInt(22)
-	maxUnavailable := intstr.FromInt(11)
+	minAvailable := intstr.FromInt32(22)
+	maxUnavailable := intstr.FromInt32(11)
 	tests := []struct {
 		pdb      policy.PodDisruptionBudget
 		expected []metav1.TableRow
@@ -3598,14 +4014,14 @@ func TestPrintPodDisruptionBudget(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
 
 func TestPrintPodDisruptionBudgetList(t *testing.T) {
-	minAvailable := intstr.FromInt(22)
-	maxUnavailable := intstr.FromInt(11)
+	minAvailable := intstr.FromInt32(22)
+	maxUnavailable := intstr.FromInt32(11)
 
 	pdbList := policy.PodDisruptionBudgetList{
 		Items: []policy.PodDisruptionBudget{
@@ -3652,7 +4068,7 @@ func TestPrintPodDisruptionBudgetList(t *testing.T) {
 		rows[i].Object.Object = nil
 	}
 	if !reflect.DeepEqual(expectedRows, rows) {
-		t.Errorf("mismatch: %s", diff.ObjectReflectDiff(expectedRows, rows))
+		t.Errorf("mismatch: %s", cmp.Diff(expectedRows, rows))
 	}
 }
 
@@ -3729,7 +4145,7 @@ func TestPrintControllerRevision(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -3796,7 +4212,7 @@ func TestPrintConfigMap(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -3843,7 +4259,7 @@ func TestPrintNetworkPolicy(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -3918,7 +4334,7 @@ func TestPrintRoleBinding(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -3993,7 +4409,7 @@ func TestPrintClusterRoleBinding(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -4135,25 +4551,28 @@ func TestPrintCertificateSigningRequest(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
 
 func TestPrintReplicationController(t *testing.T) {
 	tests := []struct {
+		name     string
 		rc       api.ReplicationController
 		options  printers.GenerateOptions
 		expected []metav1.TableRow
 	}{
 		// Basic print replication controller without replicas or status.
 		{
+			name: "basic",
 			rc: api.ReplicationController{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "rc1",
 					Namespace: "test-namespace",
 				},
 				Spec: api.ReplicationControllerSpec{
+					Replicas: ptr.To[int32](0),
 					Selector: map[string]string{"a": "b"},
 					Template: &api.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
@@ -4180,13 +4599,14 @@ func TestPrintReplicationController(t *testing.T) {
 		},
 		// Basic print replication controller with replicas; does not print containers or labels
 		{
+			name: "basic with replicas",
 			rc: api.ReplicationController{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "rc1",
 					Namespace: "test-namespace",
 				},
 				Spec: api.ReplicationControllerSpec{
-					Replicas: 5,
+					Replicas: ptr.To[int32](5),
 					Selector: map[string]string{"a": "b"},
 					Template: &api.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
@@ -4217,12 +4637,13 @@ func TestPrintReplicationController(t *testing.T) {
 		},
 		// Generate options: Wide; print containers and labels.
 		{
+			name: "wide",
 			rc: api.ReplicationController{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "rc1",
 				},
 				Spec: api.ReplicationControllerSpec{
-					Replicas: 5,
+					Replicas: ptr.To[int32](5),
 					Selector: map[string]string{"a": "b"},
 					Template: &api.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
@@ -4251,6 +4672,23 @@ func TestPrintReplicationController(t *testing.T) {
 			// Columns: Name, Desired, Current, Ready, Age, Containers, Images, Selector
 			expected: []metav1.TableRow{{Cells: []interface{}{"rc1", int64(5), int64(3), int64(1), "<unknown>", "test", "test_image", "a=b"}}},
 		},
+		{
+			// make sure Bookmark event will not lead a panic
+			name: "no panic",
+			rc: api.ReplicationController{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						metav1.InitialEventsAnnotationKey: "true",
+					},
+				},
+				Spec: api.ReplicationControllerSpec{
+					Replicas: ptr.To[int32](0),
+				},
+			},
+			options: printers.GenerateOptions{Wide: true},
+			// Columns: Name, Desired, Current, Ready, Age, Containers, Images, Selector
+			expected: []metav1.TableRow{{Cells: []interface{}{"", int64(0), int64(0), int64(0), "<unknown>", "", "", "<none>"}}},
+		},
 	}
 
 	for i, test := range tests {
@@ -4262,7 +4700,7 @@ func TestPrintReplicationController(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -4352,7 +4790,7 @@ func TestPrintReplicaSet(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -4420,7 +4858,7 @@ func TestPrintReplicaSetList(t *testing.T) {
 		rows[i].Object.Object = nil
 	}
 	if !reflect.DeepEqual(expectedRows, rows) {
-		t.Errorf("mismatch: %s", diff.ObjectReflectDiff(expectedRows, rows))
+		t.Errorf("mismatch: %s", cmp.Diff(expectedRows, rows))
 	}
 }
 
@@ -4507,13 +4945,14 @@ func TestPrintStatefulSet(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
 
 func TestPrintPersistentVolume(t *testing.T) {
 	myScn := "my-scn"
+	myVacn := "my-vacn"
 
 	claimRef := api.ObjectReference{
 		Name:      "test",
@@ -4540,7 +4979,7 @@ func TestPrintPersistentVolume(t *testing.T) {
 					Phase: api.VolumeBound,
 				},
 			},
-			expected: []metav1.TableRow{{Cells: []interface{}{"test1", "4Gi", "ROX", "", "Bound", "default/test", "", "", "<unknown>", "<unset>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test1", "4Gi", "ROX", "", "Bound", "default/test", "", "<unset>", "", "<unknown>", "<unset>"}}},
 		},
 		{
 			// Test failed
@@ -4559,7 +4998,7 @@ func TestPrintPersistentVolume(t *testing.T) {
 					Phase: api.VolumeFailed,
 				},
 			},
-			expected: []metav1.TableRow{{Cells: []interface{}{"test2", "4Gi", "ROX", "", "Failed", "default/test", "", "", "<unknown>", "<unset>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test2", "4Gi", "ROX", "", "Failed", "default/test", "", "<unset>", "", "<unknown>", "<unset>"}}},
 		},
 		{
 			// Test pending
@@ -4578,7 +5017,7 @@ func TestPrintPersistentVolume(t *testing.T) {
 					Phase: api.VolumePending,
 				},
 			},
-			expected: []metav1.TableRow{{Cells: []interface{}{"test3", "10Gi", "RWX", "", "Pending", "default/test", "", "", "<unknown>", "<unset>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test3", "10Gi", "RWX", "", "Pending", "default/test", "", "<unset>", "", "<unknown>", "<unset>"}}},
 		},
 		{
 			// Test pending, storageClass
@@ -4598,7 +5037,28 @@ func TestPrintPersistentVolume(t *testing.T) {
 					Phase: api.VolumePending,
 				},
 			},
-			expected: []metav1.TableRow{{Cells: []interface{}{"test4", "10Gi", "RWO", "", "Pending", "default/test", "my-scn", "", "<unknown>", "<unset>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test4", "10Gi", "RWO", "", "Pending", "default/test", "my-scn", "<unset>", "", "<unknown>", "<unset>"}}},
+		},
+		{
+			// Test pending, storageClass, volumeAttributesClass
+			pv: api.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test4",
+				},
+				Spec: api.PersistentVolumeSpec{
+					ClaimRef:                  &claimRef,
+					StorageClassName:          myScn,
+					VolumeAttributesClassName: &myVacn,
+					AccessModes:               []api.PersistentVolumeAccessMode{api.ReadWriteOnce},
+					Capacity: map[api.ResourceName]resource.Quantity{
+						api.ResourceStorage: resource.MustParse("10Gi"),
+					},
+				},
+				Status: api.PersistentVolumeStatus{
+					Phase: api.VolumePending,
+				},
+			},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test4", "10Gi", "RWO", "", "Pending", "default/test", "my-scn", "my-vacn", "", "<unknown>", "<unset>"}}},
 		},
 		{
 			// Test available
@@ -4618,7 +5078,7 @@ func TestPrintPersistentVolume(t *testing.T) {
 					Phase: api.VolumeAvailable,
 				},
 			},
-			expected: []metav1.TableRow{{Cells: []interface{}{"test5", "10Gi", "RWO", "", "Available", "default/test", "my-scn", "", "<unknown>", "<unset>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test5", "10Gi", "RWO", "", "Available", "default/test", "my-scn", "<unset>", "", "<unknown>", "<unset>"}}},
 		},
 		{
 			// Test released
@@ -4638,7 +5098,7 @@ func TestPrintPersistentVolume(t *testing.T) {
 					Phase: api.VolumeReleased,
 				},
 			},
-			expected: []metav1.TableRow{{Cells: []interface{}{"test6", "10Gi", "RWO", "", "Released", "default/test", "my-scn", "", "<unknown>", "<unset>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test6", "10Gi", "RWO", "", "Released", "default/test", "my-scn", "<unset>", "", "<unknown>", "<unset>"}}},
 		},
 	}
 
@@ -4651,13 +5111,14 @@ func TestPrintPersistentVolume(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
 
 func TestPrintPersistentVolumeClaim(t *testing.T) {
 	volumeMode := api.PersistentVolumeFilesystem
+	myVacn := "my-vacn"
 	myScn := "my-scn"
 	tests := []struct {
 		pvc      api.PersistentVolumeClaim
@@ -4681,7 +5142,7 @@ func TestPrintPersistentVolumeClaim(t *testing.T) {
 					},
 				},
 			},
-			expected: []metav1.TableRow{{Cells: []interface{}{"test1", "Bound", "my-volume", "4Gi", "ROX", "", "<unknown>", "Filesystem"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test1", "Bound", "my-volume", "4Gi", "ROX", "", "<unset>", "<unknown>", "Filesystem"}}},
 		},
 		{
 			// Test name, num of containers, restarts, container ready status
@@ -4700,7 +5161,7 @@ func TestPrintPersistentVolumeClaim(t *testing.T) {
 					},
 				},
 			},
-			expected: []metav1.TableRow{{Cells: []interface{}{"test2", "Lost", "", "", "", "", "<unknown>", "Filesystem"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test2", "Lost", "", "", "", "", "<unset>", "<unknown>", "Filesystem"}}},
 		},
 		{
 			// Test name, num of containers, restarts, container ready status
@@ -4720,7 +5181,7 @@ func TestPrintPersistentVolumeClaim(t *testing.T) {
 					},
 				},
 			},
-			expected: []metav1.TableRow{{Cells: []interface{}{"test3", "Pending", "my-volume", "10Gi", "RWX", "", "<unknown>", "Filesystem"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test3", "Pending", "my-volume", "10Gi", "RWX", "", "<unset>", "<unknown>", "Filesystem"}}},
 		},
 		{
 			// Test name, num of containers, restarts, container ready status
@@ -4741,7 +5202,7 @@ func TestPrintPersistentVolumeClaim(t *testing.T) {
 					},
 				},
 			},
-			expected: []metav1.TableRow{{Cells: []interface{}{"test4", "Pending", "my-volume", "10Gi", "RWO", "my-scn", "<unknown>", "Filesystem"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test4", "Pending", "my-volume", "10Gi", "RWO", "my-scn", "<unset>", "<unknown>", "Filesystem"}}},
 		},
 		{
 			// Test name, num of containers, restarts, container ready status
@@ -4761,7 +5222,28 @@ func TestPrintPersistentVolumeClaim(t *testing.T) {
 					},
 				},
 			},
-			expected: []metav1.TableRow{{Cells: []interface{}{"test5", "Pending", "my-volume", "10Gi", "RWO", "my-scn", "<unknown>", "<unset>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test5", "Pending", "my-volume", "10Gi", "RWO", "my-scn", "<unset>", "<unknown>", "<unset>"}}},
+		},
+		{
+			// Test name, num of containers, restarts, container ready status
+			pvc: api.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test5",
+				},
+				Spec: api.PersistentVolumeClaimSpec{
+					VolumeName:                "my-volume",
+					StorageClassName:          &myScn,
+					VolumeAttributesClassName: &myVacn,
+				},
+				Status: api.PersistentVolumeClaimStatus{
+					Phase:       api.ClaimPending,
+					AccessModes: []api.PersistentVolumeAccessMode{api.ReadWriteOnce},
+					Capacity: map[api.ResourceName]resource.Quantity{
+						api.ResourceStorage: resource.MustParse("10Gi"),
+					},
+				},
+			},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test5", "Pending", "my-volume", "10Gi", "RWO", "my-scn", "my-vacn", "<unknown>", "<unset>"}}},
 		},
 	}
 
@@ -4774,7 +5256,7 @@ func TestPrintPersistentVolumeClaim(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -4842,12 +5324,13 @@ func TestPrintComponentStatus(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
 
 func TestPrintCronJob(t *testing.T) {
+	timeZone := "LOCAL"
 	completions := int32(2)
 	suspend := false
 	tests := []struct {
@@ -4892,7 +5375,47 @@ func TestPrintCronJob(t *testing.T) {
 			},
 			options: printers.GenerateOptions{},
 			// Columns: Name, Schedule, Suspend, Active, Last Schedule, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"cronjob1", "0/5 * * * ?", "False", int64(0), "0s", "0s"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"cronjob1", "0/5 * * * ?", "<none>", "False", int64(0), "0s", "0s"}}},
+		},
+		// Basic cron job; does not print containers, images, or labels.
+		{
+			cronjob: batch.CronJob{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "cronjob1",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(1.9e9)},
+				},
+				Spec: batch.CronJobSpec{
+					Schedule: "0/5 * * * ?",
+					TimeZone: &timeZone,
+					Suspend:  &suspend,
+					JobTemplate: batch.JobTemplateSpec{
+						Spec: batch.JobSpec{
+							Completions: &completions,
+							Template: api.PodTemplateSpec{
+								Spec: api.PodSpec{
+									Containers: []api.Container{
+										{
+											Name:  "fake-job-container1",
+											Image: "fake-job-image1",
+										},
+										{
+											Name:  "fake-job-container2",
+											Image: "fake-job-image2",
+										},
+									},
+								},
+							},
+							Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"a": "b"}},
+						},
+					},
+				},
+				Status: batch.CronJobStatus{
+					LastScheduleTime: &metav1.Time{Time: time.Now().Add(1.9e9)},
+				},
+			},
+			options: printers.GenerateOptions{},
+			// Columns: Name, Schedule, Suspend, Active, Last Schedule, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"cronjob1", "0/5 * * * ?", "LOCAL", "False", int64(0), "0s", "0s"}}},
 		},
 		// Generate options: Wide; prints containers, images, and labels.
 		{
@@ -4931,7 +5454,7 @@ func TestPrintCronJob(t *testing.T) {
 			},
 			options: printers.GenerateOptions{Wide: true},
 			// Columns: Name, Schedule, Suspend, Active, Last Schedule, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"cronjob1", "0/5 * * * ?", "False", int64(0), "0s", "0s", "fake-job-container1,fake-job-container2", "fake-job-image1,fake-job-image2", "a=b"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"cronjob1", "0/5 * * * ?", "<none>", "False", int64(0), "0s", "0s", "fake-job-container1,fake-job-container2", "fake-job-image1,fake-job-image2", "a=b"}}},
 		},
 		// CronJob with Last Schedule and Age
 		{
@@ -4950,7 +5473,7 @@ func TestPrintCronJob(t *testing.T) {
 			},
 			options: printers.GenerateOptions{},
 			// Columns: Name, Schedule, Suspend, Active, Last Schedule, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"cronjob2", "0/5 * * * ?", "False", int64(0), "30s", "5m"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"cronjob2", "0/5 * * * ?", "<none>", "False", int64(0), "30s", "5m"}}},
 		},
 		// CronJob without Last Schedule
 		{
@@ -4967,7 +5490,7 @@ func TestPrintCronJob(t *testing.T) {
 			},
 			options: printers.GenerateOptions{},
 			// Columns: Name, Schedule, Suspend, Active, Last Schedule, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"cronjob3", "0/5 * * * ?", "False", int64(0), "<none>", "5m"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"cronjob3", "0/5 * * * ?", "<none>", "False", int64(0), "<none>", "5m"}}},
 		},
 	}
 
@@ -4980,12 +5503,13 @@ func TestPrintCronJob(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
 
 func TestPrintCronJobList(t *testing.T) {
+	timeZone := "LOCAL"
 	completions := int32(2)
 	suspend := false
 
@@ -4998,6 +5522,7 @@ func TestPrintCronJobList(t *testing.T) {
 				},
 				Spec: batch.CronJobSpec{
 					Schedule: "0/5 * * * ?",
+					TimeZone: &timeZone,
 					Suspend:  &suspend,
 					JobTemplate: batch.JobTemplateSpec{
 						Spec: batch.JobSpec{
@@ -5034,8 +5559,8 @@ func TestPrintCronJobList(t *testing.T) {
 
 	// Columns: Name, Schedule, Suspend, Active, Last Schedule, Age
 	expectedRows := []metav1.TableRow{
-		{Cells: []interface{}{"cronjob1", "0/5 * * * ?", "False", int64(0), "0s", "0s"}},
-		{Cells: []interface{}{"cronjob2", "4/5 1 1 1 ?", "False", int64(0), "20m", "0s"}},
+		{Cells: []interface{}{"cronjob1", "0/5 * * * ?", "LOCAL", "False", int64(0), "0s", "0s"}},
+		{Cells: []interface{}{"cronjob2", "4/5 1 1 1 ?", "<none>", "False", int64(0), "20m", "0s"}},
 	}
 
 	rows, err := printCronJobList(&cronJobList, printers.GenerateOptions{})
@@ -5046,7 +5571,7 @@ func TestPrintCronJobList(t *testing.T) {
 		rows[i].Object.Object = nil
 	}
 	if !reflect.DeepEqual(expectedRows, rows) {
-		t.Errorf("mismatch: %s", diff.ObjectReflectDiff(expectedRows, rows))
+		t.Errorf("mismatch: %s", cmp.Diff(expectedRows, rows))
 	}
 }
 
@@ -5144,7 +5669,52 @@ func TestPrintStorageClass(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
+		}
+	}
+}
+
+func TestPrintVolumeAttributesClass(t *testing.T) {
+	tests := []struct {
+		vac      storage.VolumeAttributesClass
+		expected []metav1.TableRow
+	}{
+		{
+			vac: storage.VolumeAttributesClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "vac1",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(1.9e9)},
+				},
+				DriverName: "fake",
+			},
+			expected: []metav1.TableRow{{Cells: []interface{}{"vac1", "fake", "0s"}}},
+		},
+		{
+			vac: storage.VolumeAttributesClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "vac2",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(-3e11)},
+				},
+				DriverName: "fake",
+				Parameters: map[string]string{
+					"iops":       "500",
+					"throughput": "50MiB/s",
+				},
+			},
+			expected: []metav1.TableRow{{Cells: []interface{}{"vac2", "fake", "5m"}}},
+		},
+	}
+
+	for i, test := range tests {
+		rows, err := printVolumeAttributesClass(&test.vac, printers.GenerateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range rows {
+			rows[i].Object.Object = nil
+		}
+		if !reflect.DeepEqual(test.expected, rows) {
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -5191,41 +5761,77 @@ func TestPrintLease(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
 
 func TestPrintPriorityClass(t *testing.T) {
+	preemptNever := api.PreemptNever
+	preemptLowerPriority := api.PreemptLowerPriority
 	tests := []struct {
+		name     string
+		options  printers.GenerateOptions
 		pc       scheduling.PriorityClass
 		expected []metav1.TableRow
 	}{
 		{
+			name: "Test case with PreemptNever policy",
 			pc: scheduling.PriorityClass{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "pc1",
 					CreationTimestamp: metav1.Time{Time: time.Now().Add(1.9e9)},
 				},
-				Value: 1,
+				Value:            1,
+				PreemptionPolicy: &preemptNever,
 			},
 			expected: []metav1.TableRow{{Cells: []interface{}{"pc1", int64(1), bool(false), "0s"}}},
 		},
 		{
+			name: "Test case with PreemptLowerPriority policy",
 			pc: scheduling.PriorityClass{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "pc2",
 					CreationTimestamp: metav1.Time{Time: time.Now().Add(-3e11)},
 				},
-				Value:         1000000000,
-				GlobalDefault: true,
+				Value:            1000000000,
+				GlobalDefault:    true,
+				PreemptionPolicy: &preemptLowerPriority,
 			},
 			expected: []metav1.TableRow{{Cells: []interface{}{"pc2", int64(1000000000), bool(true), "5m"}}},
+		},
+		{
+			name:    "Test case with PreemptLowerPriority policy and wide output",
+			options: printers.GenerateOptions{Wide: true},
+			pc: scheduling.PriorityClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "pc2",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(-3e11)},
+				},
+				Value:            1000000000,
+				GlobalDefault:    true,
+				PreemptionPolicy: &preemptLowerPriority,
+			},
+			expected: []metav1.TableRow{{Cells: []interface{}{"pc2", int64(1000000000), bool(true), "5m", string(api.PreemptLowerPriority)}}},
+		},
+		{
+			name:    "Test case without set PreemptLowerPriority policy",
+			options: printers.GenerateOptions{Wide: true},
+			pc: scheduling.PriorityClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "pc2",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(-3e11)},
+				},
+				Value:            1000000000,
+				GlobalDefault:    true,
+				PreemptionPolicy: nil,
+			},
+			expected: []metav1.TableRow{{Cells: []interface{}{"pc2", int64(1000000000), bool(true), "5m", string("")}}},
 		},
 	}
 
 	for i, test := range tests {
-		rows, err := printPriorityClass(&test.pc, printers.GenerateOptions{})
+		rows, err := printPriorityClass(&test.pc, test.options)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -5233,7 +5839,7 @@ func TestPrintPriorityClass(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("test case %s: %d mismatch: %s", test.name, i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -5274,7 +5880,7 @@ func TestPrintRuntimeClass(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -5394,7 +6000,7 @@ func TestPrintEndpoint(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 
@@ -5415,8 +6021,8 @@ func TestPrintEndpointSlice(t *testing.T) {
 				},
 				AddressType: discovery.AddressTypeIPv4,
 				Ports: []discovery.EndpointPort{{
-					Name:     utilpointer.StringPtr("http"),
-					Port:     utilpointer.Int32Ptr(80),
+					Name:     ptr.To("http"),
+					Port:     ptr.To[int32](80),
 					Protocol: &tcpProtocol,
 				}},
 				Endpoints: []discovery.Endpoint{{
@@ -5433,12 +6039,12 @@ func TestPrintEndpointSlice(t *testing.T) {
 				},
 				AddressType: discovery.AddressTypeIPv6,
 				Ports: []discovery.EndpointPort{{
-					Name:     utilpointer.StringPtr("http"),
-					Port:     utilpointer.Int32Ptr(80),
+					Name:     ptr.To("http"),
+					Port:     ptr.To[int32](80),
 					Protocol: &tcpProtocol,
 				}, {
-					Name:     utilpointer.StringPtr("https"),
-					Port:     utilpointer.Int32Ptr(443),
+					Name:     ptr.To("https"),
+					Port:     ptr.To[int32](443),
 					Protocol: &tcpProtocol,
 				}},
 				Endpoints: []discovery.Endpoint{{
@@ -5457,20 +6063,20 @@ func TestPrintEndpointSlice(t *testing.T) {
 				},
 				AddressType: discovery.AddressTypeIPv4,
 				Ports: []discovery.EndpointPort{{
-					Name:     utilpointer.StringPtr("http"),
-					Port:     utilpointer.Int32Ptr(80),
+					Name:     ptr.To("http"),
+					Port:     ptr.To[int32](80),
 					Protocol: &tcpProtocol,
 				}, {
-					Name:     utilpointer.StringPtr("https"),
-					Port:     utilpointer.Int32Ptr(443),
+					Name:     ptr.To("https"),
+					Port:     ptr.To[int32](443),
 					Protocol: &tcpProtocol,
 				}, {
-					Name:     utilpointer.StringPtr("extra1"),
-					Port:     utilpointer.Int32Ptr(3000),
+					Name:     ptr.To("extra1"),
+					Port:     ptr.To[int32](3000),
 					Protocol: &tcpProtocol,
 				}, {
-					Name:     utilpointer.StringPtr("extra2"),
-					Port:     utilpointer.Int32Ptr(3001),
+					Name:     ptr.To("extra2"),
+					Port:     ptr.To[int32](3001),
 					Protocol: &tcpProtocol,
 				}},
 				Endpoints: []discovery.Endpoint{{
@@ -5493,7 +6099,7 @@ func TestPrintEndpointSlice(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -5641,7 +6247,314 @@ func TestPrintFlowSchema(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
+		}
+	}
+}
+
+func TestPrintDeviceClass(t *testing.T) {
+
+	tests := []struct {
+		deviceClass resourceapis.DeviceClass
+		expected    []metav1.TableRow
+	}{
+		{
+			deviceClass: resourceapis.DeviceClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-deviceclass",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(-3e11)},
+				},
+			},
+			// Columns: Name, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"test-deviceclass", "5m"}}},
+		},
+		{
+			// test case for Empty creation timestamp that is translated to <unknown>
+			deviceClass: resourceapis.DeviceClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-deviceclass",
+					CreationTimestamp: metav1.Time{},
+				},
+			},
+			// Columns: Name, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"test-deviceclass", "<unknown>"}}},
+		},
+	}
+
+	for i, test := range tests {
+		rows, err := printDeviceClass(&test.deviceClass, printers.GenerateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range rows {
+			rows[i].Object.Object = nil
+		}
+		if !reflect.DeepEqual(test.expected, rows) {
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
+		}
+	}
+}
+
+func TestPrintResourceClaim(t *testing.T) {
+
+	tests := []struct {
+		name          string
+		resourceClaim resourceapis.ResourceClaim
+		expected      []metav1.TableRow
+	}{
+		{
+			name: "ResourceClaim with Pending State",
+			resourceClaim: resourceapis.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-resourceclaim",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(-3e11)},
+				},
+				Spec: resourceapis.ResourceClaimSpec{
+					Devices: resourceapis.DeviceClaim{
+						Requests: []resourceapis.DeviceRequest{
+							{
+								Name: "deviceRequest",
+								Exactly: &resourceapis.ExactDeviceRequest{
+									DeviceClassName: "deviceClass",
+									AllocationMode:  resourceapis.DeviceAllocationModeExactCount,
+									Count:           1,
+								},
+							},
+						},
+					},
+				},
+			},
+			// Columns: Name, State, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"test-resourceclaim", "pending", "5m"}}},
+		},
+		{
+			// test case for Empty creation timestamp that is translated to <unknown>
+			name: "ResourceClaim with Pending State and Empty creation timestamp",
+			resourceClaim: resourceapis.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-resourceclaim",
+					CreationTimestamp: metav1.Time{},
+				},
+				Spec: resourceapis.ResourceClaimSpec{
+					Devices: resourceapis.DeviceClaim{
+						Requests: []resourceapis.DeviceRequest{
+							{
+								Name: "deviceRequest",
+								Exactly: &resourceapis.ExactDeviceRequest{
+									DeviceClassName: "deviceClass",
+									AllocationMode:  resourceapis.DeviceAllocationModeExactCount,
+									Count:           1,
+								},
+							},
+						},
+					},
+				},
+			},
+			// Columns: Name, State, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"test-resourceclaim", "pending", "<unknown>"}}},
+		},
+		{
+			name: "ResourceClaim with Allocated and Reserved State",
+			resourceClaim: resourceapis.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-resourceclaim",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(-3e11)},
+				},
+				Spec: resourceapis.ResourceClaimSpec{
+					Devices: resourceapis.DeviceClaim{
+						Requests: []resourceapis.DeviceRequest{
+							{
+								Name: "deviceRequest",
+								Exactly: &resourceapis.ExactDeviceRequest{
+									DeviceClassName: "deviceClass",
+									AllocationMode:  resourceapis.DeviceAllocationModeExactCount,
+									Count:           1,
+								},
+							},
+						},
+					},
+				},
+				Status: resourceapis.ResourceClaimStatus{
+					Allocation: &resourceapis.AllocationResult{},
+					ReservedFor: []resourceapis.ResourceClaimConsumerReference{
+						{
+							Resource: "pods",
+							Name:     "pod-test",
+							UID:      types.UID("pod-test"),
+						},
+					},
+				},
+			},
+			// Columns: Name, State, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"test-resourceclaim", "allocated,reserved", "5m"}}},
+		},
+		{
+			name: "ResourceClaim with Deleted State",
+			resourceClaim: resourceapis.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-resourceclaim",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(-3e11)},
+					DeletionTimestamp: &metav1.Time{Time: time.Now()},
+				},
+				Spec: resourceapis.ResourceClaimSpec{
+					Devices: resourceapis.DeviceClaim{
+						Requests: []resourceapis.DeviceRequest{
+							{
+								Name: "deviceRequest",
+								Exactly: &resourceapis.ExactDeviceRequest{
+									DeviceClassName: "deviceClass",
+									AllocationMode:  resourceapis.DeviceAllocationModeExactCount,
+									Count:           1,
+								},
+							},
+						},
+					},
+				},
+			},
+			// Columns: Name, State, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"test-resourceclaim", "deleted", "5m"}}},
+		},
+	}
+
+	for i, test := range tests {
+		rows, err := printResourceClaim(&test.resourceClaim, printers.GenerateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range rows {
+			rows[i].Object.Object = nil
+		}
+		if !reflect.DeepEqual(test.expected, rows) {
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
+		}
+	}
+}
+
+func TestPrintResourceClaimTemplate(t *testing.T) {
+
+	tests := []struct {
+		resourceClaimTemplate resourceapis.ResourceClaimTemplate
+		expected              []metav1.TableRow
+	}{
+		{
+			resourceClaimTemplate: resourceapis.ResourceClaimTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-resourceclaimtemplate",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(-3e11)},
+				},
+				Spec: resourceapis.ResourceClaimTemplateSpec{
+					Spec: resourceapis.ResourceClaimSpec{
+						Devices: resourceapis.DeviceClaim{
+							Requests: []resourceapis.DeviceRequest{{
+								Name: "test-deviceRequest",
+								Exactly: &resourceapis.ExactDeviceRequest{
+									DeviceClassName: "deviceClassName",
+									AllocationMode:  resourceapis.DeviceAllocationModeExactCount,
+									Count:           1,
+								},
+							}},
+						},
+					},
+				},
+			},
+			// Columns: Name, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"test-resourceclaimtemplate", "5m"}}},
+		},
+		{
+			// test case for Empty creation timestamp that is translated to <unknown>
+			resourceClaimTemplate: resourceapis.ResourceClaimTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-resourceclaimtemplate",
+					CreationTimestamp: metav1.Time{},
+				},
+				Spec: resourceapis.ResourceClaimTemplateSpec{
+					Spec: resourceapis.ResourceClaimSpec{
+						Devices: resourceapis.DeviceClaim{
+							Requests: []resourceapis.DeviceRequest{{
+								Name: "test-deviceRequest",
+								Exactly: &resourceapis.ExactDeviceRequest{
+									DeviceClassName: "deviceClassName",
+									AllocationMode:  resourceapis.DeviceAllocationModeExactCount,
+									Count:           1,
+								},
+							}},
+						},
+					},
+				},
+			},
+			// Columns: Name, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"test-resourceclaimtemplate", "<unknown>"}}},
+		},
+	}
+
+	for i, test := range tests {
+		rows, err := printResourceClaimTemplate(&test.resourceClaimTemplate, printers.GenerateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range rows {
+			rows[i].Object.Object = nil
+		}
+		if !reflect.DeepEqual(test.expected, rows) {
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
+		}
+	}
+}
+
+func TestPrintResourceSlice(t *testing.T) {
+
+	tests := []struct {
+		resourceSlice resourceapis.ResourceSlice
+		expected      []metav1.TableRow
+	}{
+		{
+			resourceSlice: resourceapis.ResourceSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-resourceslice",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(-3e11)},
+				},
+				Spec: resourceapis.ResourceSliceSpec{
+					NodeName: ptr.To("nodeName"),
+					Driver:   "driverName",
+					Pool: resourceapis.ResourcePool{
+						Name:               "poolName",
+						ResourceSliceCount: 1,
+					},
+				},
+			},
+			// Columns: Name, Node, Driver, Pool, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"test-resourceslice", "nodeName", "driverName", "poolName", "5m"}}},
+		},
+		{
+			resourceSlice: resourceapis.ResourceSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-resourceslice",
+					CreationTimestamp: metav1.Time{},
+				},
+				Spec: resourceapis.ResourceSliceSpec{
+					NodeName: ptr.To("nodeName"),
+					Driver:   "driverName",
+					Pool: resourceapis.ResourcePool{
+						Name:               "poolName",
+						ResourceSliceCount: 1,
+					},
+				},
+			},
+			// Columns: Name, Node, Driver, Pool, Age
+			expected: []metav1.TableRow{{Cells: []interface{}{"test-resourceslice", "nodeName", "driverName", "poolName", "<unknown>"}}},
+		},
+	}
+
+	for i, test := range tests {
+		rows, err := printResourceSlice(&test.resourceSlice, printers.GenerateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range rows {
+			rows[i].Object.Object = nil
+		}
+		if !reflect.DeepEqual(test.expected, rows) {
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -5718,7 +6631,7 @@ func TestPrintPriorityLevelConfiguration(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -5840,7 +6753,7 @@ func TestPrintStorageVersion(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -5877,7 +6790,184 @@ func TestPrintScale(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
+		}
+	}
+}
+
+func TestPrintClusterTrustBundle(t *testing.T) {
+	tests := []struct {
+		bundle   certificates.ClusterTrustBundle
+		options  printers.GenerateOptions
+		expected []metav1.TableRow
+	}{
+		{
+			bundle: certificates.ClusterTrustBundle{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-cluster-trust-bundle",
+				},
+				Spec: certificates.ClusterTrustBundleSpec{
+					SignerName: "test-signer-name",
+				},
+			},
+			expected: []metav1.TableRow{
+				{
+					Cells: []interface{}{"test-cluster-trust-bundle", "test-signer-name"},
+				},
+			},
+		},
+	}
+
+	for i, test := range tests {
+		rows, err := printClusterTrustBundle(&test.bundle, test.options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range rows {
+			rows[i].Object.Object = nil
+		}
+		if !reflect.DeepEqual(test.expected, rows) {
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
+		}
+	}
+}
+
+func TestPrintValidatingAdmissionPolicyBinding(t *testing.T) {
+	tests := []struct {
+		validatingAdmissionPolicyBinding admissionregistration.ValidatingAdmissionPolicyBinding
+		options                          printers.GenerateOptions
+		expected                         []metav1.TableRow
+	}{
+		{
+			validatingAdmissionPolicyBinding: admissionregistration.ValidatingAdmissionPolicyBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "config",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(-3e11)},
+				},
+				Spec: admissionregistration.ValidatingAdmissionPolicyBindingSpec{
+					PolicyName: "test-scale.example.com",
+					ParamRef: &admissionregistration.ParamRef{
+						Name:                    "test-scale-setting.example.com",
+						ParameterNotFoundAction: ptr.To(admissionregistration.DenyAction),
+					},
+				},
+			},
+			expected: []metav1.TableRow{
+				{
+					Cells: []interface{}{"config", "test-scale.example.com", "*/test-scale-setting.example.com", "5m"},
+				},
+			},
+		},
+	}
+
+	for i, test := range tests {
+		rows, err := printValidatingAdmissionPolicyBinding(&test.validatingAdmissionPolicyBinding, test.options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range rows {
+			rows[i].Object.Object = nil
+		}
+		if !reflect.DeepEqual(test.expected, rows) {
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
+		}
+	}
+}
+
+func TestPrintLeaseCandidate(t *testing.T) {
+	tests := []struct {
+		leaseCandidate coordination.LeaseCandidate
+		options        printers.GenerateOptions
+		expected       []metav1.TableRow
+	}{
+		{
+			leaseCandidate: coordination.LeaseCandidate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-lease",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(-3e11)},
+				},
+				Spec: coordination.LeaseCandidateSpec{
+					BinaryVersion:    "test-binary-version",
+					EmulationVersion: "test-emulation-version",
+					LeaseName:        "test-lease-name",
+				},
+			},
+			expected: []metav1.TableRow{
+				{
+					Cells: []interface{}{"test-lease", "test-lease-name", "test-binary-version", "test-emulation-version", "5m"},
+				},
+			},
+		},
+	}
+
+	for i, test := range tests {
+		rows, err := printLeaseCandidate(&test.leaseCandidate, test.options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range rows {
+			rows[i].Object.Object = nil
+		}
+		if !reflect.DeepEqual(test.expected, rows) {
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
+		}
+	}
+}
+
+func TestPrintResourceQuota(t *testing.T) {
+	tests := []struct {
+		resourceQuota api.ResourceQuota
+		options       printers.GenerateOptions
+		expected      []metav1.TableRow
+	}{
+		{
+			resourceQuota: api.ResourceQuota{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-resourcequota",
+					CreationTimestamp: metav1.Time{Time: time.Now().Add(-3e11)},
+				},
+				Spec: api.ResourceQuotaSpec{},
+				Status: api.ResourceQuotaStatus{
+					Used: api.ResourceList{
+						api.ResourceCPU:                    resource.MustParse("1"),
+						api.ResourceMemory:                 resource.MustParse("1Gi"),
+						api.ResourcePods:                   resource.MustParse("1"),
+						api.ResourceServices:               resource.MustParse("1"),
+						api.ResourceReplicationControllers: resource.MustParse("1"),
+						api.ResourceQuotas:                 resource.MustParse("1"),
+						api.ResourceLimitsCPU:              resource.MustParse("2"),
+						api.ResourceLimitsMemory:           resource.MustParse("2Gi"),
+					},
+					Hard: api.ResourceList{
+						api.ResourceCPU:                    resource.MustParse("100"),
+						api.ResourceMemory:                 resource.MustParse("4Gi"),
+						api.ResourcePods:                   resource.MustParse("10"),
+						api.ResourceServices:               resource.MustParse("10"),
+						api.ResourceReplicationControllers: resource.MustParse("10"),
+						api.ResourceQuotas:                 resource.MustParse("1"),
+						api.ResourceLimitsCPU:              resource.MustParse("200"),
+						api.ResourceLimitsMemory:           resource.MustParse("8Gi"),
+					},
+				},
+			},
+			expected: []metav1.TableRow{
+				{
+					Cells: []interface{}{"test-resourcequota", "cpu: 1/100, memory: 1Gi/4Gi, pods: 1/10, replicationcontrollers: 1/10, resourcequotas: 1/1, services: 1/10", "limits.cpu: 2/200, limits.memory: 2Gi/8Gi", "5m"},
+				},
+			},
+		},
+	}
+
+	for i, test := range tests {
+		rows, err := printResourceQuota(&test.resourceQuota, test.options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range rows {
+			rows[i].Object.Object = nil
+		}
+		if !reflect.DeepEqual(test.expected, rows) {
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
@@ -6011,6 +7101,18 @@ func TestTableRowDeepCopyShouldNotPanic(t *testing.T) {
 			name: "ValidatingAdmissionPolicyBinding",
 			printer: func() ([]metav1.TableRow, error) {
 				return printValidatingAdmissionPolicyBinding(&admissionregistration.ValidatingAdmissionPolicyBinding{}, printers.GenerateOptions{})
+			},
+		},
+		{
+			name: "MutatingAdmissionPolicy",
+			printer: func() ([]metav1.TableRow, error) {
+				return printMutatingAdmissionPolicy(&admissionregistration.MutatingAdmissionPolicy{}, printers.GenerateOptions{})
+			},
+		},
+		{
+			name: "MutatingAdmissionPolicyBinding",
+			printer: func() ([]metav1.TableRow, error) {
+				return printMutatingAdmissionPolicyBinding(&admissionregistration.MutatingAdmissionPolicyBinding{}, printers.GenerateOptions{})
 			},
 		},
 		{
@@ -6175,6 +7277,42 @@ func TestTableRowDeepCopyShouldNotPanic(t *testing.T) {
 				return printStatus(&metav1.Status{}, printers.GenerateOptions{})
 			},
 		},
+		{
+			name: "DeviceClass",
+			printer: func() ([]metav1.TableRow, error) {
+				return printDeviceClass(&resourceapis.DeviceClass{}, printers.GenerateOptions{})
+			},
+		},
+		{
+			name: "ResourceClaim",
+			printer: func() ([]metav1.TableRow, error) {
+				return printResourceClaim(&resourceapis.ResourceClaim{}, printers.GenerateOptions{})
+			},
+		},
+		{
+			name: "ResourceClaimTemplate",
+			printer: func() ([]metav1.TableRow, error) {
+				return printResourceClaimTemplate(&resourceapis.ResourceClaimTemplate{}, printers.GenerateOptions{})
+			},
+		},
+		{
+			name: "ResourceSlice",
+			printer: func() ([]metav1.TableRow, error) {
+				return printResourceSlice(&resourceapis.ResourceSlice{}, printers.GenerateOptions{})
+			},
+		},
+		{
+			name: "LeaseCandidate",
+			printer: func() ([]metav1.TableRow, error) {
+				return printLeaseCandidate(&coordination.LeaseCandidate{}, printers.GenerateOptions{})
+			},
+		},
+		{
+			name: "ClusterTrustBundle",
+			printer: func() ([]metav1.TableRow, error) {
+				return printClusterTrustBundle(&certificates.ClusterTrustBundle{}, printers.GenerateOptions{})
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -6209,189 +7347,135 @@ func TestTableRowDeepCopyShouldNotPanic(t *testing.T) {
 	}
 }
 
-func TestPrintClusterCIDR(t *testing.T) {
+func TestPrintIPAddress(t *testing.T) {
+	ip := networking.IPAddress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "192.168.2.2",
+			CreationTimestamp: metav1.Time{Time: time.Now().Add(time.Duration(-10 * 365 * 24 * time.Hour))},
+		},
+		Spec: networking.IPAddressSpec{
+			ParentRef: &networking.ParentReference{
+				Group:     "mygroup",
+				Resource:  "myresource",
+				Namespace: "mynamespace",
+				Name:      "myname",
+			},
+		},
+	}
+	// Columns: Name, ParentRef, Age
+	expected := []metav1.TableRow{{Cells: []interface{}{"192.168.2.2", "myresource.mygroup/mynamespace/myname", "10y"}}}
+
+	rows, err := printIPAddress(&ip, printers.GenerateOptions{})
+	if err != nil {
+		t.Fatalf("Error generating table rows for IPAddress: %#v", err)
+	}
+	rows[0].Object.Object = nil
+	if !reflect.DeepEqual(expected, rows) {
+		t.Errorf("mismatch: %s", cmp.Diff(expected, rows))
+	}
+}
+
+func TestPrintIPAddressList(t *testing.T) {
+	ipList := networking.IPAddressList{
+		Items: []networking.IPAddress{
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "192.168.2.2",
+					CreationTimestamp: metav1.Time{},
+				},
+				Spec: networking.IPAddressSpec{
+					ParentRef: &networking.ParentReference{
+						Group:     "mygroup",
+						Resource:  "myresource",
+						Namespace: "mynamespace",
+						Name:      "myname",
+					},
+				},
+			}, {
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "2001:db8::2",
+					CreationTimestamp: metav1.Time{},
+				},
+				Spec: networking.IPAddressSpec{
+					ParentRef: &networking.ParentReference{
+						Group:     "mygroup2",
+						Resource:  "myresource2",
+						Namespace: "mynamespace2",
+						Name:      "myname2",
+					},
+				},
+			},
+		},
+	}
+	// Columns: Name, ParentRef, Age
+	expected := []metav1.TableRow{
+		{Cells: []interface{}{"192.168.2.2", "myresource.mygroup/mynamespace/myname", "<unknown>"}},
+		{Cells: []interface{}{"2001:db8::2", "myresource2.mygroup2/mynamespace2/myname2", "<unknown>"}},
+	}
+
+	rows, err := printIPAddressList(&ipList, printers.GenerateOptions{})
+	if err != nil {
+		t.Fatalf("Error generating table rows for IPAddress: %#v", err)
+	}
+	for i := range rows {
+		rows[i].Object.Object = nil
+
+	}
+	if !reflect.DeepEqual(expected, rows) {
+		t.Errorf("mismatch: %s", cmp.Diff(expected, rows))
+	}
+
+}
+
+func TestPrintServiceCIDR(t *testing.T) {
 	ipv4CIDR := "10.1.0.0/16"
-	perNodeHostBits := int32(8)
 	ipv6CIDR := "fd00:1:1::/64"
 
 	tests := []struct {
-		ccc      networking.ClusterCIDR
+		ccc      networking.ServiceCIDR
 		options  printers.GenerateOptions
 		expected []metav1.TableRow
 	}{
 		{
-			// Test name, IPv4 only with no node selector.
-			ccc: networking.ClusterCIDR{
+			// Test name, IPv4 only.
+			ccc: networking.ServiceCIDR{
 				ObjectMeta: metav1.ObjectMeta{Name: "test1"},
-				Spec: networking.ClusterCIDRSpec{
-					PerNodeHostBits: perNodeHostBits,
-					IPv4:            ipv4CIDR,
+				Spec: networking.ServiceCIDRSpec{
+					CIDRs: []string{ipv4CIDR},
 				},
 			},
 			options: printers.GenerateOptions{},
-			// Columns: Name, PerNodeHostBits, IPv4, IPv6, Age.
-			expected: []metav1.TableRow{{Cells: []interface{}{"test1", "8", ipv4CIDR, "<none>", "<unknown>"}}},
+			// Columns: Name, IPv4, IPv6, Age.
+			expected: []metav1.TableRow{{Cells: []interface{}{"test1", ipv4CIDR, "<unknown>"}}},
 		},
 		{
-			// Test name, IPv4 only with node selector, Not wide.
-			ccc: networking.ClusterCIDR{
-				ObjectMeta: metav1.ObjectMeta{Name: "test2"},
-				Spec: networking.ClusterCIDRSpec{
-					PerNodeHostBits: perNodeHostBits,
-					IPv4:            ipv4CIDR,
-					// Does NOT get printed.
-					NodeSelector: makeNodeSelector("foo", api.NodeSelectorOpIn, []string{"bar"}),
-				},
-			},
-			options: printers.GenerateOptions{},
-			// Columns: Name, PerNodeHostBits, IPv4, IPv6, Age.
-			expected: []metav1.TableRow{{Cells: []interface{}{"test2", "8", ipv4CIDR, "<none>", "<unknown>"}}},
-		},
-		{
-			// Test name, IPv4 only with no node selector, wide.
-			ccc: networking.ClusterCIDR{
-				ObjectMeta: metav1.ObjectMeta{Name: "test3"},
-				Spec: networking.ClusterCIDRSpec{
-					PerNodeHostBits: perNodeHostBits,
-					IPv4:            ipv4CIDR,
-				},
-			},
-			options: printers.GenerateOptions{Wide: true},
-			// Columns: Name, PerNodeHostBits, IPv4, IPv6, Age, NodeSelector .
-			expected: []metav1.TableRow{{Cells: []interface{}{"test3", "8", ipv4CIDR, "<none>", "<unknown>", "<none>"}}},
-		},
-		{
-			// Test name, IPv4 only with node selector, wide.
-			ccc: networking.ClusterCIDR{
-				ObjectMeta: metav1.ObjectMeta{Name: "test4"},
-				Spec: networking.ClusterCIDRSpec{
-					PerNodeHostBits: perNodeHostBits,
-					IPv4:            ipv4CIDR,
-					NodeSelector:    makeNodeSelector("foo", api.NodeSelectorOpIn, []string{"bar"}),
-				},
-			},
-			options: printers.GenerateOptions{Wide: true},
-			// Columns: Name, PerNodeHostBits, IPv4, IPv6, Age, NodeSelector .
-			expected: []metav1.TableRow{{Cells: []interface{}{"test4", "8", ipv4CIDR, "<none>", "<unknown>", "MatchExpressions: [{foo In [bar]}]"}}},
-		},
-		{
-			// Test name, IPv6 only with no node selector.
-			ccc: networking.ClusterCIDR{
+			// Test name, IPv6 only.
+			ccc: networking.ServiceCIDR{
 				ObjectMeta: metav1.ObjectMeta{Name: "test5"},
-				Spec: networking.ClusterCIDRSpec{
-					PerNodeHostBits: perNodeHostBits,
-					IPv6:            ipv6CIDR,
+				Spec: networking.ServiceCIDRSpec{
+					CIDRs: []string{ipv6CIDR},
 				},
 			},
 			options: printers.GenerateOptions{},
 			// Columns: Name, PerNodeHostBits, IPv4, IPv6, Age
-			expected: []metav1.TableRow{{Cells: []interface{}{"test5", "8", "<none>", ipv6CIDR, "<unknown>"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test5", ipv6CIDR, "<unknown>"}}},
 		},
 		{
-			// Test name, IPv6 only with node selector, Not wide.
-			ccc: networking.ClusterCIDR{
-				ObjectMeta: metav1.ObjectMeta{Name: "test6"},
-				Spec: networking.ClusterCIDRSpec{
-					PerNodeHostBits: perNodeHostBits,
-					IPv6:            ipv6CIDR,
-					// Does NOT get printed.
-					NodeSelector: makeNodeSelector("foo", api.NodeSelectorOpIn, []string{"bar"}),
-				},
-			},
-			options: printers.GenerateOptions{},
-			// Columns: Name, PerNodeHostBits, IPv4, IPv6, Age.
-			expected: []metav1.TableRow{{Cells: []interface{}{"test6", "8", "<none>", ipv6CIDR, "<unknown>"}}},
-		},
-		{
-			// Test name, IPv6 only with no node selector, wide.
-			ccc: networking.ClusterCIDR{
-				ObjectMeta: metav1.ObjectMeta{Name: "test7"},
-				Spec: networking.ClusterCIDRSpec{
-					PerNodeHostBits: perNodeHostBits,
-					IPv6:            ipv6CIDR,
-				},
-			},
-			options: printers.GenerateOptions{Wide: true},
-			// Columns: Name, PerNodeHostBits, IPv4, IPv6, Age, NodeSelector .
-			expected: []metav1.TableRow{{Cells: []interface{}{"test7", "8", "<none>", ipv6CIDR, "<unknown>", "<none>"}}},
-		},
-		{
-			// Test name, IPv6 only with node selector, wide.
-			ccc: networking.ClusterCIDR{
-				ObjectMeta: metav1.ObjectMeta{Name: "test8"},
-				Spec: networking.ClusterCIDRSpec{
-					PerNodeHostBits: perNodeHostBits,
-					IPv6:            ipv6CIDR,
-					NodeSelector:    makeNodeSelector("foo", api.NodeSelectorOpIn, []string{"bar"}),
-				},
-			},
-			options: printers.GenerateOptions{Wide: true},
-			// Columns: Name, PerNodeHostBits, IPv4, IPv6, Age, NodeSelector .
-			expected: []metav1.TableRow{{Cells: []interface{}{"test8", "8", "<none>", ipv6CIDR, "<unknown>", "MatchExpressions: [{foo In [bar]}]"}}},
-		},
-		{
-			// Test name, DualStack with no node selector.
-			ccc: networking.ClusterCIDR{
+			// Test name, DualStack.
+			ccc: networking.ServiceCIDR{
 				ObjectMeta: metav1.ObjectMeta{Name: "test9"},
-				Spec: networking.ClusterCIDRSpec{
-					PerNodeHostBits: perNodeHostBits,
-					IPv4:            ipv4CIDR,
-					IPv6:            ipv6CIDR,
+				Spec: networking.ServiceCIDRSpec{
+					CIDRs: []string{ipv4CIDR, ipv6CIDR},
 				},
 			},
 			options: printers.GenerateOptions{},
 			// Columns: Name, PerNodeHostBits, IPv4, IPv6, Age.
-			expected: []metav1.TableRow{{Cells: []interface{}{"test9", "8", ipv4CIDR, ipv6CIDR, "<unknown>"}}},
-		},
-		{
-			// Test name,DualStack with node selector, Not wide.
-			ccc: networking.ClusterCIDR{
-				ObjectMeta: metav1.ObjectMeta{Name: "test10"},
-				Spec: networking.ClusterCIDRSpec{
-					PerNodeHostBits: perNodeHostBits,
-					IPv4:            ipv4CIDR,
-					IPv6:            ipv6CIDR,
-					// Does NOT get printed.
-					NodeSelector: makeNodeSelector("foo", api.NodeSelectorOpIn, []string{"bar"}),
-				},
-			},
-			options: printers.GenerateOptions{},
-			// Columns: Name, PerNodeHostBits, IPv4, IPv6, Age.
-			expected: []metav1.TableRow{{Cells: []interface{}{"test10", "8", ipv4CIDR, ipv6CIDR, "<unknown>"}}},
-		},
-		{
-			// Test name, DualStack with no node selector, wide.
-			ccc: networking.ClusterCIDR{
-				ObjectMeta: metav1.ObjectMeta{Name: "test11"},
-				Spec: networking.ClusterCIDRSpec{
-					PerNodeHostBits: perNodeHostBits,
-					IPv4:            ipv4CIDR,
-					IPv6:            ipv6CIDR,
-				},
-			},
-			options: printers.GenerateOptions{Wide: true},
-			// Columns: Name, PerNodeHostBits, IPv4, IPv6, Age, NodeSelector.
-			expected: []metav1.TableRow{{Cells: []interface{}{"test11", "8", ipv4CIDR, ipv6CIDR, "<unknown>", "<none>"}}},
-		},
-		{
-			// Test name, DualStack with node selector, wide.
-			ccc: networking.ClusterCIDR{
-				ObjectMeta: metav1.ObjectMeta{Name: "test12"},
-				Spec: networking.ClusterCIDRSpec{
-					PerNodeHostBits: perNodeHostBits,
-					IPv4:            ipv4CIDR,
-					IPv6:            ipv6CIDR,
-					NodeSelector:    makeNodeSelector("foo", api.NodeSelectorOpIn, []string{"bar"}),
-				},
-			},
-			options: printers.GenerateOptions{Wide: true},
-			// Columns: Name, PerNodeHostBits, IPv4, IPv6, Age, NodeSelector .
-			expected: []metav1.TableRow{{Cells: []interface{}{"test12", "8", ipv4CIDR, ipv6CIDR, "<unknown>", "MatchExpressions: [{foo In [bar]}]"}}},
+			expected: []metav1.TableRow{{Cells: []interface{}{"test9", ipv4CIDR + "," + ipv6CIDR, "<unknown>"}}},
 		},
 	}
 
 	for i, test := range tests {
-		rows, err := printClusterCIDR(&test.ccc, test.options)
+		rows, err := printServiceCIDR(&test.ccc, test.options)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -6399,47 +7483,24 @@ func TestPrintClusterCIDR(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("%d mismatch: %s", i, diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("%d mismatch: %s", i, cmp.Diff(test.expected, rows))
 		}
 	}
 }
 
-func makeNodeSelector(key string, op api.NodeSelectorOperator, values []string) *api.NodeSelector {
-	return &api.NodeSelector{
-		NodeSelectorTerms: []api.NodeSelectorTerm{
-			{
-				MatchExpressions: []api.NodeSelectorRequirement{
-					{
-						Key:      key,
-						Operator: op,
-						Values:   values,
-					},
-				},
-			},
-		},
-	}
-}
-
-func TestPrintClusterCIDRList(t *testing.T) {
-
-	cccList := networking.ClusterCIDRList{
-		Items: []networking.ClusterCIDR{
+func TestPrintServiceCIDRList(t *testing.T) {
+	cccList := networking.ServiceCIDRList{
+		Items: []networking.ServiceCIDR{
 			{
 				ObjectMeta: metav1.ObjectMeta{Name: "ccc1"},
-				Spec: networking.ClusterCIDRSpec{
-					PerNodeHostBits: int32(8),
-					IPv4:            "10.1.0.0/16",
-					IPv6:            "fd00:1:1::/64",
-					NodeSelector:    makeNodeSelector("foo", api.NodeSelectorOpIn, []string{"bar"}),
+				Spec: networking.ServiceCIDRSpec{
+					CIDRs: []string{"10.1.0.0/16", "fd00:1:1::/64"},
 				},
 			},
 			{
 				ObjectMeta: metav1.ObjectMeta{Name: "ccc2"},
-				Spec: networking.ClusterCIDRSpec{
-					PerNodeHostBits: int32(8),
-					IPv4:            "10.2.0.0/16",
-					IPv6:            "fd00:2:1::/64",
-					NodeSelector:    makeNodeSelector("foo", api.NodeSelectorOpIn, []string{"bar"}),
+				Spec: networking.ServiceCIDRSpec{
+					CIDRs: []string{"10.2.0.0/16", "fd00:2:1::/64"},
 				},
 			},
 		},
@@ -6453,24 +7514,24 @@ func TestPrintClusterCIDRList(t *testing.T) {
 			// Test name, DualStack with node selector, wide.
 			options: printers.GenerateOptions{Wide: false},
 			expected: []metav1.TableRow{
-				// Columns: Name, PerNodeHostBits, IPv4, IPv6, Age.
-				{Cells: []interface{}{"ccc1", "8", "10.1.0.0/16", "fd00:1:1::/64", "<unknown>"}},
-				{Cells: []interface{}{"ccc2", "8", "10.2.0.0/16", "fd00:2:1::/64", "<unknown>"}},
+				// Columns: Name, IPv4, IPv6, Age.
+				{Cells: []interface{}{"ccc1", "10.1.0.0/16,fd00:1:1::/64", "<unknown>"}},
+				{Cells: []interface{}{"ccc2", "10.2.0.0/16,fd00:2:1::/64", "<unknown>"}},
 			},
 		},
 		{
 			// Test name, DualStack with node selector, wide.
 			options: printers.GenerateOptions{Wide: true},
 			expected: []metav1.TableRow{
-				// Columns: Name, PerNodeHostBits, IPv4, IPv6, Age, NodeSelector.
-				{Cells: []interface{}{"ccc1", "8", "10.1.0.0/16", "fd00:1:1::/64", "<unknown>", "MatchExpressions: [{foo In [bar]}]"}},
-				{Cells: []interface{}{"ccc2", "8", "10.2.0.0/16", "fd00:2:1::/64", "<unknown>", "MatchExpressions: [{foo In [bar]}]"}},
+				// Columns: Name, CIDRs, Age.
+				{Cells: []interface{}{"ccc1", "10.1.0.0/16,fd00:1:1::/64", "<unknown>"}},
+				{Cells: []interface{}{"ccc2", "10.2.0.0/16,fd00:2:1::/64", "<unknown>"}},
 			},
 		},
 	}
 
 	for _, test := range tests {
-		rows, err := printClusterCIDRList(&cccList, test.options)
+		rows, err := printServiceCIDRList(&cccList, test.options)
 		if err != nil {
 			t.Fatalf("Error printing service list: %#v", err)
 		}
@@ -6478,7 +7539,96 @@ func TestPrintClusterCIDRList(t *testing.T) {
 			rows[i].Object.Object = nil
 		}
 		if !reflect.DeepEqual(test.expected, rows) {
-			t.Errorf("mismatch: %s", diff.ObjectReflectDiff(test.expected, rows))
+			t.Errorf("mismatch: %s", cmp.Diff(test.expected, rows))
 		}
+	}
+}
+
+func TestPrintStorageVersionMigration(t *testing.T) {
+	storageVersionMigration := storagemigration.StorageVersionMigration{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "StorageVersionMigration",
+			APIVersion: "storagemigration.k8s.io/v1alpha1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "print-test",
+		},
+		Spec: storagemigration.StorageVersionMigrationSpec{
+			Resource: storagemigration.GroupVersionResource{
+				Group:    "test-group",
+				Version:  "test-version",
+				Resource: "test-resource",
+			},
+		},
+	}
+
+	// Columns: Name, GVRTOMIGRATE
+	expected := []metav1.TableRow{{Cells: []interface{}{"print-test", "test-resource.test-version.test-group"}}}
+
+	rows, err := printStorageVersionMigration(&storageVersionMigration, printers.GenerateOptions{})
+	if err != nil {
+		t.Fatalf("Error generating table rows for StorageVersionMigration: %#v", err)
+	}
+	rows[0].Object.Object = nil
+	if !reflect.DeepEqual(expected, rows) {
+		t.Errorf("mismatch: %s", cmp.Diff(expected, rows))
+	}
+}
+
+func TestPrintStorageVersionMigrationList(t *testing.T) {
+	storageVersionMigrationList := storagemigration.StorageVersionMigrationList{
+		Items: []storagemigration.StorageVersionMigration{
+			{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "StorageVersionMigration",
+					APIVersion: "storagemigration.k8s.io/v1alpha1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "print-test",
+				},
+				Spec: storagemigration.StorageVersionMigrationSpec{
+					Resource: storagemigration.GroupVersionResource{
+						Group:    "test-group",
+						Version:  "test-version",
+						Resource: "test-resource",
+					},
+				},
+			},
+			{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "StorageVersionMigration",
+					APIVersion: "storagemigration.k8s.io/v1alpha1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "print-test2",
+				},
+				Spec: storagemigration.StorageVersionMigrationSpec{
+					Resource: storagemigration.GroupVersionResource{
+						Group:    "test-group2",
+						Version:  "test-version2",
+						Resource: "test-resource2",
+					},
+				},
+			},
+		},
+	}
+
+	// Columns: Name, GVRTOMIGRATE
+	expected := []metav1.TableRow{
+		{Cells: []interface{}{"print-test", "test-resource.test-version.test-group"}},
+		{Cells: []interface{}{"print-test2", "test-resource2.test-version2.test-group2"}},
+	}
+
+	rows, err := printStorageVersionMigrationList(&storageVersionMigrationList, printers.GenerateOptions{})
+	if err != nil {
+		t.Fatalf("Error generating table rows for StorageVersionMigration: %#v", err)
+	}
+
+	for i := range rows {
+		rows[i].Object.Object = nil
+	}
+
+	if !reflect.DeepEqual(expected, rows) {
+		t.Errorf("mismatch: %s", cmp.Diff(expected, rows))
 	}
 }

@@ -19,7 +19,6 @@ package testing
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"strings"
@@ -31,10 +30,28 @@ import (
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/cloud-provider/app"
 	"k8s.io/cloud-provider/app/config"
+	"k8s.io/cloud-provider/names"
 	"k8s.io/cloud-provider/options"
 	cliflag "k8s.io/component-base/cli/flag"
+	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/klog/v2"
 )
+
+func init() {
+	// If instantiated more than once or together with other servers, the
+	// servers would try to modify the global logging state. This must get
+	// ignored during testing.
+	logsapi.ReapplyHandling = logsapi.ReapplyHandlingIgnoreUnchanged
+
+	// Because the test server gets started after other goroutines are
+	// running already, we also have to initialize logging here when
+	// those goroutines are not running yet. This works because the
+	// test server uses the default config.
+	config := logsapi.NewLoggingConfiguration()
+	if err := logsapi.ValidateAndApply(config, nil); err != nil {
+		panic(err)
+	}
+}
 
 // TearDownFunc is to be called to tear down a test server.
 type TearDownFunc func()
@@ -55,6 +72,16 @@ type TestServer struct {
 // files that because Golang testing's call to os.Exit will not give a stop channel go routine
 // enough time to remove temporary files.
 func StartTestServer(ctx context.Context, customFlags []string) (result TestServer, err error) {
+	return StartTestServerWithOptions(ctx, customFlags, app.DefaultInitFuncConstructors, names.CCMControllerAliases())
+}
+
+// StartTestServerWithOptions starts a cloud-controller-manager with extra controller loop initializer constructors
+// and controller loop aliaes. Within the returned TestServer, a rest client config, a tear-down func,
+// and location of the tmpdir are returned; or an error if one occurred.
+func StartTestServerWithOptions(ctx context.Context,
+	customFlags []string,
+	constructors map[string]app.ControllerInitFuncConstructor,
+	aliases map[string]string) (result TestServer, err error) {
 	logger := klog.FromContext(ctx)
 	stopCh := make(chan struct{})
 	var errCh chan error
@@ -81,15 +108,17 @@ func StartTestServer(ctx context.Context, customFlags []string) (result TestServ
 		}
 	}()
 
-	result.TmpDir, err = ioutil.TempDir("", "cloud-controller-manager")
+	result.TmpDir, err = os.MkdirTemp("", "cloud-controller-manager")
 	if err != nil {
 		return result, fmt.Errorf("failed to create temp dir: %v", err)
 	}
 
+	// Do not run leader election.
 	s, err := options.NewCloudControllerManagerOptions()
 	if err != nil {
 		return TestServer{}, err
 	}
+	s.Generic.LeaderElection.LeaderElect = false
 
 	cloudInitializer := func(config *config.CompletedConfig) cloudprovider.Interface {
 		capturedConfig = *config
@@ -107,19 +136,27 @@ func StartTestServer(ctx context.Context, customFlags []string) (result TestServ
 		return cloud
 	}
 	fss := cliflag.NamedFlagSets{}
-	command := app.NewCloudControllerManagerCommand(s, cloudInitializer, app.DefaultInitFuncConstructors, fss, stopCh)
+	command := app.NewCloudControllerManagerCommand(s, cloudInitializer, constructors, aliases, fss, stopCh)
 
 	commandArgs := []string{}
 	listeners := []net.Listener{}
 	disableSecure := false
+	webhookServing := false
 	for _, arg := range customFlags {
-		if strings.HasPrefix(arg, "--secure-port=") {
+		// This block collects all custom flags other than secure serving flags,
+		// which are added after creating a listener.
+		if strings.HasPrefix(arg, "--secure-port=") || strings.HasPrefix(arg, "--cert-dir=") {
 			if arg == "--secure-port=0" {
 				commandArgs = append(commandArgs, arg)
 				disableSecure = true
 			}
-		} else if strings.HasPrefix(arg, "--cert-dir=") {
-			// skip it
+		} else if strings.HasPrefix(arg, "--webhook-secure-port=") || strings.HasPrefix(arg, "--webhook-cert-dir=") {
+			if arg == "--webhook-secure-port=0" {
+				commandArgs = append(commandArgs, arg)
+				webhookServing = false
+			} else {
+				webhookServing = true
+			}
 		} else {
 			commandArgs = append(commandArgs, arg)
 		}
@@ -136,6 +173,19 @@ func StartTestServer(ctx context.Context, customFlags []string) (result TestServ
 
 		logger.Info("cloud-controller-manager will listen securely", "port", bindPort)
 	}
+
+	if webhookServing {
+		listener, bindPort, err := createListenerOnFreePort()
+		if err != nil {
+			return result, fmt.Errorf("failed to create listener: %v", err)
+		}
+		listeners = append(listeners, listener)
+		commandArgs = append(commandArgs, fmt.Sprintf("--webhook-secure-port=%d", bindPort))
+		commandArgs = append(commandArgs, fmt.Sprintf("--webhook-cert-dir=%s", result.TmpDir))
+
+		logger.Info("cloud-controller-manager (webhook endpoint) will listen securely", "port", bindPort)
+	}
+
 	for _, listener := range listeners {
 		listener.Close()
 	}

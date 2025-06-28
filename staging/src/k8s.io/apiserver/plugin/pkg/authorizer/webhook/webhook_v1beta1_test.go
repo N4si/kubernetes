@@ -22,7 +22,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -34,17 +34,20 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+
 	authorizationv1beta1 "k8s.io/api/authorization/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/diff"
+	authzconfig "k8s.io/apiserver/pkg/apis/apiserver"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
+	authorizationcel "k8s.io/apiserver/pkg/authorization/cel"
 	webhookutil "k8s.io/apiserver/pkg/util/webhook"
 	v1 "k8s.io/client-go/tools/clientcmd/api/v1"
 )
 
 func TestV1beta1NewFromConfig(t *testing.T) {
-	dir, err := ioutil.TempDir("", "")
+	dir, err := os.MkdirTemp("", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +72,7 @@ func TestV1beta1NewFromConfig(t *testing.T) {
 		{data.Key, clientKey},
 	}
 	for _, file := range files {
-		if err := ioutil.WriteFile(file.name, file.data, 0400); err != nil {
+		if err := os.WriteFile(file.name, file.data, 0400); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -172,7 +175,7 @@ current-context: default
 	for _, tt := range tests {
 		// Use a closure so defer statements trigger between loop iterations.
 		err := func() error {
-			tempfile, err := ioutil.TempFile("", "")
+			tempfile, err := os.CreateTemp("", "")
 			if err != nil {
 				return err
 			}
@@ -195,7 +198,7 @@ current-context: default
 			if err != nil {
 				return fmt.Errorf("error building sar client: %v", err)
 			}
-			_, err = newWithBackoff(sarClient, 0, 0, testRetryBackoff, noopAuthorizerMetrics())
+			_, err = newWithBackoff(sarClient, 0, 0, testRetryBackoff, authorizer.DecisionNoOpinion, []authzconfig.WebhookMatchCondition{}, noopAuthorizerMetrics(), authorizationcel.NewDefaultCompiler(), "")
 			return err
 		}()
 		if err != nil && !tt.wantErr {
@@ -246,7 +249,7 @@ func NewV1beta1TestServer(s V1beta1Service, cert, key, caCert []byte) (*httptest
 		}
 
 		var review authorizationv1beta1.SubjectAccessReview
-		bodyData, _ := ioutil.ReadAll(r.Body)
+		bodyData, _ := io.ReadAll(r.Body)
 		if err := json.Unmarshal(bodyData, &review); err != nil {
 			http.Error(w, fmt.Sprintf("failed to decode body: %v", err), http.StatusBadRequest)
 			return
@@ -309,7 +312,7 @@ func (m *mockV1beta1Service) HTTPStatusCode() int { return m.statusCode }
 // newV1beta1Authorizer creates a temporary kubeconfig file from the provided arguments and attempts to load
 // a new WebhookAuthorizer from it.
 func newV1beta1Authorizer(callbackURL string, clientCert, clientKey, ca []byte, cacheTime time.Duration) (*WebhookAuthorizer, error) {
-	tempfile, err := ioutil.TempFile("", "")
+	tempfile, err := os.CreateTemp("", "")
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +341,7 @@ func newV1beta1Authorizer(callbackURL string, clientCert, clientKey, ca []byte, 
 	if err != nil {
 		return nil, fmt.Errorf("error building sar client: %v", err)
 	}
-	return newWithBackoff(sarClient, cacheTime, cacheTime, testRetryBackoff, noopAuthorizerMetrics())
+	return newWithBackoff(sarClient, cacheTime, cacheTime, testRetryBackoff, authorizer.DecisionNoOpinion, []authzconfig.WebhookMatchCondition{}, noopAuthorizerMetrics(), authorizationcel.NewDefaultCompiler(), "")
 }
 
 func TestV1beta1TLSConfig(t *testing.T) {
@@ -548,7 +551,7 @@ func TestV1beta1Webhook(t *testing.T) {
 			continue
 		}
 		if !reflect.DeepEqual(gotAttr, tt.want) {
-			t.Errorf("case %d: got != want:\n%s", i, diff.ObjectGoPrintDiff(gotAttr, tt.want))
+			t.Errorf("case %d: got != want:\n%s", i, cmp.Diff(gotAttr, tt.want))
 		}
 	}
 }

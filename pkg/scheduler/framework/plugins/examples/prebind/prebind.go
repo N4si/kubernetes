@@ -18,8 +18,10 @@ package prebind
 
 import (
 	"context"
+
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
@@ -38,7 +40,7 @@ func (sr StatelessPreBindExample) Name() string {
 }
 
 // PreBind is the functions invoked by the framework at "prebind" extension point.
-func (sr StatelessPreBindExample) PreBind(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) *framework.Status {
+func (sr StatelessPreBindExample) PreBind(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeName string) *framework.Status {
 	if pod == nil {
 		return framework.NewStatus(framework.Error, "pod cannot be nil")
 	}
@@ -49,6 +51,6 @@ func (sr StatelessPreBindExample) PreBind(ctx context.Context, state *framework.
 }
 
 // New initializes a new plugin and returns it.
-func New(_ *runtime.Unknown, _ framework.Handle) (framework.Plugin, error) {
+func New(_ context.Context, _ *runtime.Unknown, _ framework.Handle) (framework.Plugin, error) {
 	return &StatelessPreBindExample{}, nil
 }

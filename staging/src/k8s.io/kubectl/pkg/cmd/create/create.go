@@ -33,6 +33,7 @@ import (
 	kruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/cli-runtime/pkg/resource"
 	"k8s.io/client-go/dynamic"
@@ -65,7 +66,7 @@ type CreateOptions struct {
 	Recorder genericclioptions.Recorder
 	PrintObj func(obj kruntime.Object) error
 
-	genericclioptions.IOStreams
+	genericiooptions.IOStreams
 }
 
 var (
@@ -86,7 +87,7 @@ var (
 )
 
 // NewCreateOptions returns an initialized CreateOptions instance
-func NewCreateOptions(ioStreams genericclioptions.IOStreams) *CreateOptions {
+func NewCreateOptions(ioStreams genericiooptions.IOStreams) *CreateOptions {
 	return &CreateOptions{
 		PrintFlags:  genericclioptions.NewPrintFlags("created").WithTypeSetter(scheme.Scheme),
 		RecordFlags: genericclioptions.NewRecordFlags(),
@@ -98,7 +99,7 @@ func NewCreateOptions(ioStreams genericclioptions.IOStreams) *CreateOptions {
 }
 
 // NewCmdCreate returns new initialized instance of create sub command
-func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobra.Command {
+func NewCmdCreate(f cmdutil.Factory, ioStreams genericiooptions.IOStreams) *cobra.Command {
 	o := NewCreateOptions(ioStreams)
 
 	cmd := &cobra.Command{
@@ -108,12 +109,6 @@ func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cob
 		Long:                  createLong,
 		Example:               createExample,
 		Run: func(cmd *cobra.Command, args []string) {
-			if cmdutil.IsFilenameSliceEmpty(o.FilenameOptions.Filenames, o.FilenameOptions.Kustomize) {
-				ioStreams.ErrOut.Write([]byte("Error: must specify one of -f and -k\n\n"))
-				defaultRunFunc := cmdutil.DefaultSubCommandRun(ioStreams.ErrOut)
-				defaultRunFunc(cmd, args)
-				return
-			}
 			cmdutil.CheckErr(o.Complete(f, cmd, args))
 			cmdutil.CheckErr(o.Validate())
 			cmdutil.CheckErr(o.RunCreate(f, cmd))
@@ -158,8 +153,12 @@ func NewCmdCreate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cob
 	return cmd
 }
 
-// Validate makes sure there is no discrepency in command options
+// Validate makes sure there is no discrepancy in command options
 func (o *CreateOptions) Validate() error {
+	if err := o.FilenameOptions.RequireFilenameOrKustomize(); err != nil {
+		return err
+	}
+
 	if len(o.Raw) > 0 {
 		if o.EditBeforeCreate {
 			return fmt.Errorf("--raw and --edit are mutually exclusive")
@@ -302,7 +301,7 @@ func (o *CreateOptions) RunCreate(f cmdutil.Factory, cmd *cobra.Command) error {
 }
 
 // RunEditOnCreate performs edit on creation
-func RunEditOnCreate(f cmdutil.Factory, printFlags *genericclioptions.PrintFlags, recordFlags *genericclioptions.RecordFlags, ioStreams genericclioptions.IOStreams, cmd *cobra.Command, options *resource.FilenameOptions, fieldManager string) error {
+func RunEditOnCreate(f cmdutil.Factory, printFlags *genericclioptions.PrintFlags, recordFlags *genericclioptions.RecordFlags, ioStreams genericiooptions.IOStreams, cmd *cobra.Command, options *resource.FilenameOptions, fieldManager string) error {
 	editOptions := editor.NewEditOptions(editor.EditBeforeCreateMode, ioStreams)
 	editOptions.FilenameOptions = *options
 	validationDirective, err := cmdutil.GetValidationDirective(cmd)
@@ -358,11 +357,11 @@ type CreateSubcommandOptions struct {
 
 	PrintObj printers.ResourcePrinterFunc
 
-	genericclioptions.IOStreams
+	genericiooptions.IOStreams
 }
 
 // NewCreateSubcommandOptions returns initialized CreateSubcommandOptions
-func NewCreateSubcommandOptions(ioStreams genericclioptions.IOStreams) *CreateSubcommandOptions {
+func NewCreateSubcommandOptions(ioStreams genericiooptions.IOStreams) *CreateSubcommandOptions {
 	return &CreateSubcommandOptions{
 		PrintFlags: genericclioptions.NewPrintFlags("created").WithTypeSetter(scheme.Scheme),
 		IOStreams:  ioStreams,

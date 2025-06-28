@@ -22,8 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/onsi/ginkgo/v2"
-
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -32,18 +30,21 @@ import (
 	e2epodoutput "k8s.io/kubernetes/test/e2e/framework/pod/output"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 	admissionapi "k8s.io/pod-security-admission/api"
+
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
 var _ = SIGDescribe("Secrets", func() {
 	f := framework.NewDefaultFramework("secrets")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelBaseline
+	f.NamespacePodSecurityLevel = admissionapi.LevelBaseline
 
 	/*
 		Release: v1.9
 		Testname: Secrets, pod environment field
 		Description: Create a secret. Create a Pod with Container that declares a environment variable which references the secret created to extract a key value from the secret. Pod MUST have the environment variable that contains proper value for the key to the secret.
 	*/
-	framework.ConformanceIt("should be consumable from pods in env vars [NodeConformance]", func(ctx context.Context) {
+	framework.ConformanceIt("should be consumable from pods in env vars", f.WithNodeConformance(), func(ctx context.Context) {
 		name := "secret-test-" + string(uuid.NewUUID())
 		secret := secretForTest(f.Namespace.Name, name)
 
@@ -92,7 +93,7 @@ var _ = SIGDescribe("Secrets", func() {
 		Testname: Secrets, pod environment from source
 		Description: Create a secret. Create a Pod with Container that declares a environment variable using 'EnvFrom' which references the secret created to extract a key value from the secret. Pod MUST have the environment variable that contains proper value for the key to the secret.
 	*/
-	framework.ConformanceIt("should be consumable via the environment [NodeConformance]", func(ctx context.Context) {
+	framework.ConformanceIt("should be consumable via the environment", f.WithNodeConformance(), func(ctx context.Context) {
 		name := "secret-test-" + string(uuid.NewUUID())
 		secret := secretForTest(f.Namespace.Name, name)
 		ginkgo.By(fmt.Sprintf("creating secret %v/%v", f.Namespace.Name, secret.Name))
@@ -139,7 +140,7 @@ var _ = SIGDescribe("Secrets", func() {
 	*/
 	framework.ConformanceIt("should fail to create secret due to empty secret key", func(ctx context.Context) {
 		secret, err := createEmptyKeySecretForTest(ctx, f)
-		framework.ExpectError(err, "created secret %q with empty key in namespace %q", secret.Name, f.Namespace.Name)
+		gomega.Expect(err).To(gomega.HaveOccurred(), "created secret %q with empty key in namespace %q", secret.Name, f.Namespace.Name)
 	})
 
 	/*
@@ -177,7 +178,7 @@ var _ = SIGDescribe("Secrets", func() {
 			LabelSelector: "testsecret-constant=true",
 		})
 		framework.ExpectNoError(err, "failed to list secrets")
-		framework.ExpectNotEqual(len(secretsList.Items), 0, "no secrets found")
+		gomega.Expect(secretsList.Items).ToNot(gomega.BeEmpty(), "no secrets found")
 
 		foundCreatedSecret := false
 		var secretCreatedName string
@@ -211,7 +212,7 @@ var _ = SIGDescribe("Secrets", func() {
 		secretDecodedstring, err := base64.StdEncoding.DecodeString(string(secret.Data["key"]))
 		framework.ExpectNoError(err, "failed to decode secret from Base64")
 
-		framework.ExpectEqual(string(secretDecodedstring), "value1", "found secret, but the data wasn't updated from the patch")
+		gomega.Expect(string(secretDecodedstring)).To(gomega.Equal("value1"), "found secret, but the data wasn't updated from the patch")
 
 		ginkgo.By("deleting the secret using a LabelSelector")
 		err = f.ClientSet.CoreV1().Secrets(f.Namespace.Name).DeleteCollection(ctx, metav1.DeleteOptions{}, metav1.ListOptions{
@@ -236,6 +237,79 @@ var _ = SIGDescribe("Secrets", func() {
 		if foundCreatedSecret {
 			framework.Failf("secret %s/%s was not deleted successfully", f.Namespace.Name, secretTestName)
 		}
+	})
+
+	/*
+		Release: v1.34
+		Testname: Secrets, pod environment from source
+		Description: Create a Pod with environment variable values set using values from Secret.
+		Allows users to use envFrom to set prefixes with various printable ASCII characters excluding '=' as environment variable names.
+		This test verifies that different prefixes including digits, special characters, and letters can be correctly used.
+	*/
+	framework.It("should be consumable as environment variable names when secret keys start with a digit", func(ctx context.Context) {
+		name := "secret-test-" + string(uuid.NewUUID())
+		secret := secretForTest(f.Namespace.Name, name)
+
+		ginkgo.By(fmt.Sprintf("creating secret %v/%v", f.Namespace.Name, secret.Name))
+		var err error
+		if secret, err = f.ClientSet.CoreV1().Secrets(f.Namespace.Name).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+			framework.Failf("unable to create test secret %s: %v", secret.Name, err)
+		}
+
+		pod := &v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "pod-secret-" + string(uuid.NewUUID()),
+			},
+			Spec: v1.PodSpec{
+				Containers: []v1.Container{
+					{
+						Name:    "env-test",
+						Image:   imageutils.GetE2EImage(imageutils.BusyBox),
+						Command: []string{"sh", "-c", "env"},
+						EnvFrom: []v1.EnvFromSource{
+							{
+								// No prefix
+								SecretRef: &v1.SecretEnvSource{LocalObjectReference: v1.LocalObjectReference{Name: name}},
+							},
+							{
+								// Prefix starting with a digit
+								Prefix:    "1-",
+								SecretRef: &v1.SecretEnvSource{LocalObjectReference: v1.LocalObjectReference{Name: name}},
+							},
+							{
+								// Prefix with special characters
+								Prefix:    "$_-",
+								SecretRef: &v1.SecretEnvSource{LocalObjectReference: v1.LocalObjectReference{Name: name}},
+							},
+							{
+								// Prefix with uppercase letters
+								Prefix:    "ABC_",
+								SecretRef: &v1.SecretEnvSource{LocalObjectReference: v1.LocalObjectReference{Name: name}},
+							},
+							{
+								// Prefix with symbols
+								Prefix:    "#@!",
+								SecretRef: &v1.SecretEnvSource{LocalObjectReference: v1.LocalObjectReference{Name: name}},
+							},
+						},
+					},
+				},
+				RestartPolicy: v1.RestartPolicyNever,
+			},
+		}
+
+		e2epodoutput.TestContainerOutput(ctx, f, "consume secrets", pod, 0, []string{
+			// Original values without prefix
+			"data-1=value-1", "data-2=value-2", "data-3=value-3",
+			// Values with digit prefix
+			"1-data-1=value-1", "1-data-2=value-2", "1-data-3=value-3",
+			// Values with special character prefix
+			"$_-data-1=value-1", "$_-data-2=value-2", "$_-data-3=value-3",
+			// Values with uppercase letter prefix
+			"ABC_data-1=value-1", "ABC_data-2=value-2", "ABC_data-3=value-3",
+			// Values with symbol prefix
+			"#@!data-1=value-1", "#@!data-2=value-2", "#@!data-3=value-3",
+		})
 	})
 })
 

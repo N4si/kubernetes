@@ -18,7 +18,6 @@ package etcd
 
 import (
 	"context"
-	"encoding/json"
 	"net"
 	"net/http"
 	"os"
@@ -36,17 +35,24 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/wait"
 	genericapiserveroptions "k8s.io/apiserver/pkg/server/options"
+	"k8s.io/apiserver/pkg/util/compatibility"
+	"k8s.io/apiserver/pkg/util/feature"
 	cacheddiscovery "k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	clientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
+	utiltesting "k8s.io/client-go/util/testing"
+	basecompatibility "k8s.io/component-base/compatibility"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/kubernetes/cmd/kube-apiserver/app"
 	"k8s.io/kubernetes/cmd/kube-apiserver/app/options"
 	"k8s.io/kubernetes/test/integration"
 	"k8s.io/kubernetes/test/integration/framework"
+	"k8s.io/kubernetes/test/utils/ktesting"
 	netutils "k8s.io/utils/net"
 
 	// install all APIs
@@ -62,7 +68,10 @@ AwEHoUQDQgAEH6cuzP8XuD5wal6wf9M6xDljTOPLX2i8uIp/C/ASqiIGUeeKQtX0
 
 // StartRealAPIServerOrDie starts an API server that is appropriate for use in tests that require one of every resource
 func StartRealAPIServerOrDie(t *testing.T, configFuncs ...func(*options.ServerRunOptions)) *APIServer {
-	certDir, err := os.MkdirTemp("", t.Name())
+	tCtx := ktesting.Init(t)
+
+	// Strip out "/" in subtests
+	certDir, err := os.MkdirTemp("", strings.ReplaceAll(t.Name(), "/", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,28 +90,52 @@ func StartRealAPIServerOrDie(t *testing.T, configFuncs ...func(*options.ServerRu
 	if err != nil {
 		t.Fatalf("create temp file failed: %v", err)
 	}
-	defer os.RemoveAll(saSigningKeyFile.Name())
+	defer utiltesting.CloseAndRemove(t, saSigningKeyFile)
 	if err = os.WriteFile(saSigningKeyFile.Name(), []byte(ecdsaPrivateKey), 0666); err != nil {
 		t.Fatalf("write file %s failed: %v", saSigningKeyFile.Name(), err)
 	}
 
-	kubeAPIServerOptions := options.NewServerRunOptions()
-	kubeAPIServerOptions.SecureServing.Listener = listener
-	kubeAPIServerOptions.SecureServing.ServerCert.CertDirectory = certDir
-	kubeAPIServerOptions.ServiceAccountSigningKeyFile = saSigningKeyFile.Name()
-	kubeAPIServerOptions.Etcd.StorageConfig.Transport.ServerList = []string{framework.GetEtcdURL()}
-	kubeAPIServerOptions.Etcd.DefaultStorageMediaType = runtime.ContentTypeJSON // force json we can easily interpret the result in etcd
-	kubeAPIServerOptions.ServiceClusterIPRanges = defaultServiceClusterIPRange.String()
-	kubeAPIServerOptions.Authentication.APIAudiences = []string{"https://foo.bar.example.com"}
-	kubeAPIServerOptions.Authentication.ServiceAccounts.Issuers = []string{"https://foo.bar.example.com"}
-	kubeAPIServerOptions.Authentication.ServiceAccounts.KeyFiles = []string{saSigningKeyFile.Name()}
-	kubeAPIServerOptions.Authorization.Modes = []string{"RBAC"}
-	kubeAPIServerOptions.Admission.GenericAdmission.DisablePlugins = []string{"ServiceAccount"}
-	kubeAPIServerOptions.APIEnablement.RuntimeConfig["api/all"] = "true"
-	for _, f := range configFuncs {
-		f(kubeAPIServerOptions)
+	opts := options.NewServerRunOptions()
+	// If EmulationVersion of DefaultFeatureGate is set during test, we need to propagate it to the apiserver ComponentGlobalsRegistry.
+	featureGate := feature.DefaultMutableFeatureGate.DeepCopy()
+	effectiveVersion := compatibility.DefaultKubeEffectiveVersionForTest()
+	effectiveVersion.SetEmulationVersion(featureGate.EmulationVersion())
+	// set up new instance of ComponentGlobalsRegistry instead of using the DefaultComponentGlobalsRegistry to avoid contention in parallel tests.
+	componentGlobalsRegistry := basecompatibility.NewComponentGlobalsRegistry()
+	if err := componentGlobalsRegistry.Register(basecompatibility.DefaultKubeComponent, effectiveVersion, featureGate); err != nil {
+		t.Fatal(err)
 	}
-	completedOptions, err := app.Complete(kubeAPIServerOptions)
+	opts.GenericServerRunOptions.ComponentGlobalsRegistry = componentGlobalsRegistry
+
+	opts.Options.SecureServing.Listener = listener
+	opts.Options.SecureServing.ServerCert.CertDirectory = certDir
+	opts.Options.ServiceAccountSigningKeyFile = saSigningKeyFile.Name()
+	opts.Options.Etcd.StorageConfig.Transport.ServerList = []string{framework.GetEtcdURL()}
+	opts.Options.Etcd.DefaultStorageMediaType = runtime.ContentTypeJSON // force json we can easily interpret the result in etcd
+	opts.ServiceClusterIPRanges = defaultServiceClusterIPRange.String()
+	opts.Options.Authentication.APIAudiences = []string{"https://foo.bar.example.com"}
+	opts.Options.Authentication.ServiceAccounts.Issuers = []string{"https://foo.bar.example.com"}
+	opts.Options.Authentication.ServiceAccounts.KeyFiles = []string{saSigningKeyFile.Name()}
+	opts.Options.Authorization.Modes = []string{"RBAC"}
+	opts.Options.Admission.GenericAdmission.DisablePlugins = []string{"ServiceAccount"}
+	opts.Options.APIEnablement.RuntimeConfig["api/all"] = "true"
+	for _, f := range configFuncs {
+		f(opts)
+	}
+
+	// If the local ComponentGlobalsRegistry is changed by configFuncs,
+	// we need to copy the new feature values back to the DefaultFeatureGate because most feature checks still use the DefaultFeatureGate.
+	if !featureGate.EmulationVersion().EqualTo(feature.DefaultMutableFeatureGate.EmulationVersion()) {
+		featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, feature.DefaultMutableFeatureGate, effectiveVersion.EmulationVersion())
+	}
+	for f := range feature.DefaultMutableFeatureGate.GetAll() {
+		if featureGate.Enabled(f) != feature.DefaultFeatureGate.Enabled(f) {
+			featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, f, featureGate.Enabled(f))
+		}
+	}
+	feature.DefaultMutableFeatureGate.AddMetrics()
+
+	completedOptions, err := opts.Complete(tCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +155,15 @@ func StartRealAPIServerOrDie(t *testing.T, configFuncs ...func(*options.ServerRu
 		t.Fatal(err)
 	}
 
-	kubeAPIServer, err := app.CreateServerChain(completedOptions)
+	config, err := app.NewConfig(completedOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := config.Complete()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kubeAPIServer, err := app.CreateServerChain(completed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +179,6 @@ func StartRealAPIServerOrDie(t *testing.T, configFuncs ...func(*options.ServerRu
 
 	kubeClient := clientset.NewForConfigOrDie(kubeClientConfig)
 
-	stopCh := make(chan struct{})
 	errCh := make(chan error)
 	go func() {
 		// Catch panics that occur in this go routine so we get a comprehensible failure
@@ -154,7 +194,7 @@ func StartRealAPIServerOrDie(t *testing.T, configFuncs ...func(*options.ServerRu
 			errCh <- err
 			return
 		}
-		if err := prepared.Run(stopCh); err != nil {
+		if err := prepared.Run(tCtx); err != nil {
 			errCh <- err
 			t.Error(err)
 			return
@@ -205,9 +245,9 @@ func StartRealAPIServerOrDie(t *testing.T, configFuncs ...func(*options.ServerRu
 	}
 
 	cleanup := func() {
-		// Closing stopCh is stopping apiserver and cleaning up
+		// Cancel stopping apiserver and cleaning up
 		// after itself, including shutting down its storage layer.
-		close(stopCh)
+		tCtx.Cancel("cleaning up")
 
 		// If the apiserver was started, let's wait for it to
 		// shutdown clearly.

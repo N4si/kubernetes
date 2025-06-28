@@ -18,7 +18,9 @@ package cronjob
 
 import (
 	"context"
+	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -30,16 +32,16 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/klog/v2/ktesting"
+	"k8s.io/utils/pointer"
+
 	_ "k8s.io/kubernetes/pkg/apis/batch/install"
 	_ "k8s.io/kubernetes/pkg/apis/core/install"
 	"k8s.io/kubernetes/pkg/controller"
-	"k8s.io/kubernetes/pkg/features"
 )
 
 var (
@@ -185,11 +187,12 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 
 	testCases := map[string]struct {
 		// cj spec
-		concurrencyPolicy batchv1.ConcurrencyPolicy
-		suspend           bool
-		schedule          string
-		timeZone          *string
-		deadline          int64
+		concurrencyPolicy          batchv1.ConcurrencyPolicy
+		suspend                    bool
+		schedule                   string
+		timeZone                   *string
+		deadline                   int64
+		successfulJobsHistoryLimit *int32
 
 		// cj status
 		ranPreviously bool
@@ -202,11 +205,11 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 		now                 time.Time
 		jobCreateError      error
 		jobGetErr           error
-		enableTimeZone      bool
 
 		// expectations
 		expectCreate               bool
 		expectDelete               bool
+		expectCompleted            bool
 		expectActive               int
 		expectedWarnings           int
 		expectErr                  bool
@@ -250,7 +253,6 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			deadline:                   noDead,
 			jobCreationTime:            justAfterThePriorHour(),
 			now:                        justBeforeTheHour(),
-			enableTimeZone:             true,
 			expectedWarnings:           1,
 			jobPresentInCJActiveStatus: true,
 		},
@@ -290,7 +292,6 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			deadline:                   noDead,
 			jobCreationTime:            justAfterThePriorHour(),
 			now:                        justBeforeTheHour(),
-			enableTimeZone:             true,
 			expectRequeueAfter:         true,
 			expectedRequeueDuration:    1*time.Minute + nextScheduleDelta,
 			jobPresentInCJActiveStatus: true,
@@ -341,7 +342,6 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			deadline:                   noDead,
 			jobCreationTime:            justAfterThePriorHour(),
 			now:                        justAfterTheHourInZone(newYork),
-			enableTimeZone:             false,
 			expectCreate:               true,
 			expectActive:               1,
 			expectRequeueAfter:         true,
@@ -356,7 +356,6 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			deadline:                   noDead,
 			jobCreationTime:            justAfterThePriorHour(),
 			now:                        justAfterTheHourInZone(newYork),
-			enableTimeZone:             true,
 			expectCreate:               true,
 			expectActive:               1,
 			expectRequeueAfter:         true,
@@ -371,7 +370,6 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			deadline:                   noDead,
 			jobCreationTime:            justAfterThePriorHour(),
 			now:                        justAfterTheHourInZone(newYork),
-			enableTimeZone:             true,
 			expectCreate:               true,
 			expectedWarnings:           1,
 			expectRequeueAfter:         true,
@@ -423,6 +421,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Minute + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, not time, F": {
 			concurrencyPolicy:          "Forbid",
@@ -435,6 +434,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Minute + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, not time, R": {
 			concurrencyPolicy:          "Replace",
@@ -447,6 +447,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Minute + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, is time, A": {
 			concurrencyPolicy:          "Allow",
@@ -461,6 +462,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour - 1*time.Minute + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, is time, create job failed, A": {
 			concurrencyPolicy:          "Allow",
@@ -470,9 +472,22 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			jobCreationTime:            justAfterThePriorHour(),
 			now:                        *justAfterTheHour(),
 			jobCreateError:             errors.NewAlreadyExists(schema.GroupResource{Resource: "job", Group: "batch"}, ""),
-			expectErr:                  true,
+			expectErr:                  false,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
+		},
+		"prev ran but done, is time, job not present in CJ active status, create job failed, A": {
+			concurrencyPolicy:          "Allow",
+			schedule:                   onTheHour,
+			deadline:                   noDead,
+			ranPreviously:              true,
+			jobCreationTime:            justAfterThePriorHour(),
+			now:                        *justAfterTheHour(),
+			jobCreateError:             errors.NewAlreadyExists(schema.GroupResource{Resource: "job", Group: "batch"}, ""),
+			expectErr:                  false,
+			expectUpdateStatus:         true,
+			jobPresentInCJActiveStatus: false,
 		},
 		"prev ran but done, is time, F": {
 			concurrencyPolicy:          "Forbid",
@@ -487,6 +502,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour - 1*time.Minute + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, is time, R": {
 			concurrencyPolicy:          "Replace",
@@ -501,6 +517,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour - 1*time.Minute + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, is time, suspended": {
 			concurrencyPolicy:          "Allow",
@@ -512,6 +529,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			now:                        *justAfterTheHour(),
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, is time, past deadline": {
 			concurrencyPolicy:          "Allow",
@@ -524,6 +542,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour - 1*time.Minute + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, is time, not past deadline": {
 			concurrencyPolicy:          "Allow",
@@ -538,6 +557,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour - 1*time.Minute + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 
 		"still active, not time, A": {
@@ -693,6 +713,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, long overdue, not past deadline, R": {
 			concurrencyPolicy:          "Replace",
@@ -708,6 +729,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, long overdue, not past deadline, F": {
 			concurrencyPolicy:          "Forbid",
@@ -723,6 +745,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, long overdue, no deadline, A": {
 			concurrencyPolicy:          "Allow",
@@ -738,6 +761,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, long overdue, no deadline, R": {
 			concurrencyPolicy:          "Replace",
@@ -753,6 +777,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, long overdue, no deadline, F": {
 			concurrencyPolicy:          "Forbid",
@@ -768,6 +793,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 
 		"prev ran but done, long overdue, past medium deadline, A": {
@@ -783,6 +809,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, long overdue, past short deadline, A": {
 			concurrencyPolicy:          "Allow",
@@ -797,6 +824,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 
 		"prev ran but done, long overdue, past medium deadline, R": {
@@ -812,6 +840,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, long overdue, past short deadline, R": {
 			concurrencyPolicy:          "Replace",
@@ -826,6 +855,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 
 		"prev ran but done, long overdue, past medium deadline, F": {
@@ -841,6 +871,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"prev ran but done, long overdue, past short deadline, F": {
 			concurrencyPolicy:          "Forbid",
@@ -855,6 +886,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 
 		// Tests for time skews
@@ -1018,6 +1050,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour - 1*time.Minute + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"with @every schedule, prev ran but done, is time": {
 			concurrencyPolicy:          "Allow",
@@ -1034,6 +1067,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour - 1*time.Minute + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"with @every schedule, prev ran but done, is time, past deadline": {
 			concurrencyPolicy:          "Allow",
@@ -1048,6 +1082,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour - time.Second*time.Duration(shortDead+1) + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		// This test will fail: the logic around StartingDeadlineSecond in getNextScheduleTime messes up
 		// the time that calculating schedule.Next(earliestTime) is based on. While this works perfectly
@@ -1149,6 +1184,7 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Minute + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
 		},
 		"with @every schedule, prev ran but done, long overdue, past deadline": {
 			concurrencyPolicy:          "Allow",
@@ -1164,6 +1200,50 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			expectedRequeueDuration:    1*time.Hour - time.Second*time.Duration(shortDead+1) + nextScheduleDelta,
 			expectUpdateStatus:         true,
 			jobPresentInCJActiveStatus: true,
+			expectCompleted:            true,
+		},
+		"do nothing if the namespace is terminating": {
+			jobCreateError: &errors.StatusError{ErrStatus: metav1.Status{Details: &metav1.StatusDetails{Causes: []metav1.StatusCause{
+				{
+					Type:    v1.NamespaceTerminatingCause,
+					Message: fmt.Sprintf("namespace %s is being terminated", metav1.NamespaceDefault),
+					Field:   "metadata.namespace",
+				}}}}},
+			concurrencyPolicy:          "Allow",
+			schedule:                   onTheHour,
+			deadline:                   noDead,
+			ranPreviously:              true,
+			stillActive:                true,
+			jobCreationTime:            justAfterThePriorHour(),
+			now:                        *justAfterTheHour(),
+			expectActive:               0,
+			expectRequeueAfter:         false,
+			expectUpdateStatus:         false,
+			expectErr:                  true,
+			jobPresentInCJActiveStatus: false,
+		},
+		"set lastsuccessfultime if successfulJobHistoryLimit is zero": {
+			successfulJobsHistoryLimit: pointer.Int32(0),
+			ranPreviously:              true,
+			schedule:                   onTheHour,
+			expectUpdateStatus:         true,
+			expectCompleted:            true,
+			jobPresentInCJActiveStatus: true,
+		},
+		"set lastsuccessfultime if successfulJobHistoryLimit is ten": {
+			successfulJobsHistoryLimit: pointer.Int32(10),
+			ranPreviously:              true,
+			schedule:                   onTheHour,
+			expectUpdateStatus:         true,
+			expectCompleted:            true,
+			jobPresentInCJActiveStatus: true,
+		},
+		"set lastsuccessfultime if successfulJobHistoryLimit is nil": {
+			ranPreviously:              true,
+			schedule:                   onTheHour,
+			expectUpdateStatus:         true,
+			expectCompleted:            true,
+			jobPresentInCJActiveStatus: true,
 		},
 	}
 	for name, tc := range testCases {
@@ -1171,13 +1251,12 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 		tc := tc
 
 		t.Run(name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, feature.DefaultFeatureGate, features.CronJobTimeZone, tc.enableTimeZone)()
-
 			cj := cronJob()
 			cj.Spec.ConcurrencyPolicy = tc.concurrencyPolicy
 			cj.Spec.Suspend = &tc.suspend
 			cj.Spec.Schedule = tc.schedule
 			cj.Spec.TimeZone = tc.timeZone
+			cj.Spec.SuccessfulJobsHistoryLimit = tc.successfulJobsHistoryLimit
 			if tc.deadline != noDead {
 				cj.Spec.StartingDeadlineSeconds = &tc.deadline
 			}
@@ -1203,14 +1282,16 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 				}
 				job.UID = "1234"
 				job.Namespace = cj.Namespace
+
+				ref, err := getRef(job)
+				if err != nil {
+					t.Fatalf("%s: unexpected error getting the job object reference: %v", name, err)
+				}
+				if tc.jobPresentInCJActiveStatus {
+					cj.Status.Active = []v1.ObjectReference{*ref}
+				}
+
 				if tc.stillActive {
-					ref, err := getRef(job)
-					if err != nil {
-						t.Fatalf("%s: unexpected error getting the job object reference: %v", name, err)
-					}
-					if tc.jobPresentInCJActiveStatus {
-						cj.Status.Active = []v1.ObjectReference{*ref}
-					}
 					realCJ.Status.Active = []v1.ObjectReference{*ref}
 					if !tc.jobStillNotFoundInLister {
 						js = append(js, job)
@@ -1247,7 +1328,8 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 					return tc.now
 				},
 			}
-			cjCopy, requeueAfter, updateStatus, err := jm.syncCronJob(context.TODO(), &cj, js)
+			cjCopy := cj.DeepCopy()
+			requeueAfter, updateStatus, err := jm.syncCronJob(context.TODO(), cjCopy, js)
 			if tc.expectErr && err == nil {
 				t.Errorf("%s: expected error got none with requeueAfter time: %#v", name, requeueAfter)
 			}
@@ -1314,6 +1396,9 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 			if tc.expectDelete {
 				expectedEvents++
 			}
+			if tc.expectCompleted {
+				expectedEvents++
+			}
 			if name == "still active, is time, F" {
 				// this is the only test case where we would raise an event for not scheduling
 				expectedEvents++
@@ -1348,12 +1433,12 @@ func TestControllerV2SyncCronJob(t *testing.T) {
 }
 
 type fakeQueue struct {
-	workqueue.RateLimitingInterface
+	workqueue.TypedRateLimitingInterface[string]
 	delay time.Duration
 	key   interface{}
 }
 
-func (f *fakeQueue) AddAfter(key interface{}, delay time.Duration) {
+func (f *fakeQueue) AddAfter(key string, delay time.Duration) {
 	f.delay = delay
 	f.key = key
 }
@@ -1555,21 +1640,29 @@ func TestControllerV2UpdateCronJob(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			logger, ctx := ktesting.NewTestContext(t)
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
 			kubeClient := fake.NewSimpleClientset()
 			sharedInformers := informers.NewSharedInformerFactory(kubeClient, controller.NoResyncPeriodFunc())
-			jm, err := NewControllerV2(sharedInformers.Batch().V1().Jobs(), sharedInformers.Batch().V1().CronJobs(), kubeClient)
+			jm, err := NewControllerV2(ctx, sharedInformers.Batch().V1().Jobs(), sharedInformers.Batch().V1().CronJobs(), kubeClient)
 			if err != nil {
 				t.Errorf("unexpected error %v", err)
 				return
 			}
 			jm.now = justASecondBeforeTheHour
-			queue := &fakeQueue{RateLimitingInterface: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "test-update-cronjob")}
+			queue := &fakeQueue{TypedRateLimitingInterface: workqueue.NewTypedRateLimitingQueueWithConfig(
+				workqueue.DefaultTypedControllerRateLimiter[string](),
+				workqueue.TypedRateLimitingQueueConfig[string]{
+					Name: "test-update-cronjob",
+				},
+			)}
 			jm.queue = queue
 			jm.jobControl = &fakeJobControl{}
 			jm.cronJobControl = &fakeCJControl{}
 			jm.recorder = record.NewFakeRecorder(10)
 
-			jm.updateCronJob(tt.oldCronJob, tt.newCronJob)
+			jm.updateCronJob(logger, tt.oldCronJob, tt.newCronJob)
 			if queue.delay.Seconds() != tt.expectedDelay.Seconds() {
 				t.Errorf("Expected delay %#v got %#v", tt.expectedDelay.Seconds(), queue.delay.Seconds())
 			}
@@ -1652,12 +1745,15 @@ func TestControllerV2GetJobsToBeReconciled(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			_, ctx := ktesting.NewTestContext(t)
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
 			kubeClient := fake.NewSimpleClientset()
 			sharedInformers := informers.NewSharedInformerFactory(kubeClient, controller.NoResyncPeriodFunc())
 			for _, job := range tt.jobs {
 				sharedInformers.Batch().V1().Jobs().Informer().GetIndexer().Add(job)
 			}
-			jm, err := NewControllerV2(sharedInformers.Batch().V1().Jobs(), sharedInformers.Batch().V1().CronJobs(), kubeClient)
+			jm, err := NewControllerV2(ctx, sharedInformers.Batch().V1().Jobs(), sharedInformers.Batch().V1().CronJobs(), kubeClient)
 			if err != nil {
 				t.Errorf("unexpected error %v", err)
 				return
@@ -1672,5 +1768,222 @@ func TestControllerV2GetJobsToBeReconciled(t *testing.T) {
 				t.Errorf("\nExpected %#v,\nbut got %#v", tt.expected, actual)
 			}
 		})
+	}
+}
+
+func TestControllerV2CleanupFinishedJobs(t *testing.T) {
+	tests := []struct {
+		name                string
+		now                 time.Time
+		cronJob             *batchv1.CronJob
+		finishedJobs        []*batchv1.Job
+		jobCreateError      error
+		expectedDeletedJobs []string
+	}{
+		{
+			name: "jobs are still deleted when a cronjob can't create jobs due to jobs quota being reached (avoiding a deadlock)",
+			now:  *justAfterTheHour(),
+			cronJob: &batchv1.CronJob{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "foo-ns", Name: "fooer"},
+				Spec: batchv1.CronJobSpec{
+					Schedule:                   onTheHour,
+					SuccessfulJobsHistoryLimit: pointer.Int32(1),
+					JobTemplate: batchv1.JobTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"key": "value"}},
+					},
+				},
+				Status: batchv1.CronJobStatus{LastScheduleTime: &metav1.Time{Time: justAfterThePriorHour()}},
+			},
+			finishedJobs: []*batchv1.Job{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:       "foo-ns",
+						Name:            "finished-job-started-hour-ago",
+						OwnerReferences: []metav1.OwnerReference{{Name: "fooer", Controller: pointer.Bool(true)}},
+					},
+					Status: batchv1.JobStatus{StartTime: &metav1.Time{Time: justBeforeThePriorHour()}},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:       "foo-ns",
+						Name:            "finished-job-started-minute-ago",
+						OwnerReferences: []metav1.OwnerReference{{Name: "fooer", Controller: pointer.Bool(true)}},
+					},
+					Status: batchv1.JobStatus{StartTime: &metav1.Time{Time: justBeforeTheHour()}},
+				},
+			},
+			jobCreateError:      errors.NewInternalError(fmt.Errorf("quota for # of jobs reached")),
+			expectedDeletedJobs: []string{"finished-job-started-hour-ago"},
+		},
+		{
+			name: "jobs are not deleted if history limit not reached",
+			now:  justBeforeTheHour(),
+			cronJob: &batchv1.CronJob{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "foo-ns", Name: "fooer"},
+				Spec: batchv1.CronJobSpec{
+					Schedule:                   onTheHour,
+					SuccessfulJobsHistoryLimit: pointer.Int32(2),
+					JobTemplate: batchv1.JobTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"key": "value"}},
+					},
+				},
+				Status: batchv1.CronJobStatus{LastScheduleTime: &metav1.Time{Time: justAfterThePriorHour()}},
+			},
+			finishedJobs: []*batchv1.Job{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:       "foo-ns",
+						Name:            "finished-job-started-hour-ago",
+						OwnerReferences: []metav1.OwnerReference{{Name: "fooer", Controller: pointer.Bool(true)}},
+					},
+					Status: batchv1.JobStatus{StartTime: &metav1.Time{Time: justBeforeThePriorHour()}},
+				},
+			},
+			jobCreateError:      nil,
+			expectedDeletedJobs: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, ctx := ktesting.NewTestContext(t)
+
+			for _, job := range tt.finishedJobs {
+				job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: v1.ConditionTrue}}
+			}
+
+			client := fake.NewSimpleClientset()
+
+			informerFactory := informers.NewSharedInformerFactory(client, controller.NoResyncPeriodFunc())
+			_ = informerFactory.Batch().V1().CronJobs().Informer().GetIndexer().Add(tt.cronJob)
+			for _, job := range tt.finishedJobs {
+				_ = informerFactory.Batch().V1().Jobs().Informer().GetIndexer().Add(job)
+			}
+
+			jm, err := NewControllerV2(ctx, informerFactory.Batch().V1().Jobs(), informerFactory.Batch().V1().CronJobs(), client)
+			if err != nil {
+				t.Errorf("unexpected error %v", err)
+				return
+			}
+			jobControl := &fakeJobControl{CreateErr: tt.jobCreateError}
+			jm.jobControl = jobControl
+			jm.now = func() time.Time {
+				return tt.now
+			}
+
+			jm.enqueueController(tt.cronJob)
+			jm.processNextWorkItem(ctx)
+
+			if len(tt.expectedDeletedJobs) != len(jobControl.DeleteJobName) {
+				t.Fatalf("expected '%v' jobs to be deleted, instead deleted '%s'", tt.expectedDeletedJobs, jobControl.DeleteJobName)
+			}
+			sort.Strings(jobControl.DeleteJobName)
+			sort.Strings(tt.expectedDeletedJobs)
+			for i, deletedJob := range jobControl.DeleteJobName {
+				if deletedJob != tt.expectedDeletedJobs[i] {
+					t.Fatalf("expected '%v' jobs to be deleted, instead deleted '%s'", tt.expectedDeletedJobs, jobControl.DeleteJobName)
+				}
+			}
+		})
+	}
+}
+
+// TestControllerV2JobAlreadyExistsButNotInActiveStatus validates that an already created job that was not added to the status
+// of a CronJob initially will be added back on the next sync. Previously, if we failed to update the status after creating a job,
+// cronjob controller would retry continuously because it would attempt to create a job that already exists.
+func TestControllerV2JobAlreadyExistsButNotInActiveStatus(t *testing.T) {
+	_, ctx := ktesting.NewTestContext(t)
+
+	cj := cronJob()
+	cj.Spec.ConcurrencyPolicy = "Forbid"
+	cj.Spec.Schedule = everyHour
+	cj.Status.LastScheduleTime = &metav1.Time{Time: justBeforeThePriorHour()}
+	cj.Status.Active = []v1.ObjectReference{}
+	cjCopy := cj.DeepCopy()
+
+	job, err := getJobFromTemplate2(&cj, justAfterThePriorHour())
+	if err != nil {
+		t.Fatalf("Unexpected error creating a job from template: %v", err)
+	}
+	job.UID = "1234"
+	job.Namespace = cj.Namespace
+
+	client := fake.NewSimpleClientset(cjCopy, job)
+	informerFactory := informers.NewSharedInformerFactory(client, controller.NoResyncPeriodFunc())
+	_ = informerFactory.Batch().V1().CronJobs().Informer().GetIndexer().Add(cjCopy)
+
+	jm, err := NewControllerV2(ctx, informerFactory.Batch().V1().Jobs(), informerFactory.Batch().V1().CronJobs(), client)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	jobControl := &fakeJobControl{Job: job, CreateErr: errors.NewAlreadyExists(schema.GroupResource{Resource: "job", Group: "batch"}, "")}
+	jm.jobControl = jobControl
+	cronJobControl := &fakeCJControl{}
+	jm.cronJobControl = cronJobControl
+	jm.now = justBeforeTheHour
+
+	jm.enqueueController(cjCopy)
+	jm.processNextWorkItem(ctx)
+
+	if len(cronJobControl.Updates) != 1 {
+		t.Fatalf("Unexpected updates to cronjob, got: %d, expected 1", len(cronJobControl.Updates))
+	}
+	if len(cronJobControl.Updates[0].Status.Active) != 1 {
+		t.Errorf("Unexpected active jobs count, got: %d, expected 1", len(cronJobControl.Updates[0].Status.Active))
+	}
+
+	expectedActiveRef, err := getRef(job)
+	if err != nil {
+		t.Fatalf("Error getting expected job ref: %v", err)
+	}
+	if !reflect.DeepEqual(cronJobControl.Updates[0].Status.Active[0], *expectedActiveRef) {
+		t.Errorf("Unexpected job reference in cronjob active list, got: %v, expected: %v", cronJobControl.Updates[0].Status.Active[0], expectedActiveRef)
+	}
+}
+
+// TestControllerV2JobAlreadyExistsButDifferentOwnner validates that an already created job
+// not owned by the cronjob controller is ignored.
+func TestControllerV2JobAlreadyExistsButDifferentOwner(t *testing.T) {
+	_, ctx := ktesting.NewTestContext(t)
+
+	cj := cronJob()
+	cj.Spec.ConcurrencyPolicy = "Forbid"
+	cj.Spec.Schedule = everyHour
+	cj.Status.LastScheduleTime = &metav1.Time{Time: justBeforeThePriorHour()}
+	cj.Status.Active = []v1.ObjectReference{}
+	cjCopy := cj.DeepCopy()
+
+	job, err := getJobFromTemplate2(&cj, justAfterThePriorHour())
+	if err != nil {
+		t.Fatalf("Unexpected error creating a job from template: %v", err)
+	}
+	job.UID = "1234"
+	job.Namespace = cj.Namespace
+
+	// remove owners for this test since we are testing that jobs not belonging to cronjob
+	// controller are safely ignored
+	job.OwnerReferences = []metav1.OwnerReference{}
+
+	client := fake.NewSimpleClientset(cjCopy, job)
+	informerFactory := informers.NewSharedInformerFactory(client, controller.NoResyncPeriodFunc())
+	_ = informerFactory.Batch().V1().CronJobs().Informer().GetIndexer().Add(cjCopy)
+
+	jm, err := NewControllerV2(ctx, informerFactory.Batch().V1().Jobs(), informerFactory.Batch().V1().CronJobs(), client)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	jobControl := &fakeJobControl{Job: job, CreateErr: errors.NewAlreadyExists(schema.GroupResource{Resource: "job", Group: "batch"}, "")}
+	jm.jobControl = jobControl
+	cronJobControl := &fakeCJControl{}
+	jm.cronJobControl = cronJobControl
+	jm.now = justBeforeTheHour
+
+	jm.enqueueController(cjCopy)
+	jm.processNextWorkItem(ctx)
+
+	if len(cronJobControl.Updates) != 0 {
+		t.Fatalf("Unexpected updates to cronjob, got: %d, expected 0", len(cronJobControl.Updates))
 	}
 }

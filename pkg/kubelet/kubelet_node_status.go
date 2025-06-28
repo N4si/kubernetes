@@ -19,6 +19,7 @@ package kubelet
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"net"
 	goruntime "runtime"
 	"sort"
@@ -31,16 +32,17 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/sets"
-	cloudprovider "k8s.io/cloud-provider"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	cloudproviderapi "k8s.io/cloud-provider/api"
 	nodeutil "k8s.io/component-helpers/node/util"
 	"k8s.io/klog/v2"
 	kubeletapis "k8s.io/kubelet/pkg/apis"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/events"
 	"k8s.io/kubernetes/pkg/kubelet/nodestatus"
-	"k8s.io/kubernetes/pkg/kubelet/util"
 	taintutil "k8s.io/kubernetes/pkg/util/taints"
 	volutil "k8s.io/kubernetes/pkg/volume/util"
 )
@@ -52,6 +54,9 @@ func (kl *Kubelet) registerWithAPIServer() {
 	if kl.registrationCompleted {
 		return
 	}
+
+	kl.nodeStartupLatencyTracker.RecordAttemptRegisterNode()
+
 	step := 100 * time.Millisecond
 
 	for {
@@ -85,10 +90,20 @@ func (kl *Kubelet) registerWithAPIServer() {
 func (kl *Kubelet) tryRegisterWithAPIServer(node *v1.Node) bool {
 	_, err := kl.kubeClient.CoreV1().Nodes().Create(context.TODO(), node, metav1.CreateOptions{})
 	if err == nil {
+		kl.nodeStartupLatencyTracker.RecordRegisteredNewNode()
 		return true
 	}
 
-	if !apierrors.IsAlreadyExists(err) {
+	switch {
+	case apierrors.IsAlreadyExists(err):
+		// Node already exists, proceed to reconcile node.
+	case apierrors.IsForbidden(err):
+		// Creating nodes is forbidden, but node may still exist, attempt to get the node.
+		if utilfeature.DefaultFeatureGate.Enabled(features.KubeletRegistrationGetOnExistsOnly) {
+			klog.ErrorS(err, "Unable to register node with API server, reason is forbidden", "node", klog.KObj(node))
+			return false
+		}
+	default:
 		klog.ErrorS(err, "Unable to register node with API server", "node", klog.KObj(node))
 		return false
 	}
@@ -98,6 +113,7 @@ func (kl *Kubelet) tryRegisterWithAPIServer(node *v1.Node) bool {
 		klog.ErrorS(err, "Unable to register node with API server, error getting existing node", "node", klog.KObj(node))
 		return false
 	}
+
 	if existingNode == nil {
 		klog.InfoS("Unable to register node with API server, no node instance returned", "node", klog.KObj(node))
 		return false
@@ -127,7 +143,7 @@ func (kl *Kubelet) tryRegisterWithAPIServer(node *v1.Node) bool {
 // reconcileHugePageResource will update huge page capacity for each page size and remove huge page sizes no longer supported
 func (kl *Kubelet) reconcileHugePageResource(initialNode, existingNode *v1.Node) bool {
 	requiresUpdate := updateDefaultResources(initialNode, existingNode)
-	supportedHugePageResources := sets.String{}
+	supportedHugePageResources := sets.Set[string]{}
 
 	for resourceName := range initialNode.Status.Capacity {
 		if !v1helper.IsHugePageResourceName(resourceName) {
@@ -295,9 +311,6 @@ func (kl *Kubelet) initialNode(ctx context.Context) (*v1.Node, error) {
 				kubeletapis.LabelArch: goruntime.GOARCH,
 			},
 		},
-		Spec: v1.NodeSpec{
-			Unschedulable: !kl.registerSchedulable,
-		},
 	}
 	osLabels, err := getOSSpecificLabels()
 	if err != nil {
@@ -333,16 +346,6 @@ func (kl *Kubelet) initialNode(ctx context.Context) (*v1.Node, error) {
 	if len(nodeTaints) > 0 {
 		node.Spec.Taints = nodeTaints
 	}
-	// Initially, set NodeNetworkUnavailable to true.
-	if kl.providerRequiresNetworkingConfiguration() {
-		node.Status.Conditions = append(node.Status.Conditions, v1.NodeCondition{
-			Type:               v1.NodeNetworkUnavailable,
-			Status:             v1.ConditionTrue,
-			Reason:             "NoRouteCreated",
-			Message:            "Node created without a route",
-			LastTransitionTime: metav1.NewTime(kl.clock.Now()),
-		})
-	}
 
 	if kl.enableControllerAttachDetach {
 		if node.Annotations == nil {
@@ -355,14 +358,6 @@ func (kl *Kubelet) initialNode(ctx context.Context) (*v1.Node, error) {
 		klog.V(2).InfoS("Controller attach/detach is disabled for this node; Kubelet will attach and detach volumes")
 	}
 
-	if kl.keepTerminatedPodVolumes {
-		if node.Annotations == nil {
-			node.Annotations = make(map[string]string)
-		}
-		klog.V(2).InfoS("Setting node annotation to keep pod volumes of terminated pods attached to the node")
-		node.Annotations[volutil.KeepTerminatedPodVolumesAnnotation] = "true"
-	}
-
 	// @question: should this be place after the call to the cloud provider? which also applies labels
 	for k, v := range kl.nodeLabels {
 		if cv, found := node.ObjectMeta.Labels[k]; found {
@@ -373,55 +368,6 @@ func (kl *Kubelet) initialNode(ctx context.Context) (*v1.Node, error) {
 
 	if kl.providerID != "" {
 		node.Spec.ProviderID = kl.providerID
-	}
-
-	if kl.cloud != nil {
-		instances, ok := kl.cloud.Instances()
-		if !ok {
-			return nil, fmt.Errorf("failed to get instances from cloud provider")
-		}
-
-		// TODO: We can't assume that the node has credentials to talk to the
-		// cloudprovider from arbitrary nodes. At most, we should talk to a
-		// local metadata server here.
-		var err error
-		if node.Spec.ProviderID == "" {
-			node.Spec.ProviderID, err = cloudprovider.GetInstanceProviderID(ctx, kl.cloud, kl.nodeName)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		instanceType, err := instances.InstanceType(ctx, kl.nodeName)
-		if err != nil {
-			return nil, err
-		}
-		if instanceType != "" {
-			klog.InfoS("Adding label from cloud provider", "labelKey", v1.LabelInstanceType, "labelValue", instanceType)
-			node.ObjectMeta.Labels[v1.LabelInstanceType] = instanceType
-			klog.InfoS("Adding node label from cloud provider", "labelKey", v1.LabelInstanceTypeStable, "labelValue", instanceType)
-			node.ObjectMeta.Labels[v1.LabelInstanceTypeStable] = instanceType
-		}
-		// If the cloud has zone information, label the node with the zone information
-		zones, ok := kl.cloud.Zones()
-		if ok {
-			zone, err := zones.GetZone(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get zone from cloud provider: %v", err)
-			}
-			if zone.FailureDomain != "" {
-				klog.InfoS("Adding node label from cloud provider", "labelKey", v1.LabelFailureDomainBetaZone, "labelValue", zone.FailureDomain)
-				node.ObjectMeta.Labels[v1.LabelFailureDomainBetaZone] = zone.FailureDomain
-				klog.InfoS("Adding node label from cloud provider", "labelKey", v1.LabelTopologyZone, "labelValue", zone.FailureDomain)
-				node.ObjectMeta.Labels[v1.LabelTopologyZone] = zone.FailureDomain
-			}
-			if zone.Region != "" {
-				klog.InfoS("Adding node label from cloud provider", "labelKey", v1.LabelFailureDomainBetaRegion, "labelValue", zone.Region)
-				node.ObjectMeta.Labels[v1.LabelFailureDomainBetaRegion] = zone.Region
-				klog.InfoS("Adding node label from cloud provider", "labelKey", v1.LabelTopologyRegion, "labelValue", zone.Region)
-				node.ObjectMeta.Labels[v1.LabelTopologyRegion] = zone.Region
-			}
-		}
 	}
 
 	kl.setNodeStatus(ctx, node)
@@ -550,15 +496,19 @@ func (kl *Kubelet) updateNodeStatus(ctx context.Context) error {
 func (kl *Kubelet) tryUpdateNodeStatus(ctx context.Context, tryNumber int) error {
 	// In large clusters, GET and PUT operations on Node objects coming
 	// from here are the majority of load on apiserver and etcd.
-	// To reduce the load on etcd, we are serving GET operations from
-	// apiserver cache (the data might be slightly delayed but it doesn't
+	// To reduce the load on control-plane, we are serving GET operations from
+	// local lister (the data might be slightly delayed but it doesn't
 	// seem to cause more conflict - the delays are pretty small).
 	// If it result in a conflict, all retries are served directly from etcd.
-	opts := metav1.GetOptions{}
+	var originalNode *v1.Node
+	var err error
+
 	if tryNumber == 0 {
-		util.FromApiserverCache(&opts)
+		originalNode, err = kl.nodeLister.Get(string(kl.nodeName))
+	} else {
+		opts := metav1.GetOptions{}
+		originalNode, err = kl.heartbeatClient.CoreV1().Nodes().Get(ctx, string(kl.nodeName), opts)
 	}
-	originalNode, err := kl.heartbeatClient.CoreV1().Nodes().Get(ctx, string(kl.nodeName), opts)
 	if err != nil {
 		return fmt.Errorf("error getting node %q: %v", kl.nodeName, err)
 	}
@@ -567,18 +517,39 @@ func (kl *Kubelet) tryUpdateNodeStatus(ctx context.Context, tryNumber int) error
 	}
 
 	node, changed := kl.updateNode(ctx, originalNode)
-	shouldPatchNodeStatus := changed || kl.clock.Since(kl.lastStatusReportTime) >= kl.nodeStatusReportFrequency
+	shouldPatchNodeStatus := changed || kl.isUpdateStatusPeriodExpired()
 
 	if !shouldPatchNodeStatus {
 		kl.markVolumesFromNode(node)
 		return nil
 	}
 
+	// There are 3 possible conditions that make shouldPatchNodeStatus to be true:
+	// 1. node is changed
+	// 2. isUpdateStatusPeriodExpired returns true due to lastStatusReportTime has Zero value. This will happen when kubelet restarts.
+	// 3. isUpdateStatusPeriodExpired returns true due to lastStatusReportTime expires with non-zero value.
+	// We want to calculate a new random delay for condition 1 and 2, so that we can avoid all the periodic node status
+	// updates to reach the apiserver at the same time.
+	// When condition 3 happens, random interval has already been used, and we want to reset the random delay, so that
+	// the node updates its status with fixed interval going forward.
+	if changed || kl.lastStatusReportTime.IsZero() {
+		kl.delayAfterNodeStatusChange = kl.calculateDelay()
+	} else {
+		kl.delayAfterNodeStatusChange = 0
+	}
 	updatedNode, err := kl.patchNodeStatus(originalNode, node)
 	if err == nil {
 		kl.markVolumesFromNode(updatedNode)
 	}
 	return err
+}
+
+func (kl *Kubelet) isUpdateStatusPeriodExpired() bool {
+	return kl.clock.Since(kl.lastStatusReportTime) >= kl.nodeStatusReportFrequency+kl.delayAfterNodeStatusChange
+}
+
+func (kl *Kubelet) calculateDelay() time.Duration {
+	return time.Duration(float64(kl.nodeStatusReportFrequency) * (-0.5 + rand.Float64()))
 }
 
 // updateNode creates a copy of originalNode and runs update logic on it.
@@ -632,7 +603,12 @@ func (kl *Kubelet) patchNodeStatus(originalNode, node *v1.Node) (*v1.Node, error
 		return nil, err
 	}
 	kl.lastStatusReportTime = kl.clock.Now()
-	kl.setLastObservedNodeAddresses(updatedNode.Status.Addresses)
+
+	readyIdx, readyCondition := nodeutil.GetNodeCondition(&updatedNode.Status, v1.NodeReady)
+	if readyIdx >= 0 && readyCondition.Status == v1.ConditionTrue {
+		kl.nodeStartupLatencyTracker.RecordNodeReady()
+	}
+
 	return updatedNode, nil
 }
 
@@ -703,48 +679,28 @@ func (kl *Kubelet) setNodeStatus(ctx context.Context, node *v1.Node) {
 	}
 }
 
-func (kl *Kubelet) setLastObservedNodeAddresses(addresses []v1.NodeAddress) {
-	kl.lastObservedNodeAddressesMux.Lock()
-	defer kl.lastObservedNodeAddressesMux.Unlock()
-	kl.lastObservedNodeAddresses = addresses
-}
-func (kl *Kubelet) getLastObservedNodeAddresses() []v1.NodeAddress {
-	kl.lastObservedNodeAddressesMux.RLock()
-	defer kl.lastObservedNodeAddressesMux.RUnlock()
-	return kl.lastObservedNodeAddresses
-}
-
 // defaultNodeStatusFuncs is a factory that generates the default set of
 // setNodeStatus funcs
 func (kl *Kubelet) defaultNodeStatusFuncs() []func(context.Context, *v1.Node) error {
-	// if cloud is not nil, we expect the cloud resource sync manager to exist
-	var nodeAddressesFunc func() ([]v1.NodeAddress, error)
-	if kl.cloud != nil {
-		nodeAddressesFunc = kl.cloudResourceSyncManager.NodeAddresses
-	}
-	var validateHostFunc func() error
-	if kl.appArmorValidator != nil {
-		validateHostFunc = kl.appArmorValidator.ValidateHost
-	}
 	var setters []func(ctx context.Context, n *v1.Node) error
 	setters = append(setters,
-		nodestatus.NodeAddress(kl.nodeIPs, kl.nodeIPValidator, kl.hostname, kl.hostnameOverridden, kl.externalCloudProvider, kl.cloud, nodeAddressesFunc),
+		nodestatus.NodeAddress(kl.nodeIPs, kl.nodeIPValidator, kl.hostname, kl.externalCloudProvider, utilnet.ResolveBindAddress),
 		nodestatus.MachineInfo(string(kl.nodeName), kl.maxPods, kl.podsPerCore, kl.GetCachedMachineInfo, kl.containerManager.GetCapacity,
 			kl.containerManager.GetDevicePluginResourceCapacity, kl.containerManager.GetNodeAllocatableReservation, kl.recordEvent, kl.supportLocalStorageCapacityIsolation()),
 		nodestatus.VersionInfo(kl.cadvisor.VersionInfo, kl.containerRuntime.Type, kl.containerRuntime.Version),
 		nodestatus.DaemonEndpoints(kl.daemonEndpoints),
 		nodestatus.Images(kl.nodeStatusMaxImages, kl.imageManager.GetImageList),
 		nodestatus.GoRuntime(),
+		nodestatus.RuntimeHandlers(kl.runtimeState.runtimeHandlers),
+		nodestatus.NodeFeatures(kl.runtimeState.runtimeFeatures),
 	)
-	// Volume limits
-	setters = append(setters, nodestatus.VolumeLimits(kl.volumePluginMgr.ListVolumePluginWithLimits))
 
 	setters = append(setters,
 		nodestatus.MemoryPressureCondition(kl.clock.Now, kl.evictionManager.IsUnderMemoryPressure, kl.recordNodeStatusEvent),
 		nodestatus.DiskPressureCondition(kl.clock.Now, kl.evictionManager.IsUnderDiskPressure, kl.recordNodeStatusEvent),
 		nodestatus.PIDPressureCondition(kl.clock.Now, kl.evictionManager.IsUnderPIDPressure, kl.recordNodeStatusEvent),
 		nodestatus.ReadyCondition(kl.clock.Now, kl.runtimeState.runtimeErrors, kl.runtimeState.networkErrors, kl.runtimeState.storageErrors,
-			validateHostFunc, kl.containerManager.Status, kl.shutdownManager.ShutdownStatus, kl.recordNodeStatusEvent, kl.supportLocalStorageCapacityIsolation()),
+			kl.containerManager.Status, kl.shutdownManager.ShutdownStatus, kl.recordNodeStatusEvent, kl.supportLocalStorageCapacityIsolation()),
 		nodestatus.VolumesInUse(kl.volumeManager.ReconcilerStatesHasBeenSynced, kl.volumeManager.GetVolumesInUse),
 		// TODO(mtaufen): I decided not to move this setter for now, since all it does is send an event
 		// and record state back to the Kubelet runtime object. In the future, I'd like to isolate

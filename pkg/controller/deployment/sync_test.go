@@ -17,8 +17,8 @@ limitations under the License.
 package deployment
 
 import (
-	"context"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,25 +26,23 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	testclient "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/klog/v2/ktesting"
 	"k8s.io/kubernetes/pkg/controller"
 	deploymentutil "k8s.io/kubernetes/pkg/controller/deployment/util"
+	"k8s.io/utils/ptr"
 )
-
-func intOrStrP(val int) *intstr.IntOrString {
-	intOrStr := intstr.FromInt(val)
-	return &intOrStr
-}
 
 func TestScale(t *testing.T) {
 	newTimestamp := metav1.Date(2016, 5, 20, 2, 0, 0, 0, time.UTC)
 	oldTimestamp := metav1.Date(2016, 5, 20, 1, 0, 0, 0, time.UTC)
 	olderTimestamp := metav1.Date(2016, 5, 20, 0, 0, 0, 0, time.UTC)
 
-	var updatedTemplate = func(replicas int) *apps.Deployment {
+	var updatedTemplate = func(replicas int32) *apps.Deployment {
 		d := newDeployment("foo", replicas, nil, nil, nil, map[string]string{"foo": "bar"})
 		d.Spec.Template.Labels["another"] = "label"
 		return d
@@ -221,8 +219,8 @@ func TestScale(t *testing.T) {
 		},
 		{
 			name:          "deployment with surge pods",
-			deployment:    newDeployment("foo", 20, nil, intOrStrP(2), nil, nil),
-			oldDeployment: newDeployment("foo", 10, nil, intOrStrP(2), nil, nil),
+			deployment:    newDeployment("foo", 20, nil, ptr.To(intstr.FromInt32(2)), nil, nil),
+			oldDeployment: newDeployment("foo", 10, nil, ptr.To(intstr.FromInt32(2)), nil, nil),
 
 			newRS:  rs("foo-v2", 6, nil, newTimestamp),
 			oldRSs: []*apps.ReplicaSet{rs("foo-v1", 6, nil, oldTimestamp)},
@@ -232,8 +230,8 @@ func TestScale(t *testing.T) {
 		},
 		{
 			name:          "change both surge and size",
-			deployment:    newDeployment("foo", 50, nil, intOrStrP(6), nil, nil),
-			oldDeployment: newDeployment("foo", 10, nil, intOrStrP(3), nil, nil),
+			deployment:    newDeployment("foo", 50, nil, ptr.To(intstr.FromInt32(6)), nil, nil),
+			oldDeployment: newDeployment("foo", 10, nil, ptr.To(intstr.FromInt32(3)), nil, nil),
 
 			newRS:  rs("foo-v2", 5, nil, newTimestamp),
 			oldRSs: []*apps.ReplicaSet{rs("foo-v1", 8, nil, oldTimestamp)},
@@ -254,8 +252,8 @@ func TestScale(t *testing.T) {
 		},
 		{
 			name:          "saturated but broken new replica set does not affect old pods",
-			deployment:    newDeployment("foo", 2, nil, intOrStrP(1), intOrStrP(1), nil),
-			oldDeployment: newDeployment("foo", 2, nil, intOrStrP(1), intOrStrP(1), nil),
+			deployment:    newDeployment("foo", 2, nil, ptr.To(intstr.FromInt32(1)), ptr.To(intstr.FromInt32(1)), nil),
+			oldDeployment: newDeployment("foo", 2, nil, ptr.To(intstr.FromInt32(1)), ptr.To(intstr.FromInt32(1)), nil),
 
 			newRS: func() *apps.ReplicaSet {
 				rs := rs("foo-v2", 2, nil, newTimestamp)
@@ -298,7 +296,9 @@ func TestScale(t *testing.T) {
 				deploymentutil.SetReplicasAnnotations(rs, desiredReplicas, desiredReplicas+deploymentutil.MaxSurge(*test.oldDeployment))
 			}
 
-			if err := dc.scale(context.TODO(), test.deployment, test.newRS, test.oldRSs); err != nil {
+			_, ctx := ktesting.NewTestContext(t)
+
+			if err := dc.scale(ctx, test.deployment, test.newRS, test.oldRSs); err != nil {
 				t.Errorf("%s: unexpected error: %v", test.name, err)
 				return
 			}
@@ -412,9 +412,11 @@ func TestDeploymentController_cleanupDeployment(t *testing.T) {
 		test := tests[i]
 		t.Logf("scenario %d", i)
 
+		_, ctx := ktesting.NewTestContext(t)
+
 		fake := &fake.Clientset{}
 		informers := informers.NewSharedInformerFactory(fake, controller.NoResyncPeriodFunc())
-		controller, err := NewDeploymentController(informers.Apps().V1().Deployments(), informers.Apps().V1().ReplicaSets(), informers.Core().V1().Pods(), fake)
+		controller, err := NewDeploymentController(ctx, informers.Apps().V1().Deployments(), informers.Apps().V1().ReplicaSets(), informers.Core().V1().Pods(), fake)
 		if err != nil {
 			t.Fatalf("error creating Deployment controller: %v", err)
 		}
@@ -434,7 +436,7 @@ func TestDeploymentController_cleanupDeployment(t *testing.T) {
 
 		t.Logf(" &test.revisionHistoryLimit: %d", test.revisionHistoryLimit)
 		d := newDeployment("foo", 1, &test.revisionHistoryLimit, nil, nil, map[string]string{"foo": "bar"})
-		controller.cleanupDeployment(context.TODO(), test.oldRSs, d)
+		controller.cleanupDeployment(ctx, test.oldRSs, d)
 
 		gotDeletions := 0
 		for _, action := range fake.Actions() {
@@ -454,7 +456,7 @@ func TestDeploymentController_cleanupDeploymentOrder(t *testing.T) {
 	now := metav1.Now()
 	duration := time.Minute
 
-	newRSWithRevisionAndCreationTimestamp := func(name string, replicas int, selector map[string]string, timestamp time.Time, revision string) *apps.ReplicaSet {
+	newRSWithRevisionAndCreationTimestamp := func(name string, replicas int32, selector map[string]string, timestamp time.Time, revision string) *apps.ReplicaSet {
 		rs := rs(name, replicas, selector, metav1.NewTime(timestamp))
 		if revision != "" {
 			rs.Annotations = map[string]string{
@@ -546,9 +548,11 @@ func TestDeploymentController_cleanupDeploymentOrder(t *testing.T) {
 		test := tests[i]
 		t.Logf("scenario %d", i)
 
+		_, ctx := ktesting.NewTestContext(t)
+
 		fake := &fake.Clientset{}
 		informers := informers.NewSharedInformerFactory(fake, controller.NoResyncPeriodFunc())
-		controller, err := NewDeploymentController(informers.Apps().V1().Deployments(), informers.Apps().V1().ReplicaSets(), informers.Core().V1().Pods(), fake)
+		controller, err := NewDeploymentController(ctx, informers.Apps().V1().Deployments(), informers.Apps().V1().ReplicaSets(), informers.Core().V1().Pods(), fake)
 		if err != nil {
 			t.Fatalf("error creating Deployment controller: %v", err)
 		}
@@ -566,7 +570,7 @@ func TestDeploymentController_cleanupDeploymentOrder(t *testing.T) {
 		informers.Start(stopCh)
 
 		d := newDeployment("foo", 1, &test.revisionHistoryLimit, nil, nil, map[string]string{"foo": "bar"})
-		controller.cleanupDeployment(context.TODO(), test.oldRSs, d)
+		controller.cleanupDeployment(ctx, test.oldRSs, d)
 
 		deletedRSs := sets.String{}
 		for _, action := range fake.Actions() {
@@ -588,5 +592,136 @@ func TestDeploymentController_cleanupDeploymentOrder(t *testing.T) {
 			t.Errorf("expect to delete old replica sets %v, but got %v", test.expectedDeletedRSs, deletedRSs)
 			continue
 		}
+	}
+}
+
+func TestDeploymentController_generateReplicaSetName(t *testing.T) {
+	tests := []struct {
+		name                  string
+		deploymentName        string
+		wantDeploymentPortion string
+	}{
+		{
+			name:                  "short name",
+			deploymentName:        "my-deployment",
+			wantDeploymentPortion: "my-deployment",
+		},
+		{
+			name:                  "very long name truncated",
+			deploymentName:        strings.Repeat("a", 250),
+			wantDeploymentPortion: strings.Repeat("a", 242),
+		},
+		{
+			name:                  "very long name not truncated",
+			deploymentName:        strings.Repeat("a", 242),
+			wantDeploymentPortion: strings.Repeat("a", 242),
+		},
+	}
+
+	for _, test := range tests {
+		_, ctx := ktesting.NewTestContext(t)
+
+		fake := &fake.Clientset{}
+		informers := informers.NewSharedInformerFactory(fake, controller.NoResyncPeriodFunc())
+		controller, err := NewDeploymentController(ctx, informers.Apps().V1().Deployments(), informers.Apps().V1().ReplicaSets(), informers.Core().V1().Pods(), fake)
+		if err != nil {
+			t.Fatalf("error creating Deployment controller: %v", err)
+		}
+
+		controller.eventRecorder = &record.FakeRecorder{}
+		controller.dListerSynced = alwaysReady
+		controller.rsListerSynced = alwaysReady
+		controller.podListerSynced = alwaysReady
+
+		stopCh := make(chan struct{})
+		defer close(stopCh)
+		informers.Start(stopCh)
+
+		d := newDeployment(test.deploymentName, 1, nil, nil, nil, map[string]string{"foo": "bar"})
+
+		if _, err := controller.getNewReplicaSet(ctx, d, []*apps.ReplicaSet{}, []*apps.ReplicaSet{}, true); err != nil {
+			t.Errorf("failed to create new ReplicaSet: %v", err)
+			return
+		}
+
+		rsName := ""
+		for _, action := range fake.Actions() {
+			if createAction, ok := action.(testclient.CreateAction); ok {
+				if createdRS, ok := createAction.GetObject().(*apps.ReplicaSet); ok {
+					if createdRS.Name != "" {
+						rsName = createdRS.Name
+						break
+					}
+				}
+			}
+		}
+
+		if len(rsName) > validation.DNS1123SubdomainMaxLength {
+			t.Errorf("ReplicaSet name length %d, want <= %d", len(rsName), validation.DNS1123SubdomainMaxLength)
+		}
+
+		parts := strings.Split(rsName, "-")
+		if len(parts) < 2 {
+			t.Errorf("ReplicaSet name should contain at least one hyphen separator")
+		}
+
+		deploymentPortion := strings.Join(parts[:len(parts)-1], "-")
+		if len(test.deploymentName) <= 242 {
+			if len(deploymentPortion) != len(test.deploymentName) {
+				t.Errorf("Deployment name portion should be %d chars, got %d", len(test.deploymentName), len(deploymentPortion))
+			}
+		} else {
+			if len(deploymentPortion) != 242 {
+				t.Errorf("Truncated deployment name should be 242 chars, got %d", len(deploymentPortion))
+			}
+		}
+
+		if deploymentPortion != test.wantDeploymentPortion {
+			t.Errorf("Deployment name portion mismatch: got %q, want %q", deploymentPortion, test.wantDeploymentPortion)
+		}
+	}
+}
+
+func TestGenerateReplicaSetName(t *testing.T) {
+	tests := []struct {
+		name           string
+		deploymentName string
+		hash           string
+		want           string
+	}{
+		{
+			name:           "short name",
+			deploymentName: "my-deployment",
+			hash:           "abcde12345",
+			want:           "my-deployment-abcde12345",
+		},
+		{
+			name:           "maximum length without truncating",
+			deploymentName: strings.Repeat("a", 242),
+			hash:           "abcde12345",
+			want:           strings.Repeat("a", 242) + "-abcde12345",
+		},
+		{
+			name:           "very long deployment name is truncated",
+			deploymentName: strings.Repeat("b", 250),
+			hash:           "abcde12345",
+			want:           strings.Repeat("b", 242) + "-abcde12345",
+		},
+		{
+			name:           "very long hash is not truncated",
+			deploymentName: strings.Repeat("d", 252),
+			hash:           strings.Repeat("h", 252),
+			want:           strings.Repeat("d", 252) + "-" + strings.Repeat("h", 252),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := generateReplicaSetName(test.deploymentName, test.hash)
+
+			if got != test.want {
+				t.Errorf("generateReplicaSetName(%q, %q) = %q, want %q", test.deploymentName, test.hash, got, test.want)
+			}
+		})
 	}
 }

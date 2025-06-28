@@ -35,20 +35,21 @@ import (
 	"github.com/onsi/gomega"
 )
 
-var _ = SIGDescribe("[Disruptive]NodeLease", func() {
+var _ = SIGDescribe(framework.WithDisruptive(), "NodeLease", func() {
 	f := framework.NewDefaultFramework("node-lease-test")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
-	var systemPodsNo int32
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
+	var systemPodsNo int
 	var c clientset.Interface
 	var ns string
 	var group string
 
 	ginkgo.BeforeEach(func(ctx context.Context) {
+		e2eskipper.SkipUnlessProviderIs("gce")
 		c = f.ClientSet
 		ns = f.Namespace.Name
 		systemPods, err := e2epod.GetPodsInNamespace(ctx, c, ns, map[string]string{})
 		framework.ExpectNoError(err)
-		systemPodsNo = int32(len(systemPods))
+		systemPodsNo = len(systemPods)
 		if strings.Contains(framework.TestContext.CloudConfig.NodeInstanceGroup, ",") {
 			framework.Failf("Test dose not support cluster setup with more than one MIG: %s", framework.TestContext.CloudConfig.NodeInstanceGroup)
 		} else {
@@ -61,7 +62,7 @@ var _ = SIGDescribe("[Disruptive]NodeLease", func() {
 
 		ginkgo.BeforeEach(func() {
 			skipped = true
-			e2eskipper.SkipUnlessProviderIs("gce", "gke", "aws")
+			e2eskipper.SkipUnlessProviderIs("gce", "aws")
 			e2eskipper.SkipUnlessNodeCountIsAtLeast(2)
 			skipped = false
 		})
@@ -75,18 +76,7 @@ var _ = SIGDescribe("[Disruptive]NodeLease", func() {
 			if err := framework.ResizeGroup(group, int32(framework.TestContext.CloudConfig.NumNodes)); err != nil {
 				framework.Failf("Couldn't restore the original node instance group size: %v", err)
 			}
-			// In GKE, our current tunneling setup has the potential to hold on to a broken tunnel (from a
-			// rebooted/deleted node) for up to 5 minutes before all tunnels are dropped and recreated.
-			// Most tests make use of some proxy feature to verify functionality. So, if a reboot test runs
-			// right before a test that tries to get logs, for example, we may get unlucky and try to use a
-			// closed tunnel to a node that was recently rebooted. There's no good way to framework.Poll for proxies
-			// being closed, so we sleep.
-			//
-			// TODO(cjcullen) reduce this sleep (#19314)
-			if framework.ProviderIs("gke") {
-				ginkgo.By("waiting 5 minutes for all dead tunnels to be dropped")
-				time.Sleep(5 * time.Minute)
-			}
+
 			if err := framework.WaitForGroupSize(group, int32(framework.TestContext.CloudConfig.NumNodes)); err != nil {
 				framework.Failf("Couldn't restore the original node instance group size: %v", err)
 			}
@@ -97,7 +87,7 @@ var _ = SIGDescribe("[Disruptive]NodeLease", func() {
 			// Many e2e tests assume that the cluster is fully healthy before they start.  Wait until
 			// the cluster is restored to health.
 			ginkgo.By("waiting for system pods to successfully restart")
-			err := e2epod.WaitForPodsRunningReady(ctx, c, metav1.NamespaceSystem, systemPodsNo, 0, framework.PodReadyBeforeTimeout)
+			err := e2epod.WaitForPodsRunningReady(ctx, c, metav1.NamespaceSystem, systemPodsNo, framework.PodReadyBeforeTimeout)
 			framework.ExpectNoError(err)
 		})
 
@@ -109,7 +99,7 @@ var _ = SIGDescribe("[Disruptive]NodeLease", func() {
 			ginkgo.By("verify node lease exists for every nodes")
 			originalNodes, err := e2enode.GetReadySchedulableNodes(ctx, c)
 			framework.ExpectNoError(err)
-			framework.ExpectEqual(len(originalNodes.Items), framework.TestContext.CloudConfig.NumNodes)
+			gomega.Expect(originalNodes.Items).To(gomega.HaveLen(framework.TestContext.CloudConfig.NumNodes))
 
 			gomega.Eventually(ctx, func() error {
 				pass := true
@@ -135,21 +125,25 @@ var _ = SIGDescribe("[Disruptive]NodeLease", func() {
 			framework.ExpectNoError(err)
 			targetNodes, err := e2enode.GetReadySchedulableNodes(ctx, c)
 			framework.ExpectNoError(err)
-			framework.ExpectEqual(len(targetNodes.Items), int(targetNumNodes))
+			gomega.Expect(targetNodes.Items).To(gomega.HaveLen(int(targetNumNodes)))
 
 			ginkgo.By("verify node lease is deleted for the deleted node")
 			var deletedNodeName string
 			for _, originalNode := range originalNodes.Items {
 				originalNodeName := originalNode.ObjectMeta.Name
+				var found bool
 				for _, targetNode := range targetNodes.Items {
 					if originalNodeName == targetNode.ObjectMeta.Name {
-						continue
+						found = true
+						break
 					}
 				}
-				deletedNodeName = originalNodeName
-				break
+				if !found {
+					deletedNodeName = originalNodeName
+					break
+				}
 			}
-			framework.ExpectNotEqual(deletedNodeName, "")
+			gomega.Expect(deletedNodeName).NotTo(gomega.BeEmpty())
 			gomega.Eventually(ctx, func() error {
 				if _, err := leaseClient.Get(ctx, deletedNodeName, metav1.GetOptions{}); err == nil {
 					return fmt.Errorf("node lease is not deleted yet for node %q", deletedNodeName)

@@ -17,6 +17,7 @@ limitations under the License.
 package serviceaccount_test
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/x509"
@@ -29,7 +30,7 @@ import (
 
 	restful "github.com/emicklei/go-restful/v3"
 	"github.com/google/go-cmp/cmp"
-	jose "gopkg.in/square/go-jose.v2"
+	jose "gopkg.in/go-jose/go-jose.v2"
 
 	"k8s.io/kubernetes/pkg/routes"
 	"k8s.io/kubernetes/pkg/serviceaccount"
@@ -39,7 +40,7 @@ const (
 	exampleIssuer = "https://issuer.example.com"
 )
 
-func setupServer(t *testing.T, iss string, keys []interface{}) (*httptest.Server, string) {
+func setupServer(t *testing.T, iss string, keys serviceaccount.PublicKeysGetter) (*httptest.Server, string) {
 	t.Helper()
 
 	c := restful.NewContainer()
@@ -53,13 +54,13 @@ func setupServer(t *testing.T, iss string, keys []interface{}) (*httptest.Server
 	jwksURI.Scheme = "https"
 	jwksURI.Path = serviceaccount.JWKSPath
 
-	md, err := serviceaccount.NewOpenIDMetadata(
+	md, err := serviceaccount.NewOpenIDMetadataProvider(
 		iss, jwksURI.String(), "", keys)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	srv := routes.NewOpenIDMetadataServer(md.ConfigJSON, md.PublicKeysetJSON)
+	srv := routes.NewOpenIDMetadataServer(md)
 	srv.Install(c)
 
 	return s, jwksURI.String()
@@ -77,20 +78,59 @@ type Configuration struct {
 	SubjectTypes  []string `json:"subject_types_supported"`
 }
 
+type proxyKeyGetter struct {
+	serviceaccount.PublicKeysGetter
+	listeners []serviceaccount.Listener
+}
+
+func (p *proxyKeyGetter) AddListener(listener serviceaccount.Listener) {
+	p.listeners = append(p.listeners, listener)
+	p.PublicKeysGetter.AddListener(listener)
+}
+
 func TestServeConfiguration(t *testing.T) {
-	s, jwksURI := setupServer(t, exampleIssuer, defaultKeys)
+	ecKeysGetter, err := serviceaccount.StaticPublicKeysGetter([]interface{}{getPublicKey(ecdsaPublicKey)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaKeysGetter, err := serviceaccount.StaticPublicKeysGetter([]interface{}{getPublicKey(rsaPublicKey)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keysGetter := &proxyKeyGetter{PublicKeysGetter: ecKeysGetter}
+	s, jwksURI := setupServer(t, exampleIssuer, keysGetter)
 	defer s.Close()
 
-	want := Configuration{
+	wantEC := Configuration{
 		Issuer:        exampleIssuer,
 		JWKSURI:       jwksURI,
 		ResponseTypes: []string{"id_token"},
 		SubjectTypes:  []string{"public"},
-		SigningAlgs:   []string{"ES256", "RS256"},
+		SigningAlgs:   []string{"ES256"},
 	}
-
+	wantRSA := Configuration{
+		Issuer:        exampleIssuer,
+		JWKSURI:       jwksURI,
+		ResponseTypes: []string{"id_token"},
+		SubjectTypes:  []string{"public"},
+		SigningAlgs:   []string{"RS256"},
+	}
 	reqURL := s.URL + "/.well-known/openid-configuration"
 
+	expectConfiguration(t, reqURL, wantEC)
+
+	// modify the underlying keys, expect the same response
+	keysGetter.PublicKeysGetter = rsaKeysGetter
+	expectConfiguration(t, reqURL, wantEC)
+
+	// notify the metadata the keys changed, expected a modified response
+	for _, listener := range keysGetter.listeners {
+		listener.Enqueue()
+	}
+	expectConfiguration(t, reqURL, wantRSA)
+}
+
+func expectConfiguration(t *testing.T, reqURL string, want Configuration) {
 	resp, err := http.Get(reqURL)
 	if err != nil {
 		t.Fatalf("Get(%s) = %v, %v want: <response>, <nil>", reqURL, resp, err)
@@ -122,10 +162,18 @@ func TestServeConfiguration(t *testing.T) {
 func TestServeKeys(t *testing.T) {
 	wantPubRSA := getPublicKey(rsaPublicKey).(*rsa.PublicKey)
 	wantPubECDSA := getPublicKey(ecdsaPublicKey).(*ecdsa.PublicKey)
+
+	alternateGetter, err := serviceaccount.StaticPublicKeysGetter([]interface{}{wantPubRSA})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	var serveKeysTests = []struct {
-		Name     string
-		Keys     []interface{}
-		WantKeys []jose.JSONWebKey
+		Name               string
+		Keys               []interface{}
+		WantKeys           []jose.JSONWebKey
+		updatedKeysGetter  serviceaccount.PublicKeysGetter
+		WantKeysPostUpdate []jose.JSONWebKey
 	}{
 		{
 			Name: "configured public keys",
@@ -181,51 +229,167 @@ func TestServeKeys(t *testing.T) {
 				},
 			},
 		},
+		{
+			Name: "configured public keys reacting to update",
+			Keys: []interface{}{
+				getPublicKey(rsaPublicKey),
+				getPublicKey(ecdsaPublicKey),
+			},
+			WantKeys: []jose.JSONWebKey{
+				{
+					Algorithm:                   "RS256",
+					Key:                         wantPubRSA,
+					KeyID:                       rsaKeyID,
+					Use:                         "sig",
+					Certificates:                []*x509.Certificate{},
+					CertificateThumbprintSHA1:   []uint8{},
+					CertificateThumbprintSHA256: []uint8{},
+				},
+				{
+					Algorithm:                   "ES256",
+					Key:                         wantPubECDSA,
+					KeyID:                       ecdsaKeyID,
+					Use:                         "sig",
+					Certificates:                []*x509.Certificate{},
+					CertificateThumbprintSHA1:   []uint8{},
+					CertificateThumbprintSHA256: []uint8{},
+				},
+			},
+			updatedKeysGetter: alternateGetter,
+			WantKeysPostUpdate: []jose.JSONWebKey{
+				{
+					Algorithm:                   "RS256",
+					Key:                         wantPubRSA,
+					KeyID:                       rsaKeyID,
+					Use:                         "sig",
+					Certificates:                []*x509.Certificate{},
+					CertificateThumbprintSHA1:   []uint8{},
+					CertificateThumbprintSHA256: []uint8{},
+				},
+			},
+		},
+		{
+			Name: "configured public keys reacting to update while excluding keys",
+			Keys: []interface{}{
+				getPublicKey(rsaPublicKey),
+				getPublicKey(ecdsaPublicKey),
+			},
+			WantKeys: []jose.JSONWebKey{
+				{
+					Algorithm:                   "RS256",
+					Key:                         wantPubRSA,
+					KeyID:                       rsaKeyID,
+					Use:                         "sig",
+					Certificates:                []*x509.Certificate{},
+					CertificateThumbprintSHA1:   []uint8{},
+					CertificateThumbprintSHA256: []uint8{},
+				},
+				{
+					Algorithm:                   "ES256",
+					Key:                         wantPubECDSA,
+					KeyID:                       ecdsaKeyID,
+					Use:                         "sig",
+					Certificates:                []*x509.Certificate{},
+					CertificateThumbprintSHA1:   []uint8{},
+					CertificateThumbprintSHA256: []uint8{},
+				},
+			},
+			updatedKeysGetter: dummyPublicKeyGetter{
+				keys: []serviceaccount.PublicKey{
+					{
+						KeyID:                    rsaKeyID,
+						PublicKey:                wantPubRSA,
+						ExcludeFromOIDCDiscovery: true,
+					},
+					{
+						KeyID:                    ecdsaKeyID,
+						PublicKey:                wantPubECDSA,
+						ExcludeFromOIDCDiscovery: false,
+					},
+				},
+			},
+			WantKeysPostUpdate: []jose.JSONWebKey{
+				{
+					Algorithm:                   "ES256",
+					Key:                         wantPubECDSA,
+					KeyID:                       ecdsaKeyID,
+					Use:                         "sig",
+					Certificates:                []*x509.Certificate{},
+					CertificateThumbprintSHA1:   []uint8{},
+					CertificateThumbprintSHA256: []uint8{},
+				},
+			},
+		},
 	}
 
 	for _, tt := range serveKeysTests {
 		t.Run(tt.Name, func(t *testing.T) {
-			s, _ := setupServer(t, exampleIssuer, tt.Keys)
+			initialKeysGetter, err := serviceaccount.StaticPublicKeysGetter(tt.Keys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			keysGetter := &proxyKeyGetter{PublicKeysGetter: initialKeysGetter}
+			s, _ := setupServer(t, exampleIssuer, keysGetter)
 			defer s.Close()
 
 			reqURL := s.URL + "/openid/v1/jwks"
+			expectKeys(t, reqURL, tt.WantKeys)
 
-			resp, err := http.Get(reqURL)
-			if err != nil {
-				t.Fatalf("Get(%s) = %v, %v want: <response>, <nil>", reqURL, resp, err)
-			}
-			defer resp.Body.Close()
+			if tt.updatedKeysGetter != nil {
+				// modify the underlying keys, expect the same response
+				keysGetter.PublicKeysGetter = tt.updatedKeysGetter
+				expectKeys(t, reqURL, tt.WantKeys)
 
-			if resp.StatusCode != http.StatusOK {
-				t.Errorf("Get(%s) = %v, _ want: %v, _", reqURL, resp.StatusCode, http.StatusOK)
-			}
-
-			if got, want := resp.Header.Get("Content-Type"), "application/jwk-set+json"; got != want {
-				t.Errorf("Get(%s) Content-Type = %q, _ want: %q, _", reqURL, got, want)
-			}
-			if got, want := resp.Header.Get("Cache-Control"), "public, max-age=3600"; got != want {
-				t.Errorf("Get(%s) Cache-Control = %q, _ want: %q, _", reqURL, got, want)
-			}
-
-			ks := &jose.JSONWebKeySet{}
-			if err := json.NewDecoder(resp.Body).Decode(ks); err != nil {
-				t.Fatalf("Decode(_) = %v, want: <nil>", err)
-			}
-
-			bigIntComparer := cmp.Comparer(
-				func(x, y *big.Int) bool {
-					return x.Cmp(y) == 0
-				})
-			if !cmp.Equal(tt.WantKeys, ks.Keys, bigIntComparer) {
-				t.Errorf("unexpected diff in JWKS keys (-want, +got): %v",
-					cmp.Diff(tt.WantKeys, ks.Keys, bigIntComparer))
+				// notify the metadata the keys changed, expected a modified response
+				for _, listener := range keysGetter.listeners {
+					listener.Enqueue()
+				}
+				expectKeys(t, reqURL, tt.WantKeysPostUpdate)
 			}
 		})
 	}
 }
+func expectKeys(t *testing.T, reqURL string, wantKeys []jose.JSONWebKey) {
+	resp, err := http.Get(reqURL)
+	if err != nil {
+		t.Fatalf("Get(%s) = %v, %v want: <response>, <nil>", reqURL, resp, err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Get(%s) = %v, _ want: %v, _", reqURL, resp.StatusCode, http.StatusOK)
+	}
+
+	if got, want := resp.Header.Get("Content-Type"), "application/jwk-set+json"; got != want {
+		t.Errorf("Get(%s) Content-Type = %q, _ want: %q, _", reqURL, got, want)
+	}
+	if got, want := resp.Header.Get("Cache-Control"), "public, max-age=3600"; got != want {
+		t.Errorf("Get(%s) Cache-Control = %q, _ want: %q, _", reqURL, got, want)
+	}
+
+	ks := &jose.JSONWebKeySet{}
+	if err := json.NewDecoder(resp.Body).Decode(ks); err != nil {
+		t.Fatalf("Decode(_) = %v, want: <nil>", err)
+	}
+
+	bigIntComparer := cmp.Comparer(
+		func(x, y *big.Int) bool {
+			return x.Cmp(y) == 0
+		})
+	if !cmp.Equal(wantKeys, ks.Keys, bigIntComparer) {
+		t.Errorf("unexpected diff in JWKS keys (-want, +got): %v",
+			cmp.Diff(wantKeys, ks.Keys, bigIntComparer))
+	}
+}
 
 func TestURLBoundaries(t *testing.T) {
-	s, _ := setupServer(t, exampleIssuer, defaultKeys)
+	keysGetter, err := serviceaccount.StaticPublicKeysGetter(defaultKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := setupServer(t, exampleIssuer, keysGetter)
 	defer s.Close()
 
 	for _, tt := range []struct {
@@ -380,7 +544,11 @@ func TestNewOpenIDMetadata(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			md, err := serviceaccount.NewOpenIDMetadata(tc.issuerURL, tc.jwksURI, tc.externalAddress, tc.keys)
+			keysGetter, err := serviceaccount.StaticPublicKeysGetter(tc.keys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			md, err := serviceaccount.NewOpenIDMetadataProvider(tc.issuerURL, tc.jwksURI, tc.externalAddress, keysGetter)
 			if tc.err {
 				if err == nil {
 					t.Fatalf("got <nil>, want error")
@@ -390,14 +558,30 @@ func TestNewOpenIDMetadata(t *testing.T) {
 				t.Fatalf("got error %v, want <nil>", err)
 			}
 
-			config := string(md.ConfigJSON)
-			keyset := string(md.PublicKeysetJSON)
-			if config != tc.wantConfig {
-				t.Errorf("got metadata %s, want %s", config, tc.wantConfig)
+			config, _ := md.GetConfigJSON()
+			keyset, _ := md.GetKeysetJSON()
+			if string(config) != tc.wantConfig {
+				t.Errorf("got metadata %s, want %s", string(config), tc.wantConfig)
 			}
-			if keyset != tc.wantKeyset {
-				t.Errorf("got keyset %s, want %s", keyset, tc.wantKeyset)
+			if string(keyset) != tc.wantKeyset {
+				t.Errorf("got keyset %s, want %s", string(keyset), tc.wantKeyset)
 			}
 		})
 	}
+}
+
+type dummyPublicKeyGetter struct {
+	keys []serviceaccount.PublicKey
+}
+
+func (d dummyPublicKeyGetter) AddListener(listener serviceaccount.Listener) {
+	// no-op
+}
+
+func (d dummyPublicKeyGetter) GetCacheAgeMaxSeconds() int {
+	return 3600
+}
+
+func (d dummyPublicKeyGetter) GetPublicKeys(ctx context.Context, keyIDHint string) []serviceaccount.PublicKey {
+	return d.keys
 }

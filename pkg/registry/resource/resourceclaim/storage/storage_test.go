@@ -19,17 +19,18 @@ package storage
 import (
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/diff"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/generic"
 	genericregistrytest "k8s.io/apiserver/pkg/registry/generic/testing"
 	"k8s.io/apiserver/pkg/registry/rest"
 	etcd3testing "k8s.io/apiserver/pkg/storage/etcd3/testing"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/kubernetes/pkg/apis/resource"
 	_ "k8s.io/kubernetes/pkg/apis/resource/install"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
@@ -43,7 +44,9 @@ func newStorage(t *testing.T) (*REST, *StatusREST, *etcd3testing.EtcdTestServer)
 		DeleteCollectionWorkers: 1,
 		ResourcePrefix:          "resourceclaims",
 	}
-	resourceClaimStorage, statusStorage, err := NewREST(restOptions)
+	fakeClient := fake.NewSimpleClientset()
+	mockNSClient := fakeClient.CoreV1().Namespaces()
+	resourceClaimStorage, statusStorage, err := NewREST(restOptions, mockNSClient)
 	if err != nil {
 		t.Fatalf("unexpected error from REST storage: %v", err)
 	}
@@ -56,11 +59,6 @@ func validNewClaim(name, ns string) *resource.ResourceClaim {
 			Name:      name,
 			Namespace: ns,
 		},
-		Spec: resource.ResourceClaimSpec{
-			ResourceClassName: "example",
-			AllocationMode:    resource.AllocationModeImmediate,
-		},
-		Status: resource.ResourceClaimStatus{},
 	}
 	return claim
 }
@@ -97,6 +95,12 @@ func TestUpdate(t *testing.T) {
 				object.Labels = map[string]string{}
 			}
 			object.Labels["foo"] = "bar"
+			return object
+		},
+		// invalid update
+		func(obj runtime.Object) runtime.Object {
+			object := obj.(*resource.ResourceClaim)
+			object.Name = "^%$#@#%"
 			return object
 		},
 	)
@@ -164,7 +168,6 @@ func TestUpdateStatus(t *testing.T) {
 	}
 
 	claim := claimStart.DeepCopy()
-	claim.Status.DriverName = "some-driver.example.com"
 	claim.Status.Allocation = &resource.AllocationResult{}
 	_, _, err = statusStorage.Update(ctx, claim.Name, rest.DefaultUpdatedObjectInfo(claim), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc, false, &metav1.UpdateOptions{})
 	if err != nil {
@@ -177,6 +180,6 @@ func TestUpdateStatus(t *testing.T) {
 	claimOut := obj.(*resource.ResourceClaim)
 	// only compare relevant changes b/c of difference in metadata
 	if !apiequality.Semantic.DeepEqual(claim.Status, claimOut.Status) {
-		t.Errorf("unexpected object: %s", diff.ObjectDiff(claim.Status, claimOut.Status))
+		t.Errorf("unexpected object: %s", cmp.Diff(claim.Status, claimOut.Status))
 	}
 }

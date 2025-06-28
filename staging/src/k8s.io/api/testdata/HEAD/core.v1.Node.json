@@ -108,7 +108,10 @@
       "kubeletVersion": "kubeletVersionValue",
       "kubeProxyVersion": "kubeProxyVersionValue",
       "operatingSystem": "operatingSystemValue",
-      "architecture": "architectureValue"
+      "architecture": "architectureValue",
+      "swap": {
+        "capacity": 1
+      }
     },
     "images": [
       {
@@ -156,6 +159,18 @@
         }
       },
       "error": "errorValue"
+    },
+    "runtimeHandlers": [
+      {
+        "name": "nameValue",
+        "features": {
+          "recursiveReadOnlyMounts": true,
+          "userNamespaces": true
+        }
+      }
+    ],
+    "features": {
+      "supplementalGroupsPolicy": true
     }
   }
 }

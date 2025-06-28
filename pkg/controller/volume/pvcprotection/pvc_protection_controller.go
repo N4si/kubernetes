@@ -19,6 +19,7 @@ package pvcprotection
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -41,6 +42,65 @@ import (
 
 // Controller is controller that removes PVCProtectionFinalizer
 // from PVCs that are used by no pods.
+
+type LazyLivePodList struct {
+	cache      []v1.Pod
+	controller *Controller
+}
+
+func (ll *LazyLivePodList) getCache() []v1.Pod {
+	return ll.cache
+}
+
+func (ll *LazyLivePodList) setCache(pods []v1.Pod) {
+	ll.cache = pods
+}
+
+type pvcData struct {
+	pvcKey  string
+	pvcName string
+}
+
+type pvcProcessingStore struct {
+	namespaceToPVCsMap map[string][]pvcData
+	namespaceQueue     workqueue.TypedInterface[string]
+	mu                 sync.Mutex
+}
+
+func NewPVCProcessingStore() *pvcProcessingStore {
+	return &pvcProcessingStore{
+		namespaceToPVCsMap: make(map[string][]pvcData),
+		namespaceQueue:     workqueue.NewTyped[string](),
+	}
+}
+
+func (m *pvcProcessingStore) addOrUpdate(namespace string, pvcKey, pvcName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.namespaceToPVCsMap[namespace]; !exists {
+		m.namespaceToPVCsMap[namespace] = make([]pvcData, 0)
+		m.namespaceQueue.Add(namespace)
+	}
+	m.namespaceToPVCsMap[namespace] = append(m.namespaceToPVCsMap[namespace], pvcData{pvcKey: pvcKey, pvcName: pvcName})
+}
+
+// Returns a list of pvcs and the associated namespace to be processed downstream
+func (m *pvcProcessingStore) flushNextPVCsByNamespace() ([]pvcData, string) {
+
+	nextNamespace, quit := m.namespaceQueue.Get()
+	if quit {
+		return nil, nextNamespace
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pvcs := m.namespaceToPVCsMap[nextNamespace]
+
+	delete(m.namespaceToPVCsMap, nextNamespace)
+	m.namespaceQueue.Done(nextNamespace)
+	return pvcs, nextNamespace
+}
+
 type Controller struct {
 	client clientset.Interface
 
@@ -51,22 +111,29 @@ type Controller struct {
 	podListerSynced cache.InformerSynced
 	podIndexer      cache.Indexer
 
-	queue workqueue.RateLimitingInterface
+	queue              workqueue.TypedRateLimitingInterface[string]
+	pvcProcessingStore *pvcProcessingStore
 }
 
 // NewPVCProtectionController returns a new instance of PVCProtectionController.
-func NewPVCProtectionController(pvcInformer coreinformers.PersistentVolumeClaimInformer, podInformer coreinformers.PodInformer, cl clientset.Interface) (*Controller, error) {
+func NewPVCProtectionController(logger klog.Logger, pvcInformer coreinformers.PersistentVolumeClaimInformer, podInformer coreinformers.PodInformer, cl clientset.Interface) (*Controller, error) {
 	e := &Controller{
 		client: cl,
-		queue:  workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "pvcprotection"),
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.DefaultTypedControllerRateLimiter[string](),
+			workqueue.TypedRateLimitingQueueConfig[string]{Name: "pvcprotection"},
+		),
+		pvcProcessingStore: NewPVCProcessingStore(),
 	}
 
 	e.pvcLister = pvcInformer.Lister()
 	e.pvcListerSynced = pvcInformer.Informer().HasSynced
 	pvcInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: e.pvcAddedUpdated,
+		AddFunc: func(obj interface{}) {
+			e.pvcAddedUpdated(logger, obj)
+		},
 		UpdateFunc: func(old, new interface{}) {
-			e.pvcAddedUpdated(new)
+			e.pvcAddedUpdated(logger, new)
 		},
 	})
 
@@ -78,13 +145,13 @@ func NewPVCProtectionController(pvcInformer coreinformers.PersistentVolumeClaimI
 	}
 	podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			e.podAddedDeletedUpdated(nil, obj, false)
+			e.podAddedDeletedUpdated(logger, nil, obj, false)
 		},
 		DeleteFunc: func(obj interface{}) {
-			e.podAddedDeletedUpdated(nil, obj, true)
+			e.podAddedDeletedUpdated(logger, nil, obj, true)
 		},
 		UpdateFunc: func(old, new interface{}) {
-			e.podAddedDeletedUpdated(old, new, false)
+			e.podAddedDeletedUpdated(logger, old, new, false)
 		},
 	})
 
@@ -95,62 +162,84 @@ func NewPVCProtectionController(pvcInformer coreinformers.PersistentVolumeClaimI
 func (c *Controller) Run(ctx context.Context, workers int) {
 	defer utilruntime.HandleCrash()
 	defer c.queue.ShutDown()
+	defer c.pvcProcessingStore.namespaceQueue.ShutDown()
 
-	klog.InfoS("Starting PVC protection controller")
-	defer klog.InfoS("Shutting down PVC protection controller")
+	logger := klog.FromContext(ctx)
+	logger.Info("Starting PVC protection controller")
+	defer logger.Info("Shutting down PVC protection controller")
 
 	if !cache.WaitForNamedCacheSync("PVC protection", ctx.Done(), c.pvcListerSynced, c.podListerSynced) {
 		return
 	}
 
+	go wait.UntilWithContext(ctx, c.runMainWorker, time.Second)
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, c.runWorker, time.Second)
+		go wait.UntilWithContext(ctx, c.runProcessNamespaceWorker, time.Second)
 	}
 
 	<-ctx.Done()
 }
 
-func (c *Controller) runWorker(ctx context.Context) {
-	for c.processNextWorkItem(ctx) {
+// Main worker batch-pulls PVC items off informer's work queue and populates namespace queue and namespace-PVCs map
+func (c *Controller) runMainWorker(ctx context.Context) {
+	for c.processNextWorkItem() {
 	}
 }
 
-// processNextWorkItem deals with one pvcKey off the queue.  It returns false when it's time to quit.
-func (c *Controller) processNextWorkItem(ctx context.Context) bool {
+// Consumer worker pulls items off namespace queue and processes associated PVCs
+func (c *Controller) runProcessNamespaceWorker(ctx context.Context) {
+	for c.processPVCsByNamespace(ctx) {
+	}
+}
+
+func (c *Controller) processNextWorkItem() bool {
 	pvcKey, quit := c.queue.Get()
 	if quit {
 		return false
 	}
-	defer c.queue.Done(pvcKey)
 
-	pvcNamespace, pvcName, err := cache.SplitMetaNamespaceKey(pvcKey.(string))
+	pvcNamespace, pvcName, err := cache.SplitMetaNamespaceKey(pvcKey)
 	if err != nil {
-		utilruntime.HandleError(fmt.Errorf("error parsing PVC key %q: %v", pvcKey, err))
+		utilruntime.HandleError(fmt.Errorf("error parsing PVC key %q: %w", pvcKey, err))
 		return true
 	}
 
-	err = c.processPVC(ctx, pvcNamespace, pvcName)
-	if err == nil {
-		c.queue.Forget(pvcKey)
-		return true
-	}
-
-	utilruntime.HandleError(fmt.Errorf("PVC %v failed with : %v", pvcKey, err))
-	c.queue.AddRateLimited(pvcKey)
-
+	c.pvcProcessingStore.addOrUpdate(pvcNamespace, pvcKey, pvcName)
 	return true
 }
 
-func (c *Controller) processPVC(ctx context.Context, pvcNamespace, pvcName string) error {
-	klog.V(4).InfoS("Processing PVC", "PVC", klog.KRef(pvcNamespace, pvcName))
+func (c *Controller) processPVCsByNamespace(ctx context.Context) bool {
+	pvcList, namespace := c.pvcProcessingStore.flushNextPVCsByNamespace()
+	if pvcList == nil {
+		return false
+	}
+
+	lazyLivePodList := &LazyLivePodList{controller: c}
+	for _, item := range pvcList {
+		pvcKey, pvcName := item.pvcKey, item.pvcName
+		err := c.processPVC(ctx, namespace, pvcName, lazyLivePodList)
+		if err == nil {
+			c.queue.Forget(pvcKey)
+		} else {
+			c.queue.AddRateLimited(pvcKey)
+			utilruntime.HandleError(fmt.Errorf("PVC %v/%v failed with: %w", pvcName, namespace, err))
+		}
+		c.queue.Done(pvcKey)
+	}
+	return true
+}
+
+func (c *Controller) processPVC(ctx context.Context, pvcNamespace, pvcName string, lazyLivePodList *LazyLivePodList) error {
+	logger := klog.FromContext(ctx)
+	logger.V(4).Info("Processing PVC", "PVC", klog.KRef(pvcNamespace, pvcName))
 	startTime := time.Now()
 	defer func() {
-		klog.V(4).InfoS("Finished processing PVC", "PVC", klog.KRef(pvcNamespace, pvcName), "duration", time.Since(startTime))
+		logger.V(4).Info("Finished processing PVC", "PVC", klog.KRef(pvcNamespace, pvcName), "duration", time.Since(startTime))
 	}()
 
 	pvc, err := c.pvcLister.PersistentVolumeClaims(pvcNamespace).Get(pvcName)
 	if apierrors.IsNotFound(err) {
-		klog.V(4).InfoS("PVC not found, ignoring", "PVC", klog.KRef(pvcNamespace, pvcName))
+		logger.V(4).Info("PVC not found, ignoring", "PVC", klog.KRef(pvcNamespace, pvcName))
 		return nil
 	}
 	if err != nil {
@@ -160,14 +249,14 @@ func (c *Controller) processPVC(ctx context.Context, pvcNamespace, pvcName strin
 	if protectionutil.IsDeletionCandidate(pvc, volumeutil.PVCProtectionFinalizer) {
 		// PVC should be deleted. Check if it's used and remove finalizer if
 		// it's not.
-		isUsed, err := c.isBeingUsed(ctx, pvc)
+		isUsed, err := c.isBeingUsed(ctx, pvc, lazyLivePodList)
 		if err != nil {
 			return err
 		}
 		if !isUsed {
 			return c.removeFinalizer(ctx, pvc)
 		}
-		klog.V(2).InfoS("Keeping PVC because it is being used", "PVC", klog.KObj(pvc))
+		logger.V(2).Info("Keeping PVC because it is being used", "PVC", klog.KObj(pvc))
 	}
 
 	if protectionutil.NeedToAddFinalizer(pvc, volumeutil.PVCProtectionFinalizer) {
@@ -184,11 +273,12 @@ func (c *Controller) addFinalizer(ctx context.Context, pvc *v1.PersistentVolumeC
 	claimClone := pvc.DeepCopy()
 	claimClone.ObjectMeta.Finalizers = append(claimClone.ObjectMeta.Finalizers, volumeutil.PVCProtectionFinalizer)
 	_, err := c.client.CoreV1().PersistentVolumeClaims(claimClone.Namespace).Update(ctx, claimClone, metav1.UpdateOptions{})
+	logger := klog.FromContext(ctx)
 	if err != nil {
-		klog.ErrorS(err, "Error adding protection finalizer to PVC", "PVC", klog.KObj(pvc))
+		logger.Error(err, "Error adding protection finalizer to PVC", "PVC", klog.KObj(pvc))
 		return err
 	}
-	klog.V(3).InfoS("Added protection finalizer to PVC", "PVC", klog.KObj(pvc))
+	logger.V(3).Info("Added protection finalizer to PVC", "PVC", klog.KObj(pvc))
 	return nil
 }
 
@@ -196,21 +286,23 @@ func (c *Controller) removeFinalizer(ctx context.Context, pvc *v1.PersistentVolu
 	claimClone := pvc.DeepCopy()
 	claimClone.ObjectMeta.Finalizers = slice.RemoveString(claimClone.ObjectMeta.Finalizers, volumeutil.PVCProtectionFinalizer, nil)
 	_, err := c.client.CoreV1().PersistentVolumeClaims(claimClone.Namespace).Update(ctx, claimClone, metav1.UpdateOptions{})
+	logger := klog.FromContext(ctx)
 	if err != nil {
-		klog.ErrorS(err, "Error removing protection finalizer from PVC", "PVC", klog.KObj(pvc))
+		logger.Error(err, "Error removing protection finalizer from PVC", "PVC", klog.KObj(pvc))
 		return err
 	}
-	klog.V(3).InfoS("Removed protection finalizer from PVC", "PVC", klog.KObj(pvc))
+	logger.V(3).Info("Removed protection finalizer from PVC", "PVC", klog.KObj(pvc))
 	return nil
 }
 
-func (c *Controller) isBeingUsed(ctx context.Context, pvc *v1.PersistentVolumeClaim) (bool, error) {
+func (c *Controller) isBeingUsed(ctx context.Context, pvc *v1.PersistentVolumeClaim, lazyLivePodList *LazyLivePodList) (bool, error) {
 	// Look for a Pod using pvc in the Informer's cache. If one is found the
 	// correct decision to keep pvc is taken without doing an expensive live
 	// list.
-	if inUse, err := c.askInformer(pvc); err != nil {
+	logger := klog.FromContext(ctx)
+	if inUse, err := c.askInformer(logger, pvc); err != nil {
 		// No need to return because a live list will follow.
-		klog.Error(err)
+		logger.Error(err, "")
 	} else if inUse {
 		return true, nil
 	}
@@ -218,12 +310,16 @@ func (c *Controller) isBeingUsed(ctx context.Context, pvc *v1.PersistentVolumeCl
 	// Even if no Pod using pvc was found in the Informer's cache it doesn't
 	// mean such a Pod doesn't exist: it might just not be in the cache yet. To
 	// be 100% confident that it is safe to delete pvc make sure no Pod is using
-	// it among those returned by a live list.
-	return c.askAPIServer(ctx, pvc)
+	// it among those returned by a "lazy" live list.
+
+	// Use a "lazy" live pod list: lazyLivePodList caches the first successful live pod list response,
+	// so for a large number of PVC deletions in a short duration, subsequent requests can use the cached pod list
+	// instead of issuing a lot of API requests. The cache is refreshed for each run of processNextWorkItem().
+	return c.askAPIServer(ctx, pvc, lazyLivePodList)
 }
 
-func (c *Controller) askInformer(pvc *v1.PersistentVolumeClaim) (bool, error) {
-	klog.V(4).InfoS("Looking for Pods using PVC in the Informer's cache", "PVC", klog.KObj(pvc))
+func (c *Controller) askInformer(logger klog.Logger, pvc *v1.PersistentVolumeClaim) (bool, error) {
+	logger.V(4).Info("Looking for Pods using PVC in the Informer's cache", "PVC", klog.KObj(pvc))
 
 	// The indexer is used to find pods which might use the PVC.
 	objs, err := c.podIndexer.ByIndex(common.PodPVCIndex, fmt.Sprintf("%s/%s", pvc.Namespace, pvc.Name))
@@ -239,34 +335,43 @@ func (c *Controller) askInformer(pvc *v1.PersistentVolumeClaim) (bool, error) {
 		// We still need to look at each volume: that's redundant for volume.PersistentVolumeClaim,
 		// but for volume.Ephemeral we need to be sure that this particular PVC is the one
 		// created for the ephemeral volume.
-		if c.podUsesPVC(pod, pvc) {
+		if c.podUsesPVC(logger, pod, pvc) {
 			return true, nil
 		}
 	}
 
-	klog.V(4).InfoS("No Pod using PVC was found in the Informer's cache", "PVC", klog.KObj(pvc))
+	logger.V(4).Info("No Pod using PVC was found in the Informer's cache", "PVC", klog.KObj(pvc))
 	return false, nil
 }
 
-func (c *Controller) askAPIServer(ctx context.Context, pvc *v1.PersistentVolumeClaim) (bool, error) {
-	klog.V(4).InfoS("Looking for Pods using PVC with a live list", "PVC", klog.KObj(pvc))
+func (c *Controller) askAPIServer(ctx context.Context, pvc *v1.PersistentVolumeClaim, lazyLivePodList *LazyLivePodList) (bool, error) {
+	logger := klog.FromContext(ctx)
+	logger.V(4).Info("Looking for Pods using PVC", "PVC", klog.KObj(pvc))
+	if lazyLivePodList.getCache() == nil {
+		logger.V(4).Info("Live listing Pods in namespace", "namespace", pvc.Namespace)
+		podsList, err := c.client.CoreV1().Pods(pvc.Namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return false, fmt.Errorf("live list of pods failed: %s", err.Error())
+		}
 
-	podsList, err := c.client.CoreV1().Pods(pvc.Namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return false, fmt.Errorf("live list of pods failed: %s", err.Error())
+		if podsList.Items == nil {
+			lazyLivePodList.setCache(make([]v1.Pod, 0))
+		} else {
+			lazyLivePodList.setCache(podsList.Items)
+		}
 	}
 
-	for _, pod := range podsList.Items {
-		if c.podUsesPVC(&pod, pvc) {
+	for _, pod := range lazyLivePodList.getCache() {
+		if c.podUsesPVC(logger, &pod, pvc) {
 			return true, nil
 		}
 	}
 
-	klog.V(2).InfoS("PVC is unused", "PVC", klog.KObj(pvc))
+	logger.V(2).Info("PVC is unused", "PVC", klog.KObj(pvc))
 	return false, nil
 }
 
-func (c *Controller) podUsesPVC(pod *v1.Pod, pvc *v1.PersistentVolumeClaim) bool {
+func (c *Controller) podUsesPVC(logger klog.Logger, pod *v1.Pod, pvc *v1.PersistentVolumeClaim) bool {
 	// Check whether pvc is used by pod only if pod is scheduled, because
 	// kubelet sees pods after they have been scheduled and it won't allow
 	// starting a pod referencing a PVC with a non-nil deletionTimestamp.
@@ -274,7 +379,7 @@ func (c *Controller) podUsesPVC(pod *v1.Pod, pvc *v1.PersistentVolumeClaim) bool
 		for _, volume := range pod.Spec.Volumes {
 			if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == pvc.Name ||
 				!podIsShutDown(pod) && volume.Ephemeral != nil && ephemeral.VolumeClaimName(pod, &volume) == pvc.Name && ephemeral.VolumeIsForPod(pod, pvc) == nil {
-				klog.V(2).InfoS("Pod uses PVC", "pod", klog.KObj(pod), "PVC", klog.KObj(pvc))
+				logger.V(2).Info("Pod uses PVC", "pod", klog.KObj(pod), "PVC", klog.KObj(pvc))
 				return true
 			}
 		}
@@ -313,7 +418,7 @@ func podIsShutDown(pod *v1.Pod) bool {
 }
 
 // pvcAddedUpdated reacts to pvc added/updated events
-func (c *Controller) pvcAddedUpdated(obj interface{}) {
+func (c *Controller) pvcAddedUpdated(logger klog.Logger, obj interface{}) {
 	pvc, ok := obj.(*v1.PersistentVolumeClaim)
 	if !ok {
 		utilruntime.HandleError(fmt.Errorf("PVC informer returned non-PVC object: %#v", obj))
@@ -324,7 +429,7 @@ func (c *Controller) pvcAddedUpdated(obj interface{}) {
 		utilruntime.HandleError(fmt.Errorf("couldn't get key for Persistent Volume Claim %#v: %v", pvc, err))
 		return
 	}
-	klog.V(4).InfoS("Got event on PVC", "pvc", klog.KObj(pvc))
+	logger.V(4).Info("Got event on PVC", "pvc", klog.KObj(pvc))
 
 	if protectionutil.NeedToAddFinalizer(pvc, volumeutil.PVCProtectionFinalizer) || protectionutil.IsDeletionCandidate(pvc, volumeutil.PVCProtectionFinalizer) {
 		c.queue.Add(key)
@@ -332,9 +437,9 @@ func (c *Controller) pvcAddedUpdated(obj interface{}) {
 }
 
 // podAddedDeletedUpdated reacts to Pod events
-func (c *Controller) podAddedDeletedUpdated(old, new interface{}, deleted bool) {
+func (c *Controller) podAddedDeletedUpdated(logger klog.Logger, old, new interface{}, deleted bool) {
 	if pod := c.parsePod(new); pod != nil {
-		c.enqueuePVCs(pod, deleted)
+		c.enqueuePVCs(logger, pod, deleted)
 
 		// An update notification might mask the deletion of a pod X and the
 		// following creation of a pod Y with the same namespaced name as X. If
@@ -342,7 +447,7 @@ func (c *Controller) podAddedDeletedUpdated(old, new interface{}, deleted bool) 
 		// where it is blocking deletion of a PVC not referenced by Y, otherwise
 		// such PVC will never be deleted.
 		if oldPod := c.parsePod(old); oldPod != nil && oldPod.UID != pod.UID {
-			c.enqueuePVCs(oldPod, true)
+			c.enqueuePVCs(logger, oldPod, true)
 		}
 	}
 }
@@ -367,13 +472,13 @@ func (*Controller) parsePod(obj interface{}) *v1.Pod {
 	return pod
 }
 
-func (c *Controller) enqueuePVCs(pod *v1.Pod, deleted bool) {
+func (c *Controller) enqueuePVCs(logger klog.Logger, pod *v1.Pod, deleted bool) {
 	// Filter out pods that can't help us to remove a finalizer on PVC
 	if !deleted && !volumeutil.IsPodTerminated(pod, pod.Status) && pod.Spec.NodeName != "" {
 		return
 	}
 
-	klog.V(4).InfoS("Enqueuing PVCs for Pod", "pod", klog.KObj(pod), "podUID", pod.UID)
+	logger.V(4).Info("Enqueuing PVCs for Pod", "pod", klog.KObj(pod), "podUID", pod.UID)
 
 	// Enqueue all PVCs that the pod uses
 	for _, volume := range pod.Spec.Volumes {

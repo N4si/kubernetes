@@ -21,7 +21,6 @@ import (
 	discovery "k8s.io/api/discovery/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/proxy"
-	"k8s.io/kubernetes/pkg/proxy/config"
 )
 
 type metaProxier struct {
@@ -29,8 +28,6 @@ type metaProxier struct {
 	ipv4Proxier proxy.Provider
 	// actual, wrapped
 	ipv6Proxier proxy.Provider
-	// TODO(imroc): implement node handler for meta proxier.
-	config.NoopNodeHandler
 }
 
 // NewMetaProxier returns a dual-stack "meta-proxier". Proxier API
@@ -157,4 +154,11 @@ func (proxier *metaProxier) OnNodeDelete(node *v1.Node) {
 func (proxier *metaProxier) OnNodeSynced() {
 	proxier.ipv4Proxier.OnNodeSynced()
 	proxier.ipv6Proxier.OnNodeSynced()
+}
+
+// OnServiceCIDRsChanged is called whenever a change is observed
+// in any of the ServiceCIDRs, and provides complete list of service cidrs.
+func (proxier *metaProxier) OnServiceCIDRsChanged(cidrs []string) {
+	proxier.ipv4Proxier.OnServiceCIDRsChanged(cidrs)
+	proxier.ipv6Proxier.OnServiceCIDRsChanged(cidrs)
 }

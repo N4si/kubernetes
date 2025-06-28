@@ -20,7 +20,7 @@ import (
 	"reflect"
 	"strings"
 
-	fuzz "github.com/google/gofuzz"
+	"sigs.k8s.io/randfill"
 
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,8 +33,8 @@ var swaggerMetadataDescriptions = metav1.ObjectMeta{}.SwaggerDoc()
 // Funcs returns the fuzzer functions for the apiextensions apis.
 func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 	return []interface{}{
-		func(obj *apiextensions.CustomResourceDefinitionSpec, c fuzz.Continue) {
-			c.FuzzNoCustom(obj)
+		func(obj *apiextensions.CustomResourceDefinitionSpec, c randfill.Continue) {
+			c.FillNoCustom(obj)
 
 			// match our defaulter
 			if len(obj.Scope) == 0 {
@@ -66,6 +66,7 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 					{Name: "Age", Type: "date", Description: swaggerMetadataDescriptions["creationTimestamp"], JSONPath: ".metadata.creationTimestamp"},
 				}
 			}
+			c.Fill(&obj.SelectableFields)
 			if obj.Conversion == nil {
 				obj.Conversion = &apiextensions.CustomResourceConversion{
 					Strategy: apiextensions.NoneConverter,
@@ -78,7 +79,7 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 				obj.PreserveUnknownFields = pointer.BoolPtr(true)
 			}
 
-			// Move per-version schema, subresources, additionalPrinterColumns to the top-level.
+			// Move per-version schema, subresources, additionalPrinterColumns, selectableFields to the top-level.
 			// This is required by validation in v1beta1, and by round-tripping in v1.
 			if len(obj.Versions) == 1 {
 				if obj.Versions[0].Schema != nil {
@@ -89,14 +90,18 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 					obj.AdditionalPrinterColumns = obj.Versions[0].AdditionalPrinterColumns
 					obj.Versions[0].AdditionalPrinterColumns = nil
 				}
+				if obj.Versions[0].SelectableFields != nil {
+					obj.SelectableFields = obj.Versions[0].SelectableFields
+					obj.Versions[0].SelectableFields = nil
+				}
 				if obj.Versions[0].Subresources != nil {
 					obj.Subresources = obj.Versions[0].Subresources
 					obj.Versions[0].Subresources = nil
 				}
 			}
 		},
-		func(obj *apiextensions.CustomResourceDefinition, c fuzz.Continue) {
-			c.FuzzNoCustom(obj)
+		func(obj *apiextensions.CustomResourceDefinition, c randfill.Continue) {
+			c.FillNoCustom(obj)
 
 			if len(obj.Status.StoredVersions) == 0 {
 				for _, v := range obj.Spec.Versions {
@@ -106,7 +111,7 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 				}
 			}
 		},
-		func(obj *apiextensions.JSONSchemaProps, c fuzz.Continue) {
+		func(obj *apiextensions.JSONSchemaProps, c randfill.Continue) {
 			// we cannot use c.FuzzNoCustom because of the interface{} fields. So let's loop with reflection.
 			vobj := reflect.ValueOf(obj).Elem()
 			tobj := reflect.TypeOf(obj).Elem()
@@ -122,22 +127,22 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 						isValue = false
 					}
 					if isValue || c.Intn(10) == 0 {
-						c.Fuzz(vobj.Field(i).Addr().Interface())
+						c.Fill(vobj.Field(i).Addr().Interface())
 					}
 				}
 			}
-			if c.RandBool() {
+			if c.Bool() {
 				validJSON := apiextensions.JSON(`{"some": {"json": "test"}, "string": 42}`)
 				obj.Default = &validJSON
 			}
-			if c.RandBool() {
-				obj.Enum = []apiextensions.JSON{c.Float64(), c.RandString(), c.RandBool()}
+			if c.Bool() {
+				obj.Enum = []apiextensions.JSON{c.Float64(), c.String(0), c.Bool()}
 			}
-			if c.RandBool() {
+			if c.Bool() {
 				validJSON := apiextensions.JSON(`"foobarbaz"`)
 				obj.Example = &validJSON
 			}
-			if c.RandBool() {
+			if c.Bool() {
 				validRef := "validRef"
 				obj.Ref = &validRef
 			}
@@ -148,38 +153,44 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 				obj.Type = ""
 			}
 		},
-		func(obj *apiextensions.JSONSchemaPropsOrBool, c fuzz.Continue) {
-			if c.RandBool() {
+		func(obj *apiextensions.JSONSchemaPropsOrBool, c randfill.Continue) {
+			if c.Bool() {
 				obj.Allows = true
 				obj.Schema = &apiextensions.JSONSchemaProps{}
-				c.Fuzz(obj.Schema)
+				c.Fill(obj.Schema)
 			} else {
-				obj.Allows = c.RandBool()
+				obj.Allows = c.Bool()
 			}
 		},
-		func(obj *apiextensions.JSONSchemaPropsOrArray, c fuzz.Continue) {
+		func(obj *apiextensions.JSONSchemaPropsOrArray, c randfill.Continue) {
 			// disallow both Schema and JSONSchemas to be nil.
-			if c.RandBool() {
+			if c.Bool() {
 				obj.Schema = &apiextensions.JSONSchemaProps{}
-				c.Fuzz(obj.Schema)
+				c.Fill(obj.Schema)
 			} else {
 				obj.JSONSchemas = make([]apiextensions.JSONSchemaProps, c.Intn(3)+1)
 				for i := range obj.JSONSchemas {
-					c.Fuzz(&obj.JSONSchemas[i])
+					c.Fill(&obj.JSONSchemas[i])
 				}
 			}
 		},
-		func(obj *apiextensions.JSONSchemaPropsOrStringArray, c fuzz.Continue) {
-			if c.RandBool() {
+		func(obj *apiextensions.JSONSchemaPropsOrStringArray, c randfill.Continue) {
+			if c.Bool() {
 				obj.Schema = &apiextensions.JSONSchemaProps{}
-				c.Fuzz(obj.Schema)
+				c.Fill(obj.Schema)
 			} else {
-				c.Fuzz(&obj.Property)
+				c.Fill(&obj.Property)
 			}
 		},
-		func(obj *int64, c fuzz.Continue) {
+		func(obj *int64, c randfill.Continue) {
 			// JSON only supports 53 bits because everything is a float
 			*obj = int64(c.Uint64()) & ((int64(1) << 53) - 1)
+		},
+		func(obj *apiextensions.ValidationRule, c randfill.Continue) {
+			c.FillNoCustom(obj)
+			if obj.Reason != nil && *(obj.Reason) == "" {
+				obj.Reason = nil
+			}
 		},
 	}
 }

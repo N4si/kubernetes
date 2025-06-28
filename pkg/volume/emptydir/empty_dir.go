@@ -21,6 +21,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/kubernetes/pkg/kubelet/util/swap"
+
 	"k8s.io/klog/v2"
 	"k8s.io/mount-utils"
 	utilstrings "k8s.io/utils/strings"
@@ -30,9 +33,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	resourcehelper "k8s.io/component-helpers/resource"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
-	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
+	usernamespacefeature "k8s.io/kubernetes/pkg/kubelet/userns"
 	"k8s.io/kubernetes/pkg/volume"
 	volumeutil "k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/kubernetes/pkg/volume/util/fsquota"
@@ -80,7 +84,7 @@ func (plugin *emptyDirPlugin) GetPluginName() string {
 func (plugin *emptyDirPlugin) GetVolumeName(spec *volume.Spec) (string, error) {
 	volumeSource, _ := getVolumeSource(spec)
 	if volumeSource == nil {
-		return "", fmt.Errorf("Spec does not reference an EmptyDir volume type")
+		return "", fmt.Errorf("spec does not reference an emptyDir volume type")
 	}
 
 	// Return user defined volume name, since this is an ephemeral volume type
@@ -99,16 +103,12 @@ func (plugin *emptyDirPlugin) SupportsMountOption() bool {
 	return false
 }
 
-func (plugin *emptyDirPlugin) SupportsBulkVolumeVerification() bool {
-	return false
-}
-
 func (plugin *emptyDirPlugin) SupportsSELinuxContextMount(spec *volume.Spec) (bool, error) {
 	return false, nil
 }
 
-func (plugin *emptyDirPlugin) NewMounter(spec *volume.Spec, pod *v1.Pod, opts volume.VolumeOptions) (volume.Mounter, error) {
-	return plugin.newMounterInternal(spec, pod, plugin.host.GetMounter(plugin.GetPluginName()), &realMountDetector{plugin.host.GetMounter(plugin.GetPluginName())}, opts)
+func (plugin *emptyDirPlugin) NewMounter(spec *volume.Spec, pod *v1.Pod) (volume.Mounter, error) {
+	return plugin.newMounterInternal(spec, pod, plugin.host.GetMounter(), &realMountDetector{plugin.host.GetMounter()})
 }
 
 func calculateEmptyDirMemorySize(nodeAllocatableMemory *resource.Quantity, spec *volume.Spec, pod *v1.Pod) *resource.Quantity {
@@ -145,7 +145,7 @@ func calculateEmptyDirMemorySize(nodeAllocatableMemory *resource.Quantity, spec 
 	return sizeLimit
 }
 
-func (plugin *emptyDirPlugin) newMounterInternal(spec *volume.Spec, pod *v1.Pod, mounter mount.Interface, mountDetector mountDetector, opts volume.VolumeOptions) (volume.Mounter, error) {
+func (plugin *emptyDirPlugin) newMounterInternal(spec *volume.Spec, pod *v1.Pod, mounter mount.Interface, mountDetector mountDetector) (volume.Mounter, error) {
 	medium := v1.StorageMediumDefault
 	sizeLimit := &resource.Quantity{}
 	if spec.Volume.EmptyDir != nil { // Support a non-specified source as EmptyDir.
@@ -172,7 +172,7 @@ func (plugin *emptyDirPlugin) newMounterInternal(spec *volume.Spec, pod *v1.Pod,
 
 func (plugin *emptyDirPlugin) NewUnmounter(volName string, podUID types.UID) (volume.Unmounter, error) {
 	// Inject real implementations here, test through the internal function.
-	return plugin.newUnmounterInternal(volName, podUID, plugin.host.GetMounter(plugin.GetPluginName()), &realMountDetector{plugin.host.GetMounter(plugin.GetPluginName())})
+	return plugin.newUnmounterInternal(volName, podUID, plugin.host.GetMounter(), &realMountDetector{plugin.host.GetMounter()})
 }
 
 func (plugin *emptyDirPlugin) newUnmounterInternal(volName string, podUID types.UID, mounter mount.Interface, mountDetector mountDetector) (volume.Unmounter, error) {
@@ -280,7 +280,8 @@ func (ed *emptyDir) SetUpAt(dir string, mounterArgs volume.MounterArgs) error {
 		err = fmt.Errorf("unknown storage medium %q", ed.medium)
 	}
 
-	volume.SetVolumeOwnership(ed, mounterArgs.FsGroup, nil /*fsGroupChangePolicy*/, volumeutil.FSGroupCompleteHook(ed.plugin, nil))
+	ownershipChanger := volume.NewVolumeOwnership(ed, dir, mounterArgs.FsGroup, nil /*fsGroupChangePolicy*/, volumeutil.FSGroupCompleteHook(ed.plugin, nil))
+	_ = ownershipChanger.ChangePermissions()
 
 	// If setting up the quota fails, just log a message but don't actually error out.
 	// We'll use the old du mechanism in this case, at least until we support
@@ -297,18 +298,19 @@ func (ed *emptyDir) assignQuota(dir string, mounterSize *resource.Quantity) erro
 	if mounterSize != nil {
 		// Deliberately shadow the outer use of err as noted
 		// above.
-		hasQuotas, err := fsquota.SupportsQuotas(ed.mounter, dir)
+		// hostUsers field is interpreted as true by default, so a pod is by default
+		// not confined by a user namespace.
+		userNamespacesEnabled := false
+		if usernamespacefeature.EnabledUserNamespacesSupport() {
+			userNamespacesEnabled = ed.pod.Spec.HostUsers != nil && !*ed.pod.Spec.HostUsers
+		}
+		hasQuotas, err := fsquota.SupportsQuotas(ed.mounter, dir, userNamespacesEnabled)
+		klog.V(3).Infof("assignQuota called, hasQuotas = %t userNamespacesEnabled = %t", hasQuotas, userNamespacesEnabled)
 		if err != nil {
 			klog.V(3).Infof("Unable to check for quota support on %s: %s", dir, err.Error())
 		} else if hasQuotas {
-			_, err := fsquota.GetQuotaOnDir(ed.mounter, dir)
-			if err != nil {
-				klog.V(4).Infof("Attempt to check quota on dir %s failed: %v", dir, err)
-				// this is not a fatal error so return nil
-				return nil
-			}
-			klog.V(4).Infof("emptydir trying to assign quota %v on %s", mounterSize, dir)
-			if err := fsquota.AssignQuota(ed.mounter, dir, ed.pod.UID, mounterSize); err != nil {
+			klog.V(3).Infof("emptydir trying to assign quota %v on %s", mounterSize, dir)
+			if err := fsquota.AssignQuota(ed.mounter, dir, ed.pod.UID, mounterSize, userNamespacesEnabled); err != nil {
 				klog.V(3).Infof("Set quota on %s failed %s", dir, err.Error())
 				return err
 			}
@@ -337,11 +339,7 @@ func (ed *emptyDir) setupTmpfs(dir string) error {
 		return nil
 	}
 
-	var options []string
-	// Linux system default is 50% of capacity.
-	if ed.sizeLimit != nil && ed.sizeLimit.Value() > 0 {
-		options = []string{fmt.Sprintf("size=%d", ed.sizeLimit.Value())}
-	}
+	options := ed.generateTmpfsMountOptions(swap.IsTmpfsNoswapOptionSupported(ed.mounter, ed.plugin.host.GetPluginDir(emptyDirPluginName)))
 
 	klog.V(3).Infof("pod %v: mounting tmpfs for volume %v", ed.pod.UID, ed.volName)
 	return ed.mounter.MountSensitiveWithoutSystemd("tmpfs", dir, "tmpfs", options, nil)
@@ -408,10 +406,19 @@ func getPageSizeMountOption(medium v1.StorageMedium, pod *v1.Pod) (string, error
 		}
 	}
 
+	podLevelAndContainerLevelRequests := []v1.ResourceList{}
+	if utilfeature.DefaultFeatureGate.Enabled(features.PodLevelResources) && resourcehelper.IsPodLevelResourcesSet(pod) {
+		podLevelAndContainerLevelRequests = append(podLevelAndContainerLevelRequests, pod.Spec.Resources.Requests)
+	}
+
 	// In some rare cases init containers can also consume Huge pages
 	for _, container := range append(pod.Spec.Containers, pod.Spec.InitContainers...) {
-		// We can take request because limit and requests must match.
-		for requestName := range container.Resources.Requests {
+		podLevelAndContainerLevelRequests = append(podLevelAndContainerLevelRequests, container.Resources.Requests)
+	}
+
+	// We can take request because limit and requests must match.
+	for _, resourceList := range podLevelAndContainerLevelRequests {
+		for requestName := range resourceList {
 			if !v1helper.IsHugePageResourceName(requestName) {
 				continue
 			}
@@ -441,7 +448,6 @@ func getPageSizeMountOption(medium v1.StorageMedium, pod *v1.Pod) (string, error
 	}
 
 	return fmt.Sprintf("%s=%s", hugePagesPageSizeMountOption, pageSize.String()), nil
-
 }
 
 // setupDir creates the directory with the default permissions specified by the perm constant.
@@ -525,10 +531,16 @@ func (ed *emptyDir) TearDownAt(dir string) error {
 }
 
 func (ed *emptyDir) teardownDefault(dir string) error {
-	// Remove any quota
-	err := fsquota.ClearQuota(ed.mounter, dir)
-	if err != nil {
-		klog.Warningf("Warning: Failed to clear quota on %s: %v", dir, err)
+	if utilfeature.DefaultFeatureGate.Enabled(features.LocalStorageCapacityIsolationFSQuotaMonitoring) {
+		// Remove any quota
+		userNamespacesEnabled := false
+		if usernamespacefeature.EnabledUserNamespacesSupport() {
+			userNamespacesEnabled = ed.pod.Spec.HostUsers != nil && !*ed.pod.Spec.HostUsers
+		}
+		err := fsquota.ClearQuota(ed.mounter, dir, userNamespacesEnabled)
+		if err != nil {
+			klog.Warningf("Warning: Failed to clear quota on %s: %v", dir, err)
+		}
 	}
 	// Renaming the directory is not required anymore because the operation executor
 	// now handles duplicate operations on the same volume
@@ -562,4 +574,17 @@ func getVolumeSource(spec *volume.Spec) (*v1.EmptyDirVolumeSource, bool) {
 	}
 
 	return volumeSource, readOnly
+}
+
+func (ed *emptyDir) generateTmpfsMountOptions(noswapSupported bool) (options []string) {
+	// Linux system default is 50% of capacity.
+	if ed.sizeLimit != nil && ed.sizeLimit.Value() > 0 {
+		options = append(options, fmt.Sprintf("size=%d", ed.sizeLimit.Value()))
+	}
+
+	if noswapSupported {
+		options = append(options, swap.TmpfsNoswapOption)
+	}
+
+	return options
 }

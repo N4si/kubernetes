@@ -17,20 +17,35 @@ limitations under the License.
 package fuzzer
 
 import (
-	fuzz "github.com/google/gofuzz"
+	"sigs.k8s.io/randfill"
 
 	runtimeserializer "k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/kubernetes/pkg/apis/flowcontrol"
+	"k8s.io/utils/ptr"
 )
 
 // Funcs returns the fuzzer functions for the flowcontrol api group.
 var Funcs = func(codecs runtimeserializer.CodecFactory) []interface{} {
 	return []interface{}{
-		func(obj *flowcontrol.LimitedPriorityLevelConfiguration, c fuzz.Continue) {
-			c.FuzzNoCustom(obj) // fuzz self without calling this function again
+		func(obj *flowcontrol.LimitedPriorityLevelConfiguration, c randfill.Continue) {
+			c.FillNoCustom(obj) // fuzz self without calling this function again
+
+			// NOTE: setting a zero value here will cause the roundtrip
+			// test (from internal to v1beta2, v1beta1) to fail
+			if obj.NominalConcurrencyShares == 0 {
+				obj.NominalConcurrencyShares = int32(1)
+			}
 			if obj.LendablePercent == nil {
-				i := int32(0)
-				obj.LendablePercent = &i
+				obj.LendablePercent = ptr.To(int32(0))
+			}
+		},
+		func(obj *flowcontrol.ExemptPriorityLevelConfiguration, c randfill.Continue) {
+			c.FillNoCustom(obj) // fuzz self without calling this function again
+			if obj.NominalConcurrencyShares == nil {
+				obj.NominalConcurrencyShares = ptr.To(int32(0))
+			}
+			if obj.LendablePercent == nil {
+				obj.LendablePercent = ptr.To(int32(0))
 			}
 		},
 	}

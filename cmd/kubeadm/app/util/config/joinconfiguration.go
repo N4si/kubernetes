@@ -19,27 +19,26 @@ package config
 import (
 	"os"
 
-	"github.com/pkg/errors"
-
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmscheme "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/scheme"
-	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	"k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/validation"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/config/strict"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 // SetJoinDynamicDefaults checks and sets configuration values for the JoinConfiguration object
-func SetJoinDynamicDefaults(cfg *kubeadmapi.JoinConfiguration) error {
+func SetJoinDynamicDefaults(cfg *kubeadmapi.JoinConfiguration, skipCRIDetect bool) error {
 	addControlPlaneTaint := false
 	if cfg.ControlPlane != nil {
 		addControlPlaneTaint = true
 	}
-	if err := SetNodeRegistrationDynamicDefaults(&cfg.NodeRegistration, addControlPlaneTaint); err != nil {
+	if err := SetNodeRegistrationDynamicDefaults(&cfg.NodeRegistration, addControlPlaneTaint, skipCRIDetect); err != nil {
 		return err
 	}
 
@@ -61,18 +60,25 @@ func SetJoinControlPlaneDefaults(cfg *kubeadmapi.JoinControlPlane) error {
 // Then the external, versioned configuration is defaulted and converted to the internal type.
 // Right thereafter, the configuration is defaulted again with dynamic values (like IP addresses of a machine, etc)
 // Lastly, the internal config is validated and returned.
-func LoadOrDefaultJoinConfiguration(cfgPath string, defaultversionedcfg *kubeadmapiv1.JoinConfiguration) (*kubeadmapi.JoinConfiguration, error) {
+func LoadOrDefaultJoinConfiguration(cfgPath string, defaultversionedcfg *kubeadmapiv1.JoinConfiguration, opts LoadOrDefaultConfigurationOptions) (*kubeadmapi.JoinConfiguration, error) {
+	var (
+		config *kubeadmapi.JoinConfiguration
+		err    error
+	)
 	if cfgPath != "" {
 		// Loads configuration from config file, if provided
-		// Nb. --config overrides command line flags, TODO: fix this
-		return LoadJoinConfigurationFromFile(cfgPath)
+		config, err = LoadJoinConfigurationFromFile(cfgPath, opts)
+	} else {
+		config, err = DefaultedJoinConfiguration(defaultversionedcfg, opts)
 	}
-
-	return DefaultedJoinConfiguration(defaultversionedcfg)
+	if err == nil {
+		prepareStaticVariables(config)
+	}
+	return config, err
 }
 
 // LoadJoinConfigurationFromFile loads versioned JoinConfiguration from file, converts it to internal, defaults and validates it
-func LoadJoinConfigurationFromFile(cfgPath string) (*kubeadmapi.JoinConfiguration, error) {
+func LoadJoinConfigurationFromFile(cfgPath string, opts LoadOrDefaultConfigurationOptions) (*kubeadmapi.JoinConfiguration, error) {
 	klog.V(1).Infof("loading configuration from %q", cfgPath)
 
 	b, err := os.ReadFile(cfgPath)
@@ -80,32 +86,45 @@ func LoadJoinConfigurationFromFile(cfgPath string) (*kubeadmapi.JoinConfiguratio
 		return nil, errors.Wrapf(err, "unable to read config from %q ", cfgPath)
 	}
 
-	gvkmap, err := kubeadmutil.SplitYAMLDocuments(b)
+	return BytesToJoinConfiguration(b, opts)
+}
+
+// BytesToJoinConfiguration converts a byte slice to an internal, defaulted and validated JoinConfiguration object.
+// The map may contain many different YAML/JSON documents. These documents are parsed one-by-one.
+// The resulting JoinConfiguration is then dynamically defaulted and validated prior to return.
+func BytesToJoinConfiguration(b []byte, opts LoadOrDefaultConfigurationOptions) (*kubeadmapi.JoinConfiguration, error) {
+	// Split the YAML/JSON documents in the file into a DocumentMap
+	gvkmap, err := kubeadmutil.SplitConfigDocuments(b)
 	if err != nil {
 		return nil, err
 	}
 
-	return documentMapToJoinConfiguration(gvkmap, false)
+	return documentMapToJoinConfiguration(gvkmap, false, false, false, opts.SkipCRIDetect)
 }
 
-// documentMapToJoinConfiguration takes a map between GVKs and YAML documents (as returned by SplitYAMLDocuments),
+// documentMapToJoinConfiguration takes a map between GVKs and YAML/JSON documents (as returned by SplitYAMLDocuments),
 // finds a JoinConfiguration, decodes it, dynamically defaults it and then validates it prior to return.
-func documentMapToJoinConfiguration(gvkmap kubeadmapi.DocumentMap, allowDeprecated bool) (*kubeadmapi.JoinConfiguration, error) {
+func documentMapToJoinConfiguration(gvkmap kubeadmapi.DocumentMap, allowDeprecated, allowExperimental, strictErrors, skipCRIDetect bool) (*kubeadmapi.JoinConfiguration, error) {
 	joinBytes := []byte{}
 	for gvk, bytes := range gvkmap {
 		// not interested in anything other than JoinConfiguration
 		if gvk.Kind != constants.JoinConfigurationKind {
+			klog.Warningf("[config] WARNING: Ignored configuration document with GroupVersionKind %v\n", gvk)
 			continue
 		}
 
 		// check if this version is supported and possibly not deprecated
-		if err := validateSupportedVersion(gvk.GroupVersion(), allowDeprecated); err != nil {
+		if err := validateSupportedVersion(gvk, allowDeprecated, allowExperimental); err != nil {
 			return nil, err
 		}
 
-		// verify the validity of the YAML
+		// verify the validity of the YAML/JSON
 		if err := strict.VerifyUnmarshalStrict([]*runtime.Scheme{kubeadmscheme.Scheme}, gvk, bytes); err != nil {
-			klog.Warning(err.Error())
+			if !strictErrors {
+				klog.Warning(err.Error())
+			} else {
+				return nil, err
+			}
 		}
 
 		joinBytes = bytes
@@ -121,7 +140,7 @@ func documentMapToJoinConfiguration(gvkmap kubeadmapi.DocumentMap, allowDeprecat
 	}
 
 	// Applies dynamic defaults to settings not provided with flags
-	if err := SetJoinDynamicDefaults(internalcfg); err != nil {
+	if err := SetJoinDynamicDefaults(internalcfg, skipCRIDetect); err != nil {
 		return nil, err
 	}
 	// Validates cfg (flags/configs + defaults)
@@ -133,7 +152,7 @@ func documentMapToJoinConfiguration(gvkmap kubeadmapi.DocumentMap, allowDeprecat
 }
 
 // DefaultedJoinConfiguration takes a versioned JoinConfiguration (usually filled in by command line parameters), defaults it, converts it to internal and validates it
-func DefaultedJoinConfiguration(defaultversionedcfg *kubeadmapiv1.JoinConfiguration) (*kubeadmapi.JoinConfiguration, error) {
+func DefaultedJoinConfiguration(defaultversionedcfg *kubeadmapiv1.JoinConfiguration, opts LoadOrDefaultConfigurationOptions) (*kubeadmapi.JoinConfiguration, error) {
 	internalcfg := &kubeadmapi.JoinConfiguration{}
 
 	// Takes passed flags into account; the defaulting is executed once again enforcing assignment of
@@ -144,7 +163,7 @@ func DefaultedJoinConfiguration(defaultversionedcfg *kubeadmapiv1.JoinConfigurat
 	}
 
 	// Applies dynamic defaults to settings not provided with flags
-	if err := SetJoinDynamicDefaults(internalcfg); err != nil {
+	if err := SetJoinDynamicDefaults(internalcfg, opts.SkipCRIDetect); err != nil {
 		return nil, err
 	}
 	// Validates cfg (flags/configs + defaults)

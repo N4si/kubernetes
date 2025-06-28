@@ -56,6 +56,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
@@ -90,9 +91,9 @@ const (
 	gmsaSharedFolder = "write_test"
 )
 
-var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
+var _ = sigDescribe(feature.Windows, "GMSA Full", framework.WithSerial(), framework.WithSlow(), skipUnlessWindows(func() {
 	f := framework.NewDefaultFramework("gmsa-full-test-windows")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.Describe("GMSA support", func() {
 		ginkgo.It("works end to end", func(ctx context.Context) {
@@ -111,19 +112,19 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 			ginkgo.By("deploying the GMSA webhook")
 			err := deployGmsaWebhook(ctx, f)
 			if err != nil {
-				framework.Failf(err.Error())
+				framework.Fail(err.Error())
 			}
 
 			ginkgo.By("creating the GMSA custom resource")
 			err = createGmsaCustomResource(f.Namespace.Name, crdManifestContents)
 			if err != nil {
-				framework.Failf(err.Error())
+				framework.Fail(err.Error())
 			}
 
 			ginkgo.By("creating an RBAC role to grant use access to that GMSA resource")
 			rbacRoleName, err := createRBACRoleForGmsa(ctx, f)
 			if err != nil {
-				framework.Failf(err.Error())
+				framework.Fail(err.Error())
 			}
 
 			ginkgo.By("creating a service account")
@@ -140,26 +141,23 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 			// and authenticating with it.
 			ginkgo.By("checking that nltest /QUERY returns successfully")
 			var output string
-			gomega.Eventually(ctx, func() bool {
-				output, err = runKubectlExecInNamespace(f.Namespace.Name, podName, "nltest", "/QUERY")
+			gomega.Eventually(ctx, func() error {
+				output, err = runKubectlExecInNamespace(f.Namespace.Name, podName, "--", "nltest", "/QUERY")
 				if err != nil {
-					framework.Logf("unable to run command in container via exec: %s", err)
-					return false
+					return fmt.Errorf("unable to run command in container via exec: %w", err)
 				}
 
 				if !isValidOutput(output) {
 					// try repairing the secure channel by running reset command
 					// https://kubernetes.io/docs/tasks/configure-pod-container/configure-gmsa/#troubleshooting
-					output, err = runKubectlExecInNamespace(f.Namespace.Name, podName, "nltest", fmt.Sprintf("/sc_reset:%s", gmsaDomain))
+					output, err = runKubectlExecInNamespace(f.Namespace.Name, podName, "--", "nltest", fmt.Sprintf("/sc_reset:%s", gmsaDomain))
 					if err != nil {
-						framework.Logf("unable to run command in container via exec: %s", err)
-						return false
+						return fmt.Errorf("unable to run command in container via exec: %w", err)
 					}
-					framework.Logf("failed to connect to domain; tried resetting the domain, output:\n%s", string(output))
-					return false
+					return fmt.Errorf("failed to connect to domain; tried resetting the domain, output:\n%v", string(output))
 				}
-				return true
-			}, 1*time.Minute, 1*time.Second).Should(gomega.BeTrue())
+				return nil
+			}, 1*time.Minute, 1*time.Second).Should(gomega.Succeed())
 		})
 
 		ginkgo.It("can read and write file to remote SMB folder", func(ctx context.Context) {
@@ -178,19 +176,19 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 			ginkgo.By("deploying the GMSA webhook")
 			err := deployGmsaWebhook(ctx, f)
 			if err != nil {
-				framework.Failf(err.Error())
+				framework.Fail(err.Error())
 			}
 
 			ginkgo.By("creating the GMSA custom resource")
 			err = createGmsaCustomResource(f.Namespace.Name, crdManifestContents)
 			if err != nil {
-				framework.Failf(err.Error())
+				framework.Fail(err.Error())
 			}
 
 			ginkgo.By("creating an RBAC role to grant use access to that GMSA resource")
 			rbacRoleName, err := createRBACRoleForGmsa(ctx, f)
 			if err != nil {
-				framework.Failf(err.Error())
+				framework.Fail(err.Error())
 			}
 
 			ginkgo.By("creating a service account")
@@ -207,20 +205,20 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 
 			ginkgo.By("checking that file can be read and write from the remote folder successfully")
 			filePath := fmt.Sprintf("\\\\%s\\%s\\write-test-%s.txt", gmsaDomainIP, gmsaSharedFolder, string(uuid.NewUUID())[0:4])
-			gomega.Eventually(ctx, func() bool {
+
+			gomega.Eventually(ctx, func() error {
 				// The filePath is a remote folder, do not change the format of it
 				_, _ = runKubectlExecInNamespace(f.Namespace.Name, podName, "--", "powershell.exe", "-Command", "echo 'This is a test file.' > "+filePath)
-				output, err := runKubectlExecInNamespace(f.Namespace.Name, podName, "powershell.exe", "--", "cat", filePath)
+				_, err := runKubectlExecInNamespace(f.Namespace.Name, podName, "powershell.exe", "--", "cat", filePath)
 				if err != nil {
-					framework.Logf("unable to get file from AD server: %s", err)
-					return false
+					return err
 				}
-				return strings.Contains(output, "This is a test file.")
-			}, 1*time.Minute, 1*time.Second).Should(gomega.BeTrue())
+				return nil
+			}, 1*time.Minute, 1*time.Second).Should(gomega.Succeed())
 
 		})
 	})
-})
+}))
 
 func isValidOutput(output string) bool {
 	return strings.Contains(output, expectedQueryOutput) &&
@@ -285,7 +283,7 @@ func retrieveCRDManifestFileContents(ctx context.Context, f *framework.Framework
 	}
 	e2epod.NewPodClient(f).CreateSync(ctx, pod)
 
-	output, err := runKubectlExecInNamespace(f.Namespace.Name, podName, "cmd", "/S", "/C", fmt.Sprintf("type %s", gmsaCrdManifestPath))
+	output, err := runKubectlExecInNamespace(f.Namespace.Name, podName, "--", "cmd", "/S", "/C", fmt.Sprintf("type %s", gmsaCrdManifestPath))
 	if err != nil {
 		framework.Failf("failed to retrieve the contents of %q on node %q: %v", gmsaCrdManifestPath, node.Name, err)
 	}
@@ -321,8 +319,8 @@ func deployGmsaWebhook(ctx context.Context, f *framework.Framework) error {
 	bindClusterRBACRoleToServiceAccount(ctx, f, s, "cluster-admin")
 
 	installSteps := []string{
-		"echo \"@testing http://dl-cdn.alpinelinux.org/alpine/edge/testing/\" >> /etc/apk/repositories",
-		"&& apk add kubectl@testing gettext openssl",
+		"echo \"@community http://dl-cdn.alpinelinux.org/alpine/edge/community/\" >> /etc/apk/repositories",
+		"&& apk add kubectl@community gettext openssl",
 		"&& apk add --update coreutils",
 		fmt.Sprintf("&& curl %s > gmsa.sh", gmsaWebhookDeployScriptURL),
 		"&& chmod +x gmsa.sh",

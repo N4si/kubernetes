@@ -31,18 +31,19 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
 var _ = SIGDescribe("ConfigMap", func() {
 	f := framework.NewDefaultFramework("configmap")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelBaseline
+	f.NamespacePodSecurityLevel = admissionapi.LevelBaseline
 
 	/*
 		Release: v1.9
 		Testname: ConfigMap, from environment field
 		Description: Create a Pod with an environment variable value set using a value from ConfigMap. A ConfigMap value MUST be accessible in the container environment.
 	*/
-	framework.ConformanceIt("should be consumable via environment variable [NodeConformance]", func(ctx context.Context) {
+	framework.ConformanceIt("should be consumable via environment variable", f.WithNodeConformance(), func(ctx context.Context) {
 		name := "configmap-test-" + string(uuid.NewUUID())
 		configMap := newConfigMap(f, name)
 		ginkgo.By(fmt.Sprintf("Creating configMap %v/%v", f.Namespace.Name, configMap.Name))
@@ -90,7 +91,7 @@ var _ = SIGDescribe("ConfigMap", func() {
 		Testname: ConfigMap, from environment variables
 		Description: Create a Pod with a environment source from ConfigMap. All ConfigMap values MUST be available as environment variables in the container.
 	*/
-	framework.ConformanceIt("should be consumable via the environment [NodeConformance]", func(ctx context.Context) {
+	framework.ConformanceIt("should be consumable via the environment", f.WithNodeConformance(), func(ctx context.Context) {
 		name := "configmap-test-" + string(uuid.NewUUID())
 		configMap := newConfigMap(f, name)
 		ginkgo.By(fmt.Sprintf("Creating configMap %v/%v", f.Namespace.Name, configMap.Name))
@@ -137,7 +138,7 @@ var _ = SIGDescribe("ConfigMap", func() {
 	*/
 	framework.ConformanceIt("should fail to create ConfigMap with empty key", func(ctx context.Context) {
 		configMap, err := newConfigMapWithEmptyKey(ctx, f)
-		framework.ExpectError(err, "created configMap %q with empty key in namespace %q", configMap.Name, f.Namespace.Name)
+		gomega.Expect(err).To(gomega.HaveOccurred(), "created configMap %q with empty key in namespace %q", configMap.Name, f.Namespace.Name)
 	})
 
 	ginkgo.It("should update ConfigMap successfully", func(ctx context.Context) {
@@ -157,7 +158,7 @@ var _ = SIGDescribe("ConfigMap", func() {
 		configMapFromUpdate, err := f.ClientSet.CoreV1().ConfigMaps(f.Namespace.Name).Get(ctx, name, metav1.GetOptions{})
 		framework.ExpectNoError(err, "failed to get ConfigMap")
 		ginkgo.By(fmt.Sprintf("Verifying update of ConfigMap %v/%v", f.Namespace.Name, configMap.Name))
-		framework.ExpectEqual(configMapFromUpdate.Data, configMap.Data)
+		gomega.Expect(configMapFromUpdate.Data).To(gomega.Equal(configMap.Data))
 	})
 
 	/*
@@ -189,8 +190,8 @@ var _ = SIGDescribe("ConfigMap", func() {
 		ginkgo.By("fetching the ConfigMap")
 		configMap, err := f.ClientSet.CoreV1().ConfigMaps(testNamespaceName).Get(ctx, testConfigMapName, metav1.GetOptions{})
 		framework.ExpectNoError(err, "failed to get ConfigMap")
-		framework.ExpectEqual(configMap.Data["valueName"], testConfigMap.Data["valueName"])
-		framework.ExpectEqual(configMap.Labels["test-configmap-static"], testConfigMap.Labels["test-configmap-static"])
+		gomega.Expect(configMap.Data["valueName"]).To(gomega.Equal(testConfigMap.Data["valueName"]))
+		gomega.Expect(configMap.Labels["test-configmap-static"]).To(gomega.Equal(testConfigMap.Labels["test-configmap-static"]))
 
 		configMapPatchPayload, err := json.Marshal(v1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
@@ -239,7 +240,79 @@ var _ = SIGDescribe("ConfigMap", func() {
 			LabelSelector: "test-configmap-static=true",
 		})
 		framework.ExpectNoError(err, "failed to list ConfigMap by LabelSelector")
-		framework.ExpectEqual(len(configMapList.Items), 0, "ConfigMap is still present after being deleted by collection")
+		gomega.Expect(configMapList.Items).To(gomega.BeEmpty(), "ConfigMap is still present after being deleted by collection")
+	})
+
+	/*
+		Release: v1.34
+		Testname: ConfigMap, from environment field with various prefixes
+		Description: Create a Pod with environment variable values set using values from ConfigMap.
+		Allows users to use envFrom to set prefixes with various printable ASCII characters excluding '=' as environment variable names.
+		This test verifies that different prefixes including digits, special characters, and letters can be correctly used.
+	*/
+	framework.It("should be consumable as environment variable names with various prefixes", func(ctx context.Context) {
+		name := "configmap-test-" + string(uuid.NewUUID())
+		configMap := newConfigMap(f, name)
+		ginkgo.By(fmt.Sprintf("Creating configMap %v/%v", f.Namespace.Name, configMap.Name))
+		var err error
+		if configMap, err = f.ClientSet.CoreV1().ConfigMaps(f.Namespace.Name).Create(ctx, configMap, metav1.CreateOptions{}); err != nil {
+			framework.Failf("unable to create test configMap %s: %v", configMap.Name, err)
+		}
+
+		pod := &v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "pod-configmaps-" + string(uuid.NewUUID()),
+			},
+			Spec: v1.PodSpec{
+				Containers: []v1.Container{
+					{
+						Name:    "env-test",
+						Image:   imageutils.GetE2EImage(imageutils.BusyBox),
+						Command: []string{"sh", "-c", "env"},
+						EnvFrom: []v1.EnvFromSource{
+							{
+								// No prefix
+								ConfigMapRef: &v1.ConfigMapEnvSource{LocalObjectReference: v1.LocalObjectReference{Name: name}},
+							},
+							{
+								// Prefix starting with a digit
+								Prefix:       "1-",
+								ConfigMapRef: &v1.ConfigMapEnvSource{LocalObjectReference: v1.LocalObjectReference{Name: name}},
+							},
+							{
+								// Prefix with special characters
+								Prefix:       "$_-",
+								ConfigMapRef: &v1.ConfigMapEnvSource{LocalObjectReference: v1.LocalObjectReference{Name: name}},
+							},
+							{
+								// Prefix with uppercase letters
+								Prefix:       "ABC_",
+								ConfigMapRef: &v1.ConfigMapEnvSource{LocalObjectReference: v1.LocalObjectReference{Name: name}},
+							},
+							{
+								// Prefix with symbols
+								Prefix:       "#@!",
+								ConfigMapRef: &v1.ConfigMapEnvSource{LocalObjectReference: v1.LocalObjectReference{Name: name}},
+							},
+						},
+					},
+				},
+				RestartPolicy: v1.RestartPolicyNever,
+			},
+		}
+
+		e2epodoutput.TestContainerOutput(ctx, f, "consume configMaps", pod, 0, []string{
+			// Original values without prefix
+			"data-1=value-1", "data-2=value-2", "data-3=value-3",
+			// Values with digit prefix
+			"1-data-1=value-1", "1-data-2=value-2", "1-data-3=value-3",
+			// Values with special character prefix
+			"$_-data-1=value-1", "$_-data-2=value-2", "$_-data-3=value-3",
+			// Values with uppercase letter prefix
+			"ABC_data-1=value-1", "ABC_data-2=value-2", "ABC_data-3=value-3",
+			// Values with symbol prefix
+			"#@!data-1=value-1", "#@!data-2=value-2", "#@!data-3=value-3",
+		})
 	})
 })
 

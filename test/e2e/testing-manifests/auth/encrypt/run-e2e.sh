@@ -25,6 +25,10 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
+KUBE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../../../../.. && pwd -P)"
+source "${KUBE_ROOT}/hack/lib/init.sh"
+source "${KUBE_ROOT}/build/common.sh"
+
 readonly cluster_name="kms"
 readonly registry_name="kind-registry"
 readonly kind_network="kind"
@@ -35,8 +39,10 @@ build_and_push_mock_plugin() {
         --no-cache \
         --platform linux/amd64 \
         --output=type=docker \
+        --build-arg=GOTOOLCHAIN="${GOTOOLCHAIN:?}" \
+        --build-arg=BUILDER_IMAGE="${KUBE_CROSS_IMAGE:?}:${KUBE_CROSS_VERSION:?}" \
         -t localhost:5000/mock-kms-provider:e2e \
-        -f staging/src/k8s.io/kms/internal/plugins/mock/Dockerfile staging/src/k8s.io/ \
+        -f staging/src/k8s.io/kms/internal/plugins/_mock/Dockerfile staging/src/k8s.io/ \
         --progress=plain;
 
     docker push localhost:5000/mock-kms-provider:e2e
@@ -88,36 +94,46 @@ connect_registry(){
 create_cluster_and_run_test() {
     CLUSTER_CREATE_ATTEMPTED=true
 
+    TEST_ARGS=""
+    if [ "${SKIP_RUN_TESTS:-}" != "true" ]; then
+        # (--use-built-binaries) use the kubectl, e2e.test, and ginkgo binaries built during --build as opposed to from a GCS release tarball
+        TEST_ARGS="--test=ginkgo -- --focus-regex=\[Conformance\] --skip-regex=\[Serial\] --parallel 20 --use-built-binaries"
+    else
+        echo "Skipping running tests"
+    fi
+
+    # shellcheck disable=SC2086
     kubetest2 kind -v 5 \
     --build \
     --up \
     --rundir-in-artifacts \
     --config test/e2e/testing-manifests/auth/encrypt/kind.yaml \
-    --cluster-name "${cluster_name}" \
-    --test=ginkgo \
-    -- \
-    --v=5 \
-    --focus-regex='\[Conformance\]' \
-    --skip-regex='\[Serial\]' \
-    --parallel 20 \
-    --use-built-binaries # use the kubectl, e2e.test, and ginkgo binaries built during --build as opposed to from a GCS release tarball
+    --cluster-name "${cluster_name}" ${TEST_ARGS}
 }
 
 cleanup() {
     # CLUSTER_CREATE_ATTEMPTED is true once we run kubetest2 kind --up
     if [ "${CLUSTER_CREATE_ATTEMPTED:-}" = true ]; then
-        # collect logs and metrics
-        echo "Collecting logs"
-        mkdir -p "${ARTIFACTS}/logs"
-        kind "export" logs "${ARTIFACTS}/logs" --name "${cluster_name}"
+        if [ "${SKIP_COLLECT_LOGS:-}" != "true" ]; then
+            # collect logs and metrics
+            echo "Collecting logs"
+            mkdir -p "${ARTIFACTS}/logs"
+            kind "export" logs "${ARTIFACTS}/logs" --name "${cluster_name}"
 
-        echo "Collecting metrics"
-        mkdir -p "${ARTIFACTS}/metrics"
-        kubectl get --raw /metrics > "${ARTIFACTS}/metrics/kube-apiserver-metrics.txt"
+            echo "Collecting metrics"
+            mkdir -p "${ARTIFACTS}/metrics"
+            kubectl get --raw /metrics > "${ARTIFACTS}/metrics/kube-apiserver-metrics.txt"
+        else
+            echo "Skipping collecting logs and metrics"
+        fi
 
-        echo "Deleting kind cluster"
-        # delete cluster
-        kind delete cluster --name "${cluster_name}"
+        if [ "${SKIP_DELETE_CLUSTER:-}" != "true" ]; then
+            echo "Deleting kind cluster"
+            # delete cluster
+            kind delete cluster --name "${cluster_name}"
+        else
+            echo "Skipping deleting kind cluster"
+        fi
     fi
 }
 
@@ -126,18 +142,23 @@ main(){
     export ARTIFACTS="${ARTIFACTS:-${PWD}/_artifacts}"
     mkdir -p "${ARTIFACTS}"
 
-    export GO111MODULE=on;
-    go install sigs.k8s.io/kind@v0.17.0;
-    go install sigs.k8s.io/kubetest2@latest;
-    go install sigs.k8s.io/kubetest2/kubetest2-kind@latest;
-    go install sigs.k8s.io/kubetest2/kubetest2-tester-ginkgo@latest;
+    kube::golang::setup_env
+    (
+        # just while installing external tools
+        export GO111MODULE=on GOTOOLCHAIN=auto
+        # TODO: consider using specific versions to avoid surprise breaking changes
+        go install sigs.k8s.io/kind@latest
+        go install sigs.k8s.io/kubetest2@latest
+        go install sigs.k8s.io/kubetest2/kubetest2-kind@latest
+        go install sigs.k8s.io/kubetest2/kubetest2-tester-ginkgo@latest
+    )
 
     # The build e2e.test, ginkgo and kubectl binaries + copy to dockerized dir is
     # because of https://github.com/kubernetes-sigs/kubetest2/issues/184
-    make all WHAT="test/e2e/e2e.test vendor/github.com/onsi/ginkgo/v2/ginkgo cmd/kubectl";
+    make all WHAT="test/e2e/e2e.test vendor/github.com/onsi/ginkgo/v2/ginkgo cmd/kubectl"
     mkdir -p _output/dockerized/bin/linux/amd64;
     for binary in kubectl e2e.test ginkgo; do
-        cp -f _output/local/go/bin/${binary} _output/dockerized/bin/linux/amd64/${binary};
+        cp -f _output/local/go/bin/${binary} _output/dockerized/bin/linux/amd64/${binary}
     done;
 
     create_registry

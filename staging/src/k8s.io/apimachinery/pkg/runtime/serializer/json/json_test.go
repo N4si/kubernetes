@@ -17,10 +17,12 @@ limitations under the License.
 package json_test
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -29,6 +31,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
 	runtimetesting "k8s.io/apimachinery/pkg/runtime/testing"
 	"k8s.io/apimachinery/pkg/util/diff"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 type testDecodable struct {
@@ -901,7 +905,7 @@ func TestCacheableObject(t *testing.T) {
 	gvk := schema.GroupVersionKind{Group: "group", Version: "version", Kind: "MockCacheableObject"}
 	creater := &mockCreater{obj: &runtimetesting.MockCacheableObject{}}
 	typer := &mockTyper{gvk: &gvk}
-	serializer := json.NewSerializer(json.DefaultMetaFactory, creater, typer, false)
+	serializer := json.NewSerializerWithOptions(json.DefaultMetaFactory, creater, typer, json.SerializerOptions{})
 
 	runtimetesting.CacheableObjectTest(t, serializer)
 }
@@ -932,4 +936,156 @@ func (t *mockTyper) ObjectKinds(obj runtime.Object) ([]schema.GroupVersionKind, 
 
 func (t *mockTyper) Recognizes(_ schema.GroupVersionKind) bool {
 	return false
+}
+
+type testEncodableDuplicateTag struct {
+	metav1.TypeMeta `json:",inline"`
+
+	A1 int `json:"a"`
+	A2 int `json:"a"` //nolint:govet // This is intentional to test that the encoder will not encode two map entries with the same key.
+}
+
+func (testEncodableDuplicateTag) DeepCopyObject() runtime.Object {
+	panic("unimplemented")
+}
+
+type testEncodableTagMatchesUntaggedName struct {
+	metav1.TypeMeta `json:",inline"`
+
+	A       int
+	TaggedA int `json:"A"`
+}
+
+func (testEncodableTagMatchesUntaggedName) DeepCopyObject() runtime.Object {
+	panic("unimplemented")
+}
+
+type staticTextMarshaler int
+
+func (staticTextMarshaler) MarshalText() ([]byte, error) {
+	return []byte("static"), nil
+}
+
+type testEncodableMap[K comparable] map[K]interface{}
+
+func (testEncodableMap[K]) GetObjectKind() schema.ObjectKind {
+	panic("unimplemented")
+}
+
+func (testEncodableMap[K]) DeepCopyObject() runtime.Object {
+	panic("unimplemented")
+}
+
+func TestEncode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   runtime.Object
+		want []byte
+	}{
+		// The Go visibility rules for struct fields are amended for JSON when deciding
+		// which field to marshal or unmarshal. If there are multiple fields at the same
+		// level, and that level is the least nested (and would therefore be the nesting
+		// level selected by the usual Go rules), the following extra rules apply:
+
+		// 1) Of those fields, if any are JSON-tagged, only tagged fields are considered,
+		//    even if there are multiple untagged fields that would otherwise conflict.
+		{
+			name: "only tagged field is considered if any are tagged",
+			in: &testEncodableTagMatchesUntaggedName{
+				A:       1,
+				TaggedA: 2,
+			},
+			want: []byte("{\"A\":2}\n"),
+		},
+		// 2) If there is exactly one field (tagged or not according to the first rule),
+		//    that is selected.
+		// 3) Otherwise there are multiple fields, and all are ignored; no error occurs.
+		{
+			name: "all duplicate fields are ignored",
+			in:   &testEncodableDuplicateTag{},
+			want: []byte("{}\n"),
+		},
+		{
+			name: "text marshaler keys can compare inequal but serialize to duplicates",
+			in: testEncodableMap[staticTextMarshaler]{
+				staticTextMarshaler(1): nil,
+				staticTextMarshaler(2): nil,
+			},
+			want: []byte("{\"static\":null,\"static\":null}\n"),
+		},
+		{
+			name: "time.Time keys can compare inequal but serialize to duplicates because time.Time implements TextMarshaler",
+			in: testEncodableMap[time.Time]{
+				time.Date(2222, 11, 30, 23, 59, 58, 57, time.UTC):              nil,
+				time.Date(2222, 11, 30, 23, 59, 58, 57, time.FixedZone("", 0)): nil,
+			},
+			want: []byte("{\"2222-11-30T23:59:58.000000057Z\":null,\"2222-11-30T23:59:58.000000057Z\":null}\n"),
+		},
+		{
+			name: "metav1.Time keys can compare inequal but serialize to duplicates because metav1.Time embeds time.Time which implements TextMarshaler",
+			in: testEncodableMap[metav1.Time]{
+				metav1.Date(2222, 11, 30, 23, 59, 58, 57, time.UTC):              nil,
+				metav1.Date(2222, 11, 30, 23, 59, 58, 57, time.FixedZone("", 0)): nil,
+			},
+			want: []byte("{\"2222-11-30T23:59:58.000000057Z\":null,\"2222-11-30T23:59:58.000000057Z\":null}\n"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var dst bytes.Buffer
+			s := json.NewSerializerWithOptions(json.DefaultMetaFactory, nil, nil, json.SerializerOptions{})
+			if err := s.Encode(tc.in, &dst); err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, dst.Bytes()); diff != "" {
+				t.Errorf("unexpected output:\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestRoundtripUnstructuredFloat64 demonstrates that encoding a fractionless float64 value to JSON
+// then decoding into interface{} can produce a value with concrete type int64. This is a
+// consequence of two specific behaviors. First, there is nothing in the JSON encoding of a
+// fractionless float64 value to distinguish it from the JSON encoding of an integer value. Second,
+// if, when unmarshaling into interface{}, the decoder encounters a JSON number with no decimal
+// point in the input, it produces a value with concrete type int64 as long as the number can be
+// precisely represented by an int64.
+func TestRoundtripUnstructuredFractionlessFloat64(t *testing.T) {
+	s := json.NewSerializerWithOptions(json.DefaultMetaFactory, runtime.NewScheme(), runtime.NewScheme(), json.SerializerOptions{})
+
+	initial := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion":                    "v1",
+		"kind":                          "Test",
+		"with-fraction":                 float64(1.5),
+		"without-fraction":              float64(1),
+		"without-fraction-big-positive": float64(9223372036854776000),
+		"without-fraction-big-negative": float64(-9223372036854776000),
+	}}
+
+	var buf bytes.Buffer
+	if err := s.Encode(initial, &buf); err != nil {
+		t.Fatal(err)
+	}
+
+	final := &unstructured.Unstructured{}
+	got, _, err := s.Decode(buf.Bytes(), nil, final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != final {
+		t.Fatalf("expected Decode to return target Unstructured object but got: %v", got)
+	}
+
+	expected := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion":                    "v1",
+		"kind":                          "Test",
+		"with-fraction":                 float64(1.5),
+		"without-fraction":              int64(1), // note the change in concrete type
+		"without-fraction-big-positive": float64(9223372036854776000),
+		"without-fraction-big-negative": float64(-9223372036854776000),
+	}}
+
+	if diff := cmp.Diff(expected, final); diff != "" {
+		t.Fatalf("unexpected diff:\n%s", diff)
+	}
 }

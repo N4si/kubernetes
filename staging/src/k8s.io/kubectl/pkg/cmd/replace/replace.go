@@ -17,6 +17,7 @@ limitations under the License.
 package replace
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -32,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/cli-runtime/pkg/resource"
 	"k8s.io/kubectl/pkg/cmd/delete"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
@@ -39,7 +41,6 @@ import (
 	"k8s.io/kubectl/pkg/scheme"
 	"k8s.io/kubectl/pkg/util"
 	"k8s.io/kubectl/pkg/util/i18n"
-	"k8s.io/kubectl/pkg/util/slice"
 	"k8s.io/kubectl/pkg/util/templates"
 	"k8s.io/kubectl/pkg/validation"
 )
@@ -67,8 +68,6 @@ var (
 		kubectl replace --force -f ./pod.json`))
 )
 
-var supportedSubresources = []string{"status", "scale"}
-
 type ReplaceOptions struct {
 	PrintFlags  *genericclioptions.PrintFlags
 	RecordFlags *genericclioptions.RecordFlags
@@ -95,12 +94,12 @@ type ReplaceOptions struct {
 
 	Subresource string
 
-	genericclioptions.IOStreams
+	genericiooptions.IOStreams
 
 	fieldManager string
 }
 
-func NewReplaceOptions(streams genericclioptions.IOStreams) *ReplaceOptions {
+func NewReplaceOptions(streams genericiooptions.IOStreams) *ReplaceOptions {
 	return &ReplaceOptions{
 		PrintFlags:  genericclioptions.NewPrintFlags("replaced"),
 		DeleteFlags: delete.NewDeleteFlags("The files that contain the configurations to replace."),
@@ -109,7 +108,7 @@ func NewReplaceOptions(streams genericclioptions.IOStreams) *ReplaceOptions {
 	}
 }
 
-func NewCmdReplace(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
+func NewCmdReplace(f cmdutil.Factory, streams genericiooptions.IOStreams) *cobra.Command {
 	o := NewReplaceOptions(streams)
 
 	cmd := &cobra.Command{
@@ -135,7 +134,7 @@ func NewCmdReplace(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobr
 
 	cmd.Flags().StringVar(&o.Raw, "raw", o.Raw, "Raw URI to PUT to the server.  Uses the transport specified by the kubeconfig file.")
 	cmdutil.AddFieldManagerFlagVar(cmd, &o.fieldManager, "kubectl-replace")
-	cmdutil.AddSubresourceFlags(cmd, &o.Subresource, "If specified, replace will operate on the subresource of the requested object.", supportedSubresources...)
+	cmdutil.AddSubresourceFlags(cmd, &o.Subresource, "If specified, replace will operate on the subresource of the requested object.")
 
 	return cmd
 }
@@ -246,10 +245,6 @@ func (o *ReplaceOptions) Validate() error {
 		if _, err := url.ParseRequestURI(o.Raw); err != nil {
 			return fmt.Errorf("--raw must be a valid URL path: %v", err)
 		}
-	}
-
-	if len(o.Subresource) > 0 && !slice.ContainsString(supportedSubresources, o.Subresource, nil) {
-		return fmt.Errorf("invalid subresource value: %q. Must be one of %v", o.Subresource, supportedSubresources)
 	}
 
 	return nil
@@ -364,8 +359,7 @@ func (o *ReplaceOptions) forceReplace() error {
 		if err != nil {
 			return err
 		}
-
-		return wait.PollImmediate(1*time.Second, timeout, func() (bool, error) {
+		return wait.PollUntilContextTimeout(context.Background(), 1*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
 			if err := info.Get(); !errors.IsNotFound(err) {
 				return false, err
 			}

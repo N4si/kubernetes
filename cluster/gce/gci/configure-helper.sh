@@ -66,6 +66,24 @@ function setup-os-params {
   # /sbin/crash_reporter which is more restrictive in saving crash dumps. So for
   # now, set a generic core_pattern that users can work with.
   echo "/core.%e.%p.%t" > /proc/sys/kernel/core_pattern
+  echo "Default max_user_watches / max_user_instances:"
+  # ensure we have enough inotify watches for many pods, versus the OS defaults
+  # debug before & after / defaults for comparison
+  sysctl fs.inotify.max_user_watches
+  sysctl fs.inotify.max_user_instances
+  cat <<EOF > /etc/sysctl.d/inotify.conf
+fs.inotify.max_user_watches=65536
+fs.inotify.max_user_instances=8192
+EOF
+  # Ubuntu vs COS, load sysctl settings now
+  if [[ -e "/usr/lib/systemd/systemd-sysctl" ]]; then
+    /usr/lib/systemd/systemd-sysctl
+  else
+    /lib/systemd/systemd-sysctl
+  fi
+  echo "Updated max_user_watches / max_user_instances:"
+  sysctl fs.inotify.max_user_watches
+  sysctl fs.inotify.max_user_instances
 }
 
 # secure_random generates a secure random string of bytes. This function accepts
@@ -780,6 +798,18 @@ function create-master-pki {
 
     KONNECTIVITY_AGENT_CERT_PATH="${pki_dir}/konnectivity-agent/server.crt"
     write-pki-data "${KONNECTIVITY_AGENT_CERT}" "${KONNECTIVITY_AGENT_CERT_PATH}"
+  fi
+
+  if [[ -n "${CLOUD_PVL_ADMISSION_CA_CERT:-}" ]]; then
+    mkdir -p "${pki_dir}"/cloud-pvl-admission
+    CLOUD_PVL_ADMISSION_CA_CERT_PATH="${pki_dir}/cloud-pvl-admission/ca.crt"
+    write-pki-data "${CLOUD_PVL_ADMISSION_CA_CERT}" "${CLOUD_PVL_ADMISSION_CA_CERT_PATH}"
+
+    CLOUD_PVL_ADMISSION_KEY_PATH="${pki_dir}/cloud-pvl-admission/server.key"
+    write-pki-data "${CLOUD_PVL_ADMISSION_KEY}" "${CLOUD_PVL_ADMISSION_KEY_PATH}"
+
+    CLOUD_PVL_ADMISSION_CERT_PATH="${pki_dir}/cloud-pvl-admission/server.crt"
+    write-pki-data "${CLOUD_PVL_ADMISSION_CERT}" "${CLOUD_PVL_ADMISSION_CERT_PATH}"
   fi
 }
 
@@ -1646,6 +1676,7 @@ After=network-online.target
 [Service]
 Restart=always
 RestartSec=10
+WatchdogSec=30s
 EnvironmentFile=${kubelet_env_file}
 ExecStart=${kubelet_bin} \$KUBELET_OPTS
 
@@ -1741,30 +1772,42 @@ function prepare-kube-proxy-manifest-variables {
   if [[ -n "${FEATURE_GATES:-}" ]]; then
     params+=" --feature-gates=${FEATURE_GATES}"
   fi
-  if [[ "${KUBE_PROXY_MODE:-}" == "ipvs" ]];then
-    # use 'nf_conntrack' instead of 'nf_conntrack_ipv4' for linux kernel >= 4.19
-    # https://github.com/kubernetes/kubernetes/pull/70398
-    local -r kernel_version=$(uname -r | cut -d\. -f1,2)
-    local conntrack_module="nf_conntrack"
-    if [[ $(printf '%s\n4.18\n' "${kernel_version}" | sort -V | tail -1) == "4.18" ]]; then
-      conntrack_module="nf_conntrack_ipv4"
-    fi
 
-    if sudo modprobe -a ip_vs ip_vs_rr ip_vs_wrr ip_vs_sh ${conntrack_module}; then
-      params+=" --proxy-mode=ipvs"
-    else
-      # If IPVS modules are not present, make sure the node does not come up as
-      # healthy.
-      exit 1
-    fi
-  fi
-  params+=" --iptables-sync-period=1m --iptables-min-sync-period=10s --ipvs-sync-period=1m --ipvs-min-sync-period=10s"
+  case "${KUBE_PROXY_MODE:-iptables}" in
+    iptables)
+      params+=" --proxy-mode=iptables --iptables-sync-period=1m --iptables-min-sync-period=10s"
+      ;;
+    ipvs)
+      # use 'nf_conntrack' instead of 'nf_conntrack_ipv4' for linux kernel >= 4.19
+      # https://github.com/kubernetes/kubernetes/pull/70398
+      local -r kernel_version=$(uname -r | cut -d\. -f1,2)
+      local conntrack_module="nf_conntrack"
+      if [[ $(printf '%s\n4.18\n' "${kernel_version}" | sort -V | tail -1) == "4.18" ]]; then
+        conntrack_module="nf_conntrack_ipv4"
+      fi
+
+      if ! sudo modprobe -a ip_vs ip_vs_rr ip_vs_wrr ip_vs_sh ${conntrack_module}; then
+        # If IPVS modules are not present, make sure the node does not come up as
+        # healthy.
+        exit 1
+      fi
+      params+=" --proxy-mode=ipvs --ipvs-sync-period=1m --ipvs-min-sync-period=10s"
+      ;;
+    nftables)
+      # Pass --conntrack-tcp-be-liberal so we can test that this makes the
+      # "proxy implementation should not be vulnerable to the invalid conntrack state bug"
+      # test pass. https://issues.k8s.io/122663#issuecomment-1885024015
+      params+=" --proxy-mode=nftables --conntrack-tcp-be-liberal"
+      ;;
+  esac
+
   if [[ -n "${KUBEPROXY_TEST_ARGS:-}" ]]; then
     params+=" ${KUBEPROXY_TEST_ARGS}"
   fi
   if [[ -n "${DETECT_LOCAL_MODE:-}" ]]; then
     params+=" --detect-local-mode=${DETECT_LOCAL_MODE}"
   fi
+
   local container_env=""
   local kube_cache_mutation_detector_env_name=""
   local kube_cache_mutation_detector_env_value=""
@@ -1772,6 +1815,15 @@ function prepare-kube-proxy-manifest-variables {
     container_env="env:"
     kube_cache_mutation_detector_env_name="- name: KUBE_CACHE_MUTATION_DETECTOR"
     kube_cache_mutation_detector_env_value="value: \"${ENABLE_CACHE_MUTATION_DETECTOR}\""
+  fi
+  local kube_watchlist_inconsistency_detector_env_name=""
+  local kube_watchlist_inconsistency_detector_env_value=""
+  if [[ -n "${ENABLE_KUBE_WATCHLIST_INCONSISTENCY_DETECTOR:-}" ]]; then
+    if [[ -z "${container_env}" ]]; then
+      container_env="env:"
+    fi
+    kube_watchlist_inconsistency_detector_env_name="- name: KUBE_WATCHLIST_INCONSISTENCY_DETECTOR"
+    kube_watchlist_inconsistency_detector_env_value="value: \"${ENABLE_KUBE_WATCHLIST_INCONSISTENCY_DETECTOR}\""
   fi
   sed -i -e "s@{{kubeconfig}}@${kubeconfig}@g" "${src_file}"
   sed -i -e "s@{{pillar\['kube_docker_registry'\]}}@${kube_docker_registry}@g" "${src_file}"
@@ -1782,7 +1834,10 @@ function prepare-kube-proxy-manifest-variables {
   sed -i -e "s@{{container_env}}@${container_env}@g" "${src_file}"
   sed -i -e "s@{{kube_cache_mutation_detector_env_name}}@${kube_cache_mutation_detector_env_name}@g" "${src_file}"
   sed -i -e "s@{{kube_cache_mutation_detector_env_value}}@${kube_cache_mutation_detector_env_value}@g" "${src_file}"
+  sed -i -e "s@{{kube_watchlist_inconsistency_detector_env_name}}@${kube_watchlist_inconsistency_detector_env_name}@g" "${src_file}"
+  sed -i -e "s@{{kube_watchlist_inconsistency_detector_env_value}}@${kube_watchlist_inconsistency_detector_env_value}@g" "${src_file}"
   sed -i -e "s@{{ cpurequest }}@${KUBE_PROXY_CPU_REQUEST:-100m}@g" "${src_file}"
+  sed -i -e "s@{{ memoryrequest }}@${KUBE_PROXY_MEMORY_REQUEST:-50Mi}@g" "${src_file}"
   sed -i -e "s@{{api_servers_with_port}}@${api_servers}@g" "${src_file}"
   sed -i -e "s@{{kubernetes_service_host_env_value}}@${KUBERNETES_MASTER_NAME}@g" "${src_file}"
   if [[ -n "${CLUSTER_IP_RANGE:-}" ]]; then
@@ -2153,14 +2208,13 @@ function start-kube-controller-manager {
   create-kubeconfig "kube-controller-manager" "${KUBE_CONTROLLER_MANAGER_TOKEN}"
   prepare-log-file /var/log/kube-controller-manager.log "${KUBE_CONTROLLER_MANAGER_RUNASUSER:-0}"
   # Calculate variables and assemble the command line.
-  local params=("${CONTROLLER_MANAGER_TEST_LOG_LEVEL:-"--v=2"}" "${CONTROLLER_MANAGER_TEST_ARGS:-}" "${CLOUD_CONFIG_OPT}")
+  local params=("${CONTROLLER_MANAGER_TEST_LOG_LEVEL:-"--v=4"}" "${KUBE_CONTROLLER_MANAGER_TEST_ARGS:-}" "${CONTROLLER_MANAGER_TEST_ARGS:-}" "${CLOUD_CONFIG_OPT}")
   local config_path='/etc/srv/kubernetes/kube-controller-manager/kubeconfig'
   params+=("--use-service-account-credentials")
-  params+=("--cloud-provider=${CLOUD_PROVIDER_FLAG:-gce}")
+  params+=("--cloud-provider=${CLOUD_PROVIDER_FLAG:-external}")
   params+=("--kubeconfig=${config_path}" "--authentication-kubeconfig=${config_path}" "--authorization-kubeconfig=${config_path}")
   params+=("--root-ca-file=${CA_CERT_BUNDLE_PATH}")
   params+=("--service-account-private-key-file=${SERVICEACCOUNT_KEY_PATH}")
-  params+=("--volume-host-allow-local-loopback=false")
   if [[ -n "${ENABLE_GARBAGE_COLLECTOR:-}" ]]; then
     params+=("--enable-garbage-collector=${ENABLE_GARBAGE_COLLECTOR}")
   fi
@@ -2177,9 +2231,6 @@ function start-kube-controller-manager {
   if [[ -n "${SERVICE_CLUSTER_IP_RANGE:-}" ]]; then
     params+=("--service-cluster-ip-range=${SERVICE_CLUSTER_IP_RANGE}")
   fi
-  if [[ -n "${CONCURRENT_SERVICE_SYNCS:-}" ]]; then
-    params+=("--concurrent-service-syncs=${CONCURRENT_SERVICE_SYNCS}")
-  fi
   if [[ "${NETWORK_PROVIDER:-}" == "kubenet" ]]; then
     params+=("--allocate-node-cidrs=true")
   elif [[ -n "${ALLOCATE_NODE_CIDRS:-}" ]]; then
@@ -2188,12 +2239,11 @@ function start-kube-controller-manager {
   if [[ -n "${TERMINATED_POD_GC_THRESHOLD:-}" ]]; then
     params+=("--terminated-pod-gc-threshold=${TERMINATED_POD_GC_THRESHOLD}")
   fi
-  if [[ "${ENABLE_IP_ALIASES:-}" == 'true' ]]; then
-    params+=("--cidr-allocator-type=${NODE_IPAM_MODE}")
-    params+=("--configure-cloud-routes=false")
-  fi
   if [[ -n "${FEATURE_GATES:-}" ]]; then
     params+=("--feature-gates=${FEATURE_GATES}")
+  fi
+  if [[ -n "${KUBE_EMULATED_VERSION:-}" ]]; then
+    params+=("--emulated-version=kube=${KUBE_EMULATED_VERSION}")
   fi
   if [[ -n "${VOLUME_PLUGIN_DIR:-}" ]]; then
     params+=("--flex-volume-plugin-dir=${VOLUME_PLUGIN_DIR}")
@@ -2212,9 +2262,17 @@ function start-kube-controller-manager {
   local -r kube_rc_docker_tag=$(cat /home/kubernetes/kube-docker-files/kube-controller-manager.docker_tag)
   local container_env=""
   if [[ -n "${ENABLE_CACHE_MUTATION_DETECTOR:-}" ]]; then
-    container_env="\"env\":[{\"name\": \"KUBE_CACHE_MUTATION_DETECTOR\", \"value\": \"${ENABLE_CACHE_MUTATION_DETECTOR}\"}],"
+    container_env="{\"name\": \"KUBE_CACHE_MUTATION_DETECTOR\", \"value\": \"${ENABLE_CACHE_MUTATION_DETECTOR}\"}"
   fi
-
+  if [[ -n "${ENABLE_KUBE_WATCHLIST_INCONSISTENCY_DETECTOR:-}" ]]; then
+    if [[ -n "${container_env}" ]]; then
+      container_env="${container_env}, "
+    fi
+    container_env+="{\"name\": \"KUBE_WATCHLIST_INCONSISTENCY_DETECTOR\", \"value\": \"${ENABLE_KUBE_WATCHLIST_INCONSISTENCY_DETECTOR}\"}"
+  fi
+  if [[ -n "${container_env}" ]]; then
+    container_env="\"env\":[${container_env}],"
+  fi
   local paramstring
   paramstring="$(convert-manifest-params "${params[*]}")"
   local -r src_file="${KUBE_HOME}/kube-manifests/kubernetes/gci-trusty/kube-controller-manager.manifest"
@@ -2246,7 +2304,6 @@ function start-kube-controller-manager {
   cp "${src_file}" /etc/kubernetes/manifests
 }
 
-# (TODO/cloud-provider-gcp): Figure out how to inject
 # Starts cloud controller manager.
 # It prepares the log file, loads the docker image, calculates variables, sets them
 # in the manifest file, and then copies the manifest file to /etc/kubernetes/manifests.
@@ -2268,6 +2325,7 @@ function start-cloud-controller-manager {
   params+=("--secure-port=10258")
   params+=("--use-service-account-credentials")
   params+=("--cloud-provider=gce")
+  params+=("--concurrent-node-syncs=10")
   params+=("--kubeconfig=/etc/srv/kubernetes/cloud-controller-manager/kubeconfig")
   params+=("--authorization-kubeconfig=/etc/srv/kubernetes/cloud-controller-manager/kubeconfig")
   params+=("--authentication-kubeconfig=/etc/srv/kubernetes/cloud-controller-manager/kubeconfig")
@@ -2309,8 +2367,8 @@ function start-cloud-controller-manager {
       echo "None of the given feature gates (${FEATURE_GATES}) were found to be safe to pass to the CCM"
     fi
   fi
-  if [[ -n "${RUN_CONTROLLERS:-}" ]]; then
-    params+=("--controllers=${RUN_CONTROLLERS}")
+  if [[ -n "${RUN_CCM_CONTROLLERS:-}" ]]; then
+    params+=("--controllers=${RUN_CCM_CONTROLLERS}")
   fi
 
   echo "Converting manifest for cloud provider controller-manager"
@@ -2318,7 +2376,16 @@ function start-cloud-controller-manager {
   paramstring="$(convert-manifest-params "${params[*]}")"
   local container_env=""
   if [[ -n "${ENABLE_CACHE_MUTATION_DETECTOR:-}" ]]; then
-    container_env="\"env\":[{\"name\": \"KUBE_CACHE_MUTATION_DETECTOR\", \"value\": \"${ENABLE_CACHE_MUTATION_DETECTOR}\"}],"
+    container_env="{\"name\": \"KUBE_CACHE_MUTATION_DETECTOR\", \"value\": \"${ENABLE_CACHE_MUTATION_DETECTOR}\"}"
+  fi
+  if [[ -n "${ENABLE_KUBE_WATCHLIST_INCONSISTENCY_DETECTOR:-}" ]]; then
+    if [[ -n "${container_env}" ]]; then
+      container_env="${container_env}, "
+    fi
+    container_env+="{\"name\": \"KUBE_WATCHLIST_INCONSISTENCY_DETECTOR\", \"value\": \"${ENABLE_KUBE_WATCHLIST_INCONSISTENCY_DETECTOR}\"}"
+  fi
+  if [[ -n "${container_env}" ]]; then
+    container_env="\"env\":[${container_env}],"
   fi
 
   echo "Applying over-rides for manifest for cloud provider controller-manager"
@@ -2350,6 +2417,9 @@ function start-cloud-controller-manager {
 
   echo "Writing manifest for cloud provider controller-manager"
   cp "${src_file}" /etc/kubernetes/manifests
+
+  setup-addon-manifests "addons" "cloud-pvl-admission"
+  setup-cloud-pvl-admission-manifest
 }
 
 # Starts kubernetes scheduler.
@@ -2375,6 +2445,9 @@ function start-kube-scheduler {
   params=("${SCHEDULER_TEST_LOG_LEVEL:-"--v=2"}" "${SCHEDULER_TEST_ARGS:-}")
   if [[ -n "${FEATURE_GATES:-}" ]]; then
     params+=("--feature-gates=${FEATURE_GATES}")
+  fi
+  if [[ -n "${KUBE_EMULATED_VERSION:-}" ]]; then
+    params+=("--emulated-version=kube=${KUBE_EMULATED_VERSION}")
   fi
 
   # Scheduler Component Config takes precedence over some flags.
@@ -2420,7 +2493,7 @@ function start-cluster-autoscaler {
     echo "Start kubernetes cluster autoscaler"
     setup-addon-manifests "addons" "rbac/cluster-autoscaler"
     create-kubeconfig "cluster-autoscaler" "${KUBE_CLUSTER_AUTOSCALER_TOKEN}"
-    prepare-log-file /var/log/cluster-autoscaler.log
+    prepare-log-file /var/log/cluster-autoscaler.log "${CLUSTER_AUTOSCALER_RUNASUSER:-0}"
 
     # Remove salt comments and replace variables with values
     local -r src_file="${KUBE_HOME}/kube-manifests/kubernetes/gci-trusty/cluster-autoscaler.manifest"
@@ -2439,6 +2512,17 @@ function start-cluster-autoscaler {
     sed -i -e "s@{{cloud_config_mount}}@${CLOUD_CONFIG_MOUNT}@g" "${src_file}"
     sed -i -e "s@{{cloud_config_volume}}@${CLOUD_CONFIG_VOLUME}@g" "${src_file}"
     sed -i -e "s@{%.*%}@@g" "${src_file}"
+
+    if [[ -n "${CLUSTER_AUTOSCALER_RUNASUSER:-}" && -n "${CLUSTER_AUTOSCALER_RUNASGROUP:-}" ]]; then
+      #run-cluster-autoscaler-as-non-root
+      sed -i -e "s@{{runAsUser}}@\"runAsUser\": ${CLUSTER_AUTOSCALER_RUNASUSER},@g" "${src_file}"
+      sed -i -e "s@{{runAsGroup}}@\"runAsGroup\":${CLUSTER_AUTOSCALER_RUNASGROUP},@g" "${src_file}"
+      sed -i -e "s@{{supplementalGroups}}@\"supplementalGroups\": [ ${KUBE_PKI_READERS_GROUP} ],@g" "${src_file}"
+    else
+      sed -i -e "s@{{runAsUser}}@@g" "${src_file}"
+      sed -i -e "s@{{runAsGroup}}@@g" "${src_file}"
+      sed -i -e "s@{{supplementalGroups}}@@g" "${src_file}"
+    fi
 
     cp "${src_file}" /etc/kubernetes/manifests
   fi
@@ -2848,9 +2932,6 @@ EOF
     sed -i -e "s@{{ metrics_server_memory_per_node }}@${metrics_server_memory_per_node}@g" "${metrics_server_yaml}"
     sed -i -e "s@{{ metrics_server_min_cluster_size }}@${metrics_server_min_cluster_size}@g" "${metrics_server_yaml}"
   fi
-  if [[ "${ENABLE_NVIDIA_GPU_DEVICE_PLUGIN:-}" == "true" ]]; then
-    setup-addon-manifests "addons" "device-plugins/nvidia-gpu"
-  fi
   # Setting up the konnectivity-agent daemonset
   if [[ "${RUN_KONNECTIVITY_PODS:-false}" == "true" ]]; then
     setup-addon-manifests "addons" "konnectivity-agent"
@@ -2916,6 +2997,9 @@ EOF
     local -r ds_file="${dst_dir}/calico-policy-controller/calico-node-daemonset.yaml"
     sed -i -e "s@__CALICO_CNI_DIR__@/home/kubernetes/bin@g" "${ds_file}"
   fi
+  if [[ "${NETWORK_POLICY_PROVIDER:-}" == "kube-network-policies" ]]; then
+    setup-addon-manifests "addons" "kube-network-policies"
+  fi
   if [[ "${ENABLE_DEFAULT_STORAGE_CLASS:-}" == "true" ]]; then
     setup-addon-manifests "addons" "storage-class/gce"
   fi
@@ -2966,6 +3050,11 @@ function setup-konnectivity-agent-manifest {
       sed -i "s|__EXTRA_VOL_MNTS__||g" "${manifest}"
       sed -i "s|__EXTRA_VOLS__||g" "${manifest}"
     fi
+}
+
+function setup-cloud-pvl-admission-manifest {
+  local -r manifest="/etc/kubernetes/addons/cloud-pvl-admission/mutating-webhook-configuration.yaml"
+  sed -i "s|__CLOUD_PVL_ADMISSION_CA_CERT__|${CLOUD_PVL_ADMISSION_CA_CERT}|g" "${manifest}"
 }
 
 # Setups manifests for ingress controller and gce-specific policies for service controller.
@@ -3055,7 +3144,7 @@ Or you can download it at:
   https://storage.googleapis.com/gke-release/kubernetes/release/${version}/kubernetes-src.tar.gz
 
 It is based on the Kubernetes source at:
-  https://github.com/kubernetes/kubernetes/tree/${gitref}
+  https://github.com/kubernetes/kubernetes/tree/${gitref/-gke.*/}
 ${devel}
 For Kubernetes copyright and licensing information, see:
   /home/kubernetes/LICENSES
@@ -3111,12 +3200,12 @@ spec:
   - name: vol
   containers:
   - name: pv-recycler
-    image: registry.k8s.io/debian-base:v2.0.0
+    image: registry.k8s.io/build-image/debian-base:bookworm-v1.0.4
     command:
     - /bin/sh
     args:
     - -c
-    - test -e /scrub && rm -rf /scrub/..?* /scrub/.[!.]* /scrub/* && test -z $(ls -A /scrub) || exit 1
+    - test -e /scrub && find /scrub -mindepth 1 -delete && test -z $(ls -A /scrub) || exit 1
     volumeMounts:
     - name: vol
       mountPath: /scrub
@@ -3176,8 +3265,8 @@ function setup-containerd {
 }
 EOF
   if [[ "${KUBERNETES_MASTER:-}" != "true" ]]; then
-    if [[ "${NETWORK_POLICY_PROVIDER:-"none"}" != "none" || "${ENABLE_NETD:-}" == "true" ]]; then
-      # Use Kubernetes cni daemonset on node if network policy provider is specified
+    if [[ "${NETWORK_POLICY_PROVIDER:-"none"}" == "calico" || "${ENABLE_NETD:-}" == "true" ]]; then
+      # Use Kubernetes cni daemonset on node if network policy provider calico is specified
       # or netd is enabled.
       cni_template_path=""
     fi
@@ -3203,7 +3292,7 @@ oom_score = -999
 [plugins."io.containerd.grpc.v1.cri"]
   stream_server_address = "127.0.0.1"
   max_container_log_line_size = ${CONTAINERD_MAX_CONTAINER_LOG_LINE:-262144}
-  sandbox_image = "${CONTAINERD_INFRA_CONTAINER:-"registry.k8s.io/pause:3.9"}"
+  sandbox_image = "${CONTAINERD_INFRA_CONTAINER:-"registry.k8s.io/pause:3.10"}"
 [plugins."io.containerd.grpc.v1.cri".cni]
   bin_dir = "${KUBE_HOME}/bin"
   conf_dir = "/etc/cni/net.d"
@@ -3212,15 +3301,31 @@ oom_score = -999
   default_runtime_name = "runc"
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
   runtime_type = "io.containerd.runc.v2"
-[plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
-  endpoint = ["https://mirror.gcr.io","https://registry-1.docker.io"]
-# Enable registry.k8s.io as the primary mirror for k8s.gcr.io
-# See: https://github.com/kubernetes/k8s.io/issues/3411
-[plugins."io.containerd.grpc.v1.cri".registry.mirrors."k8s.gcr.io"]
-  endpoint = ["https://registry.k8s.io", "https://k8s.gcr.io",]
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
   SystemdCgroup = ${systemdCgroup}
+# enable hosts config
+[plugins."io.containerd.grpc.v1.cri".registry]
+  config_path = "/etc/containerd/certs.d"
 EOF
+
+  # used for 5k node scale tests with private pull-through cache
+  if [[ -n "${KUBERNETES_REGISTRY_PULL_THROUGH_HOST:-}" ]]; then
+    registry_config_dir="/etc/containerd/certs.d/registry.k8s.io"
+    mkdir -p "${registry_config_dir}"
+    {
+      # NOTE: we need literal double quotes around some of these values
+      echo 'server="'"${KUBERNETES_REGISTRY_PULL_THROUGH_HOST}"'"'
+      echo ''
+      echo '[host."'"${KUBERNETES_REGISTRY_PULL_THROUGH_HOST}"'"]'
+      echo '  override_path = true'
+      echo '  capabilities = ["pull", "resolve"]'
+      # TODO: this is a hack. https://github.com/containerd/containerd/issues/7385
+      echo '[host."'"${KUBERNETES_REGISTRY_PULL_THROUGH_HOST}"'".header]'
+      if [[ -n "${KUBERNETES_REGISTRY_PULL_THROUGH_BASIC_AUTH_TOKEN:-}" ]]; then
+        echo "  authorization = '""${KUBERNETES_REGISTRY_PULL_THROUGH_BASIC_AUTH_TOKEN}""'"
+      fi
+    } > "${registry_config_dir}/hosts.toml"
+  fi
 
   if [[ "${CONTAINER_RUNTIME_TEST_HANDLER:-}" == "true" ]]; then
   cat >> "${config_path}" <<EOF
@@ -3572,8 +3677,7 @@ function main() {
       log-wrap 'StartKonnectivityServer' start-konnectivity-server
     fi
     log-wrap 'StartKubeControllerManager' start-kube-controller-manager
-    # (TODO/cloud-provider-gcp): Figure out how to inject
-    if [[ "${CLOUD_PROVIDER_FLAG:-gce}" == "external" ]]; then
+    if [[ "${CLOUD_PROVIDER_FLAG:-external}" == "external" ]]; then
       log-wrap 'StartCloudControllerManager' start-cloud-controller-manager
     fi
     log-wrap 'StartKubeScheduler' start-kube-scheduler

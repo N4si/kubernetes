@@ -41,7 +41,7 @@ func TestContainerLabels(t *testing.T) {
 			HTTPGet: &v1.HTTPGetAction{
 				Path:   "path",
 				Host:   "host",
-				Port:   intstr.FromInt(8080),
+				Port:   intstr.FromInt32(8080),
 				Scheme: "scheme",
 			},
 			TCPSocket: &v1.TCPSocketAction{
@@ -110,7 +110,7 @@ func TestContainerAnnotations(t *testing.T) {
 			HTTPGet: &v1.HTTPGetAction{
 				Path:   "path",
 				Host:   "host",
-				Port:   intstr.FromInt(8080),
+				Port:   intstr.FromInt32(8080),
 				Scheme: "scheme",
 			},
 			TCPSocket: &v1.TCPSocketAction{
@@ -155,13 +155,12 @@ func TestContainerAnnotations(t *testing.T) {
 		PodDeletionGracePeriod:    pod.DeletionGracePeriodSeconds,
 		PodTerminationGracePeriod: pod.Spec.TerminationGracePeriodSeconds,
 		Hash:                      kubecontainer.HashContainer(container),
-		HashWithoutResources:      kubecontainer.HashContainerWithoutResources(container),
 		RestartCount:              restartCount,
 		TerminationMessagePath:    container.TerminationMessagePath,
 		PreStopHandler:            container.Lifecycle.PreStop,
 	}
 
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.InPlacePodVerticalScaling, true)()
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.InPlacePodVerticalScaling, true)
 	// Test whether we can get right information from label
 	annotations := newContainerAnnotations(container, pod, restartCount, opts)
 	containerInfo := getContainerInfoFromAnnotations(annotations)
@@ -182,7 +181,6 @@ func TestContainerAnnotations(t *testing.T) {
 	expected.PreStopHandler = nil
 	// Because container is changed, the Hash should be updated
 	expected.Hash = kubecontainer.HashContainer(container)
-	expected.HashWithoutResources = kubecontainer.HashContainerWithoutResources(container)
 	annotations = newContainerAnnotations(container, pod, restartCount, opts)
 	containerInfo = getContainerInfoFromAnnotations(annotations)
 	if !reflect.DeepEqual(containerInfo, expected) {

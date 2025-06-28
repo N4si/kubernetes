@@ -5,7 +5,7 @@ Building Kubernetes is easy if you take advantage of the containerized build env
 ## Requirements
 
 1. Docker, using one of the following configurations:
-  * **macOS** Install Docker for Mac. See installation instructions [here](https://docs.docker.com/docker-for-mac/).
+  * **macOS** Install Docker for Mac. See installation instructions [here](https://docs.docker.com/desktop/install/mac-install/).
      **Note**: You will want to set the Docker VM to have at least 8GB of initial memory or building will likely fail. (See: [#11852]( http://issue.k8s.io/11852)).
   * **Linux with local Docker**  Install Docker according to the [instructions](https://docs.docker.com/installation/#installation) for your OS.
   * **Windows with Docker Desktop WSL2 backend**  Install Docker according to the [instructions](https://docs.docker.com/docker-for-windows/wsl-tech-preview/). Be sure to store your sources in the local Linux file system, not the Windows remote mount at `/mnt/c`.
@@ -18,11 +18,26 @@ You must install and configure Google Cloud SDK if you want to upload your relea
 
 ## Overview
 
-While it is possible to build Kubernetes using a local golang installation, we have a build process that runs in a Docker container.  This simplifies initial set up and provides for a very consistent build and test environment.
+You can build Kubernetes in two environments:
+1. **Local `Go`** Environment, and
+2. **Docker Container** Environment
+
+Building Kubernetes in a Docker container **simplifies the initial set-up** and provides a very consistent build and test environment.
+
+## Clone the Repository
+Before you start building Kubernetes, make sure to clone the repository using the following command:
+```bash
+git clone https://github.com/kubernetes/kubernetes.git
+```
+Navigate to Kubernetes directory before executing scripts files:
+```bash
+cd kubernetes
+```
 
 ## Key scripts
+**Note:** Ensure you run all the scripts from the Kubernetes root directory.
 
-The following scripts are found in the [`build/`](.) directory. Note that all scripts must be run from the Kubernetes root directory.
+The following scripts are found in the [`build/`](.) directory. 
 
 * [`build/run.sh`](run.sh): Run a command in a build docker container.  Common invocations:
   *  `build/run.sh make`: Build just linux binaries in the container.  Pass options and packages as necessary.
@@ -50,8 +65,11 @@ All Docker names are suffixed with a hash derived from the file path (to allow c
 ## Build artifacts
 The build system output all its products to a top level directory in the source repository named `_output`.
 These include the binary compiled packages (e.g. kubectl, kube-scheduler etc.) and archived Docker images.
-If you intend to run a component with a docker image you will need to import it from this directory with
-the appropriate command (e.g. `docker import _output/release-images/amd64/kube-scheduler.tar k8s.io/kube-scheduler:$(git describe)`).
+If you intend to run a component with a docker image you will need to load it from this directory with
+the appropriate command, e.g.
+```
+docker load --input _output/release-images/amd64/kube-controller-manager.tar
+```
 
 ## Releasing
 

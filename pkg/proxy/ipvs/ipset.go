@@ -1,3 +1,6 @@
+//go:build linux
+// +build linux
+
 /*
 Copyright 2017 The Kubernetes Authors.
 
@@ -17,14 +20,13 @@ limitations under the License.
 package ipvs
 
 import (
-	"k8s.io/apimachinery/pkg/util/sets"
-	utilversion "k8s.io/apimachinery/pkg/util/version"
-	utilipset "k8s.io/kubernetes/pkg/util/ipset"
-
 	"fmt"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/util/sets"
+	utilversion "k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/klog/v2"
+	utilipset "k8s.io/kubernetes/pkg/proxy/ipvs/ipset"
 )
 
 const (

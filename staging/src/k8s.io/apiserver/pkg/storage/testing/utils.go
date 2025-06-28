@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"path"
 	"reflect"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,6 +31,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"k8s.io/apimachinery/pkg/api/meta"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
@@ -89,7 +92,7 @@ func testPropagateStore(ctx context.Context, t *testing.T, store storage.Interfa
 	key := computePodKey(obj)
 
 	// Setup store with the specified key and grab the output for returning.
-	err := store.Delete(ctx, key, &example.Pod{}, nil, storage.ValidateAllObjectFunc, nil)
+	err := store.Delete(ctx, key, &example.Pod{}, nil, storage.ValidateAllObjectFunc, nil, storage.DeleteOptions{})
 	if err != nil && !storage.IsNotFound(err) {
 		t.Fatalf("Cleanup failed: %v", err)
 	}
@@ -100,13 +103,13 @@ func testPropagateStore(ctx context.Context, t *testing.T, store storage.Interfa
 	return key, setOutput
 }
 
-func ExpectNoDiff(t *testing.T, msg string, expected, got interface{}) {
+func expectNoDiff(t *testing.T, msg string, expected, actual interface{}) {
 	t.Helper()
-	if !reflect.DeepEqual(expected, got) {
-		if diff := cmp.Diff(expected, got); diff != "" {
+	if !reflect.DeepEqual(expected, actual) {
+		if diff := cmp.Diff(expected, actual); diff != "" {
 			t.Errorf("%s: %s", msg, diff)
 		} else {
-			t.Errorf("%s:\nexpected: %#v\ngot: %#v", msg, expected, got)
+			t.Errorf("%s:\nexpected: %#v\ngot: %#v", msg, expected, actual)
 		}
 	}
 }
@@ -139,7 +142,7 @@ func encodeContinueOrDie(key string, resourceVersion int64) string {
 	return token
 }
 
-func testCheckEventType(t *testing.T, expectEventType watch.EventType, w watch.Interface) {
+func testCheckEventType(t *testing.T, w watch.Interface, expectEventType watch.EventType) {
 	select {
 	case res := <-w.ResultChan():
 		if res.Type != expectEventType {
@@ -150,29 +153,52 @@ func testCheckEventType(t *testing.T, expectEventType watch.EventType, w watch.I
 	}
 }
 
-func testCheckResult(t *testing.T, expectEventType watch.EventType, w watch.Interface, expectObj *example.Pod) {
-	testCheckResultFunc(t, expectEventType, w, func(object runtime.Object) error {
-		ExpectNoDiff(t, "incorrect object", expectObj, object)
-		return nil
+func testCheckResult(t *testing.T, w watch.Interface, expectEvent watch.Event) {
+	testCheckResultFunc(t, w, func(actualEvent watch.Event) {
+		expectNoDiff(t, "incorrect event", expectEvent, actualEvent)
 	})
 }
 
-func testCheckResultFunc(t *testing.T, expectEventType watch.EventType, w watch.Interface, check func(object runtime.Object) error) {
+func testCheckResultFunc(t *testing.T, w watch.Interface, check func(actualEvent watch.Event)) {
 	select {
 	case res := <-w.ResultChan():
-		if res.Type != expectEventType {
-			t.Errorf("event type want=%v, get=%v", expectEventType, res.Type)
-			return
-		}
 		obj := res.Object
 		if co, ok := obj.(runtime.CacheableObject); ok {
-			obj = co.GetObject()
+			res.Object = co.GetObject()
 		}
-		if err := check(obj); err != nil {
-			t.Error(err)
-		}
+		check(res)
 	case <-time.After(wait.ForeverTestTimeout):
 		t.Errorf("time out after waiting %v on ResultChan", wait.ForeverTestTimeout)
+	}
+}
+
+func testCheckResultWithIgnoreFunc(t *testing.T, w watch.Interface, expectedEvents []watch.Event, ignore func(watch.Event) bool) {
+	checkIndex := 0
+	for {
+		select {
+		case event := <-w.ResultChan():
+			obj := event.Object
+			if co, ok := obj.(runtime.CacheableObject); ok {
+				event.Object = co.GetObject()
+			}
+			if ignore != nil && ignore(event) {
+				continue
+			}
+			if checkIndex < len(expectedEvents) {
+				expectNoDiff(t, "incorrect event", expectedEvents[checkIndex], event)
+				checkIndex++
+			} else {
+				t.Fatalf("cannot receive correct event, expect no event, but get a event: %+v", event)
+			}
+		case <-time.After(150 * time.Millisecond):
+			// wait 150ms forcibly in order to receive watchEvents including bookmark event.
+			// we cannot guarantee that we will receive all bookmark events within 150ms,
+			// but too large timeout value will lead to exceed the timeout of package test.
+			if checkIndex < len(expectedEvents) {
+				t.Fatalf("cannot receive enough events within specific time, rest expected events: %+v", expectedEvents[checkIndex:])
+			}
+			return
+		}
 	}
 }
 
@@ -192,6 +218,32 @@ func testCheckStop(t *testing.T, w watch.Interface) {
 	case <-time.After(wait.ForeverTestTimeout):
 		t.Errorf("time out after waiting 1s on ResultChan")
 	}
+}
+
+func TestCheckResultsInStrictOrder(t *testing.T, w watch.Interface, expectedEvents []watch.Event) {
+	for _, expectedEvent := range expectedEvents {
+		testCheckResult(t, w, expectedEvent)
+	}
+}
+
+func TestCheckNoMoreResultsWithIgnoreFunc(t *testing.T, w watch.Interface, ignore func(watch.Event) bool) {
+	select {
+	case e := <-w.ResultChan():
+		if ignore == nil || !ignore(e) {
+			t.Errorf("Unexpected: %#v event received, expected no events", e)
+		}
+	// We consciously make the timeout short here to speed up tests.
+	case <-time.After(100 * time.Millisecond):
+		return
+	}
+}
+
+func toInterfaceSlice[T any](s []T) []interface{} {
+	result := make([]interface{}, len(s))
+	for i, v := range s {
+		result[i] = v
+	}
+	return result
 }
 
 // resourceVersionNotOlderThan returns a function to validate resource versions. Resource versions
@@ -339,4 +391,51 @@ func (s sortablePodList) Less(i, j int) bool {
 
 func (s sortablePodList) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
+}
+
+func CreatePodPredicate(field fields.Selector, namespaceScoped bool, indexField []string) storage.SelectionPredicate {
+	return storage.SelectionPredicate{
+		Label:       labels.Everything(),
+		Field:       field,
+		GetAttrs:    determinePodGetAttrFunc(namespaceScoped, indexField),
+		IndexFields: indexField,
+	}
+}
+
+func determinePodGetAttrFunc(namespaceScoped bool, indexField []string) storage.AttrFunc {
+	if indexField != nil {
+		if namespaceScoped {
+			return namespacedScopedNodeNameAttrFunc
+		}
+		return clusterScopedNodeNameAttrFunc
+	}
+	if namespaceScoped {
+		return storage.DefaultNamespaceScopedAttr
+	}
+	return storage.DefaultClusterScopedAttr
+}
+
+func namespacedScopedNodeNameAttrFunc(obj runtime.Object) (labels.Set, fields.Set, error) {
+	pod := obj.(*example.Pod)
+	return nil, fields.Set{
+		"spec.nodeName":      pod.Spec.NodeName,
+		"metadata.name":      pod.ObjectMeta.Name,
+		"metadata.namespace": pod.ObjectMeta.Namespace,
+	}, nil
+}
+
+func clusterScopedNodeNameAttrFunc(obj runtime.Object) (labels.Set, fields.Set, error) {
+	pod := obj.(*example.Pod)
+	return nil, fields.Set{
+		"spec.nodeName": pod.Spec.NodeName,
+		"metadata.name": pod.ObjectMeta.Name,
+	}, nil
+}
+
+func mustAtoi(str string) int {
+	result, err := strconv.Atoi(str)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }

@@ -82,6 +82,10 @@ func New(colorMode ColorMode) Formatter {
 		return fmt.Sprintf("\x1b[38;5;%dm", colorCode)
 	}
 
+	if _, noColor := os.LookupEnv("GINKGO_NO_COLOR"); noColor {
+		colorMode = ColorModeNone
+	}
+
 	f := Formatter{
 		ColorMode: colorMode,
 		colors: map[string]string{
@@ -120,7 +124,10 @@ func (f Formatter) Fi(indentation uint, format string, args ...interface{}) stri
 }
 
 func (f Formatter) Fiw(indentation uint, maxWidth uint, format string, args ...interface{}) string {
-	out := fmt.Sprintf(f.style(format), args...)
+	out := f.style(format)
+	if len(args) > 0 {
+		out = fmt.Sprintf(out, args...)
+	}
 
 	if indentation == 0 && maxWidth == 0 {
 		return out

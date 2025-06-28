@@ -21,6 +21,8 @@ import (
 	"reflect"
 	"testing"
 
+	utiltesting "k8s.io/client-go/util/testing"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	internal "k8s.io/controller-manager/config"
 )
@@ -81,6 +83,30 @@ controllerLeaders: []
 			},
 		},
 		{
+			name: "unknown field causes error with strict validation",
+			content: `
+apiVersion: controllermanager.config.k8s.io/v1alpha1
+kind: LeaderMigrationConfiguration
+leaderName: migration-120-to-121
+resourceLock: endpoints
+foo: bar
+controllerLeaders: []
+`,
+			expectErr: true,
+		},
+		{
+			name: "duplicate field causes error with strict validation",
+			content: `
+apiVersion: controllermanager.config.k8s.io/v1alpha1
+kind: LeaderMigrationConfiguration
+leaderName: migration-120-to-121
+resourceLock: endpoints
+resourceLock: endpoints1
+controllerLeaders: []
+`,
+			expectErr: true,
+		},
+		{
 			name: "withLeaders",
 			content: `
 apiVersion: controllermanager.config.k8s.io/v1alpha1
@@ -117,7 +143,7 @@ controllerLeaders:
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer os.Remove(configFile.Name())
+			defer utiltesting.CloseAndRemove(t, configFile)
 			err = os.WriteFile(configFile.Name(), []byte(tc.content), os.FileMode(0755))
 			if err != nil {
 				t.Fatal(err)

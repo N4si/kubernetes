@@ -18,16 +18,18 @@ package operationexecutor
 
 import (
 	"fmt"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"strconv"
 	"testing"
 	"time"
 
+	"k8s.io/klog/v2"
+
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
-	csitrans "k8s.io/csi-translation-lib"
+	"k8s.io/klog/v2/ktesting"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util/hostutil"
 	volumetypes "k8s.io/kubernetes/pkg/volume/util/types"
@@ -59,7 +61,7 @@ func TestOperationExecutor_MountVolume_ConcurrentMountForNonAttachableAndNonDevi
 
 	// Act
 	for i := range volumesToMount {
-		podName := "pod-" + strconv.Itoa((i + 1))
+		podName := "pod-" + strconv.Itoa(i+1)
 		pod := getTestPodWithSecret(podName, secretName)
 		volumesToMount[i] = VolumeToMount{
 			Pod:                     pod,
@@ -87,7 +89,7 @@ func TestOperationExecutor_MountVolume_ConcurrentMountForAttachablePlugins(t *te
 	volumeName := v1.UniqueVolumeName(pdName)
 	// Act
 	for i := range volumesToMount {
-		podName := "pod-" + strconv.Itoa((i + 1))
+		podName := "pod-" + strconv.Itoa(i+1)
 		pod := getTestPodWithGCEPD(podName, pdName)
 		volumesToMount[i] = VolumeToMount{
 			Pod:                pod,
@@ -114,7 +116,7 @@ func TestOperationExecutor_MountVolume_ConcurrentMountForDeviceMountablePlugins(
 	volumeName := v1.UniqueVolumeName(pdName)
 	// Act
 	for i := range volumesToMount {
-		podName := "pod-" + strconv.Itoa((i + 1))
+		podName := "pod-" + strconv.Itoa(i+1)
 		pod := getTestPodWithGCEPD(podName, pdName)
 		volumesToMount[i] = VolumeToMount{
 			Pod:                     pod,
@@ -209,7 +211,8 @@ func TestOperationExecutor_AttachSingleNodeVolumeConcurrentlyToSameNode(t *testi
 				},
 			},
 		}
-		oe.AttachVolume(volumesToAttach[i], nil /* actualStateOfWorldAttacherUpdater */)
+		logger, _ := ktesting.NewTestContext(t)
+		oe.AttachVolume(logger, volumesToAttach[i], nil /* actualStateOfWorldAttacherUpdater */)
 	}
 
 	// Assert
@@ -239,7 +242,8 @@ func TestOperationExecutor_AttachMultiNodeVolumeConcurrentlyToSameNode(t *testin
 				},
 			},
 		}
-		oe.AttachVolume(volumesToAttach[i], nil /* actualStateOfWorldAttacherUpdater */)
+		logger, _ := ktesting.NewTestContext(t)
+		oe.AttachVolume(logger, volumesToAttach[i], nil /* actualStateOfWorldAttacherUpdater */)
 	}
 
 	// Assert
@@ -269,7 +273,8 @@ func TestOperationExecutor_AttachSingleNodeVolumeConcurrentlyToDifferentNodes(t 
 				},
 			},
 		}
-		oe.AttachVolume(volumesToAttach[i], nil /* actualStateOfWorldAttacherUpdater */)
+		logger, _ := ktesting.NewTestContext(t)
+		oe.AttachVolume(logger, volumesToAttach[i], nil /* actualStateOfWorldAttacherUpdater */)
 	}
 
 	// Assert
@@ -297,7 +302,8 @@ func TestOperationExecutor_AttachMultiNodeVolumeConcurrentlyToDifferentNodes(t *
 				},
 			},
 		}
-		oe.AttachVolume(volumesToAttach[i], nil /* actualStateOfWorldAttacherUpdater */)
+		logger, _ := ktesting.NewTestContext(t)
+		oe.AttachVolume(logger, volumesToAttach[i], nil /* actualStateOfWorldAttacherUpdater */)
 	}
 
 	// Assert
@@ -327,7 +333,8 @@ func TestOperationExecutor_DetachSingleNodeVolumeConcurrentlyFromSameNode(t *tes
 				},
 			},
 		}
-		oe.DetachVolume(attachedVolumes[i], true /* verifySafeToDetach */, nil /* actualStateOfWorldAttacherUpdater */)
+		logger, _ := ktesting.NewTestContext(t)
+		oe.DetachVolume(logger, attachedVolumes[i], true /* verifySafeToDetach */, nil /* actualStateOfWorldAttacherUpdater */)
 	}
 
 	// Assert
@@ -357,7 +364,8 @@ func TestOperationExecutor_DetachMultiNodeVolumeConcurrentlyFromSameNode(t *test
 				},
 			},
 		}
-		oe.DetachVolume(attachedVolumes[i], true /* verifySafeToDetach */, nil /* actualStateOfWorldAttacherUpdater */)
+		logger, _ := ktesting.NewTestContext(t)
+		oe.DetachVolume(logger, attachedVolumes[i], true /* verifySafeToDetach */, nil /* actualStateOfWorldAttacherUpdater */)
 	}
 
 	// Assert
@@ -385,7 +393,8 @@ func TestOperationExecutor_DetachMultiNodeVolumeConcurrentlyFromDifferentNodes(t
 				},
 			},
 		}
-		oe.DetachVolume(attachedVolumes[i], true /* verifySafeToDetach */, nil /* actualStateOfWorldAttacherUpdater */)
+		logger, _ := ktesting.NewTestContext(t)
+		oe.DetachVolume(logger, attachedVolumes[i], true /* verifySafeToDetach */, nil /* actualStateOfWorldAttacherUpdater */)
 	}
 
 	// Assert
@@ -440,7 +449,8 @@ func TestOperationExecutor_VerifyControllerAttachedVolumeConcurrently(t *testing
 		volumesToMount[i] = VolumeToMount{
 			VolumeName: v1.UniqueVolumeName(pdName),
 		}
-		oe.VerifyControllerAttachedVolume(volumesToMount[i], types.NodeName("node-name"), nil /* actualStateOfWorldMounterUpdater */)
+		logger, _ := ktesting.NewTestContext(t)
+		oe.VerifyControllerAttachedVolume(logger, volumesToMount[i], types.NodeName("node-name"), nil /* actualStateOfWorldMounterUpdater */)
 	}
 
 	// Assert
@@ -460,7 +470,7 @@ func TestOperationExecutor_MountVolume_ConcurrentMountForNonAttachablePlugins_Vo
 
 	// Act
 	for i := range volumesToMount {
-		podName := "pod-" + strconv.Itoa((i + 1))
+		podName := "pod-" + strconv.Itoa(i+1)
 		pod := getTestPodWithSecret(podName, secretName)
 		volumesToMount[i] = VolumeToMount{
 			Pod:                pod,
@@ -491,7 +501,7 @@ func TestOperationExecutor_MountVolume_ConcurrentMountForAttachablePlugins_Volum
 
 	// Act
 	for i := range volumesToMount {
-		podName := "pod-" + strconv.Itoa((i + 1))
+		podName := "pod-" + strconv.Itoa(i+1)
 		pod := getTestPodWithGCEPD(podName, pdName)
 		volumesToMount[i] = VolumeToMount{
 			Pod:                pod,
@@ -603,7 +613,7 @@ func (fopg *fakeOperationGenerator) GenerateUnmountVolumeFunc(volumeToUnmount Mo
 		OperationFunc: opFunc,
 	}, nil
 }
-func (fopg *fakeOperationGenerator) GenerateAttachVolumeFunc(volumeToAttach VolumeToAttach, actualStateOfWorld ActualStateOfWorldAttacherUpdater) volumetypes.GeneratedOperations {
+func (fopg *fakeOperationGenerator) GenerateAttachVolumeFunc(logger klog.Logger, volumeToAttach VolumeToAttach, actualStateOfWorld ActualStateOfWorldAttacherUpdater) volumetypes.GeneratedOperations {
 	opFunc := func() volumetypes.OperationContext {
 		startOperationAndBlock(fopg.ch, fopg.quit)
 		return volumetypes.NewOperationContext(nil, nil, false)
@@ -612,7 +622,7 @@ func (fopg *fakeOperationGenerator) GenerateAttachVolumeFunc(volumeToAttach Volu
 		OperationFunc: opFunc,
 	}
 }
-func (fopg *fakeOperationGenerator) GenerateDetachVolumeFunc(volumeToDetach AttachedVolume, verifySafeToDetach bool, actualStateOfWorld ActualStateOfWorldAttacherUpdater) (volumetypes.GeneratedOperations, error) {
+func (fopg *fakeOperationGenerator) GenerateDetachVolumeFunc(logger klog.Logger, volumeToDetach AttachedVolume, verifySafeToDetach bool, actualStateOfWorld ActualStateOfWorldAttacherUpdater) (volumetypes.GeneratedOperations, error) {
 	opFunc := func() volumetypes.OperationContext {
 		startOperationAndBlock(fopg.ch, fopg.quit)
 		return volumetypes.NewOperationContext(nil, nil, false)
@@ -639,7 +649,7 @@ func (fopg *fakeOperationGenerator) GenerateUnmountDeviceFunc(deviceToDetach Att
 		OperationFunc: opFunc,
 	}, nil
 }
-func (fopg *fakeOperationGenerator) GenerateVerifyControllerAttachedVolumeFunc(volumeToMount VolumeToMount, nodeName types.NodeName, actualStateOfWorld ActualStateOfWorldAttacherUpdater) (volumetypes.GeneratedOperations, error) {
+func (fopg *fakeOperationGenerator) GenerateVerifyControllerAttachedVolumeFunc(logger klog.Logger, volumeToMount VolumeToMount, nodeName types.NodeName, actualStateOfWorld ActualStateOfWorldAttacherUpdater) (volumetypes.GeneratedOperations, error) {
 	opFunc := func() volumetypes.OperationContext {
 		startOperationAndBlock(fopg.ch, fopg.quit)
 		return volumetypes.NewOperationContext(nil, nil, false)
@@ -670,20 +680,6 @@ func (fopg *fakeOperationGenerator) GenerateExpandAndRecoverVolumeFunc(pvc *v1.P
 }
 
 func (fopg *fakeOperationGenerator) GenerateExpandInUseVolumeFunc(volumeToMount VolumeToMount, actualStateOfWorld ActualStateOfWorldMounterUpdater, currentSize resource.Quantity) (volumetypes.GeneratedOperations, error) {
-	opFunc := func() volumetypes.OperationContext {
-		startOperationAndBlock(fopg.ch, fopg.quit)
-		return volumetypes.NewOperationContext(nil, nil, false)
-	}
-	return volumetypes.GeneratedOperations{
-		OperationFunc: opFunc,
-	}, nil
-}
-
-func (fopg *fakeOperationGenerator) GenerateBulkVolumeVerifyFunc(
-	pluginNodeVolumes map[types.NodeName][]*volume.Spec,
-	pluginNane string,
-	volumeSpecMap map[*volume.Spec]v1.UniqueVolumeName,
-	actualStateOfWorldAttacherUpdater ActualStateOfWorldAttacherUpdater) (volumetypes.GeneratedOperations, error) {
 	opFunc := func() volumetypes.OperationContext {
 		startOperationAndBlock(fopg.ch, fopg.quit)
 		return volumetypes.NewOperationContext(nil, nil, false)
@@ -725,10 +721,6 @@ func (fopg *fakeOperationGenerator) GenerateUnmapDeviceFunc(deviceToDetach Attac
 
 func (fopg *fakeOperationGenerator) GetVolumePluginMgr() *volume.VolumePluginMgr {
 	return nil
-}
-
-func (fopg *fakeOperationGenerator) GetCSITranslator() InTreeToCSITranslator {
-	return csitrans.New()
 }
 
 func getTestPodWithSecret(podName, secretName string) *v1.Pod {

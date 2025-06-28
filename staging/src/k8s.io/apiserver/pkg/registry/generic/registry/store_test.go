@@ -25,10 +25,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	fuzz "github.com/google/gofuzz"
+	"sigs.k8s.io/randfill"
+
 	"k8s.io/apimachinery/pkg/api/apitesting"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -43,10 +45,12 @@ import (
 	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/apis/example"
 	examplev1 "k8s.io/apiserver/pkg/apis/example/v1"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/features"
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/apiserver/pkg/storage"
@@ -55,7 +59,9 @@ import (
 	"k8s.io/apiserver/pkg/storage/names"
 	"k8s.io/apiserver/pkg/storage/storagebackend/factory"
 	storagetesting "k8s.io/apiserver/pkg/storage/testing"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/tools/cache"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 )
 
 var scheme = runtime.NewScheme()
@@ -382,14 +388,105 @@ func TestStoreCreate(t *testing.T) {
 	}
 }
 
+// sequentialNameGenerator generates names by appending a monotonically-increasing integer to the base.
+type sequentialNameGenerator struct {
+	seq int
+}
+
+func (m *sequentialNameGenerator) GenerateName(base string) string {
+	generated := fmt.Sprintf("%s%d", base, m.seq)
+	m.seq++
+	return generated
+}
+
+func TestStoreCreateWithRetryNameGenerate(t *testing.T) {
+
+	namedObj := func(id int) *example.Pod {
+		return &example.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("prefix-%d", id), Namespace: "test"},
+			Spec:       example.PodSpec{NodeName: "machine"},
+		}
+	}
+
+	generateNameObj := &example.Pod{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "prefix-", Namespace: "test"},
+		Spec:       example.PodSpec{NodeName: "machine"},
+	}
+
+	testContext := genericapirequest.WithNamespace(genericapirequest.NewContext(), "test")
+	destroyFunc, registry := NewTestGenericStoreRegistry(t)
+	defer destroyFunc()
+
+	seqNameGenerator := &sequentialNameGenerator{}
+	registry.CreateStrategy = &testRESTStrategy{scheme, seqNameGenerator, true, false, true}
+
+	for i := 0; i < 7; i++ {
+		_, err := registry.Create(testContext, namedObj(i), rest.ValidateAllObjectFunc, &metav1.CreateOptions{})
+		if err != nil {
+			t.Errorf("Unexpected error: %v", err)
+		}
+	}
+	generated, err := registry.Create(testContext, generateNameObj, rest.ValidateAllObjectFunc, &metav1.CreateOptions{})
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+	generatedMeta, err := meta.Accessor(generated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generatedMeta.GetName() != "prefix-7" {
+		t.Errorf("Expected prefix-7 but got %s", generatedMeta.GetName())
+	}
+
+	// Now that 8 generated names (0..7) are claimed, 8 name generation attempts will not be enough
+	// and create should return an already exists error.
+	seqNameGenerator.seq = 0
+	_, err = registry.Create(testContext, generateNameObj, rest.ValidateAllObjectFunc, &metav1.CreateOptions{})
+	if err == nil || !errors.IsAlreadyExists(err) {
+		t.Error("Expected already exists error")
+	}
+}
+
+func TestStoreCreateWithRetryNameGenerateFeatureDisabled(t *testing.T) {
+	// Preserve testing of disabled RetryGenerateName feature gate since it can still be disabled when emulation version is set.
+	featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.31"))
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.RetryGenerateName, false)
+	namedObj := func(id int) *example.Pod {
+		return &example.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("prefix-%d", id), Namespace: "test"},
+			Spec:       example.PodSpec{NodeName: "machine"},
+		}
+	}
+
+	generateNameObj := &example.Pod{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "prefix-", Namespace: "test"},
+		Spec:       example.PodSpec{NodeName: "machine"},
+	}
+
+	testContext := genericapirequest.WithNamespace(genericapirequest.NewContext(), "test")
+	destroyFunc, registry := NewTestGenericStoreRegistry(t)
+	defer destroyFunc()
+
+	registry.CreateStrategy = &testRESTStrategy{scheme, &sequentialNameGenerator{}, true, false, true}
+
+	_, err := registry.Create(testContext, namedObj(0), rest.ValidateAllObjectFunc, &metav1.CreateOptions{})
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+	_, err = registry.Create(testContext, generateNameObj, rest.ValidateAllObjectFunc, &metav1.CreateOptions{})
+	if err == nil || !errors.IsAlreadyExists(err) {
+		t.Error("Expected already exists error")
+	}
+}
+
 func TestNewCreateOptionsFromUpdateOptions(t *testing.T) {
-	f := fuzz.New().NilChance(0.0).NumElements(1, 1)
+	f := randfill.New().NilChance(0.0).NumElements(1, 1)
 
 	// The goal here is to trigger when any changes are made to either
 	// CreateOptions or UpdateOptions types, so we can update the converter.
 	for i := 0; i < 20; i++ {
 		in := &metav1.UpdateOptions{}
-		f.Fuzz(in)
+		f.Fill(in)
 		in.TypeMeta.SetGroupVersionKind(metav1.SchemeGroupVersion.WithKind("CreateOptions"))
 
 		out := newCreateOptionsFromUpdateOptions(in)
@@ -435,13 +532,13 @@ func TestNewCreateOptionsFromUpdateOptions(t *testing.T) {
 }
 
 func TestNewDeleteOptionsFromUpdateOptions(t *testing.T) {
-	f := fuzz.New().NilChance(0.0).NumElements(1, 1)
+	f := randfill.New().NilChance(0.0).NumElements(1, 1)
 
 	// The goal here is to trigger when any changes are made to either
 	// DeleteOptions or UpdateOptions types, so we can update the converter.
 	for i := 0; i < 20; i++ {
 		in := &metav1.UpdateOptions{}
-		f.Fuzz(in)
+		f.Fill(in)
 		in.TypeMeta.SetGroupVersionKind(metav1.SchemeGroupVersion.WithKind("DeleteOptions"))
 
 		out := newDeleteOptionsFromUpdateOptions(in)
@@ -676,6 +773,10 @@ func TestStoreUpdate(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "test", ResourceVersion: "7"},
 		Spec:       example.PodSpec{NodeName: "machine"},
 	}
+	podAWithResourceAndUID := &example.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "test", ResourceVersion: "7", UID: "A"},
+		Spec:       example.PodSpec{NodeName: "machine"},
+	}
 
 	testContext := genericapirequest.WithNamespace(genericapirequest.NewContext(), "test")
 	destroyFunc, registry := NewTestGenericStoreRegistry(t)
@@ -689,6 +790,12 @@ func TestStoreUpdate(t *testing.T) {
 
 	// try to update a non-existing node
 	_, _, err = registry.Update(testContext, podA.Name, rest.DefaultUpdatedObjectInfo(podA), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc, false, &metav1.UpdateOptions{})
+	if !errors.IsNotFound(err) {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	// try to update a non-existing node that was created previously
+	_, _, err = registry.Update(testContext, podA.Name, rest.DefaultUpdatedObjectInfo(podAWithResourceAndUID), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc, false, &metav1.UpdateOptions{})
 	if !errors.IsNotFound(err) {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -2020,19 +2127,38 @@ func TestStoreDeletionPropagation(t *testing.T) {
 	}
 }
 
-func TestStoreDeleteCollection(t *testing.T) {
-	podA := &example.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}}
-	podB := &example.Pod{ObjectMeta: metav1.ObjectMeta{Name: "bar"}}
+type storageWithCounter struct {
+	storage.Interface
 
+	listCounter int64
+}
+
+func (s *storageWithCounter) GetList(ctx context.Context, key string, opts storage.ListOptions, listObj runtime.Object) error {
+	atomic.AddInt64(&s.listCounter, 1)
+	return s.Interface.GetList(ctx, key, opts, listObj)
+}
+
+func TestStoreDeleteCollection(t *testing.T) {
 	testContext := genericapirequest.WithNamespace(genericapirequest.NewContext(), "test")
 	destroyFunc, registry := NewTestGenericStoreRegistry(t)
 	defer destroyFunc()
 
-	if _, err := registry.Create(testContext, podA, rest.ValidateAllObjectFunc, &metav1.CreateOptions{}); err != nil {
-		t.Errorf("Unexpected error: %v", err)
-	}
-	if _, err := registry.Create(testContext, podB, rest.ValidateAllObjectFunc, &metav1.CreateOptions{}); err != nil {
-		t.Errorf("Unexpected error: %v", err)
+	// Overwrite the underlying storage interface so that it counts GetList calls
+	// and reduce the default page size to 2.
+	storeWithCounter := &storageWithCounter{Interface: registry.Storage.Storage}
+	registry.Storage.Storage = storeWithCounter
+	originalDeleteCollectionPageSize := deleteCollectionPageSize
+	deleteCollectionPageSize = 2
+	defer func() {
+		deleteCollectionPageSize = originalDeleteCollectionPageSize
+	}()
+
+	numPods := 10
+	for i := 0; i < numPods; i++ {
+		pod := &example.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("foo-%d", i)}}
+		if _, err := registry.Create(testContext, pod, rest.ValidateAllObjectFunc, &metav1.CreateOptions{}); err != nil {
+			t.Errorf("Unexpected error: %v", err)
+		}
 	}
 
 	// Delete all pods.
@@ -2041,15 +2167,18 @@ func TestStoreDeleteCollection(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	deletedPods := deleted.(*example.PodList)
-	if len(deletedPods.Items) != 2 {
-		t.Errorf("Unexpected number of pods deleted: %d, expected: 3", len(deletedPods.Items))
+	if len(deletedPods.Items) != numPods {
+		t.Errorf("Unexpected number of pods deleted: %d, expected: %d", len(deletedPods.Items), numPods)
+	}
+	expectedCalls := (int64(numPods) + deleteCollectionPageSize - 1) / deleteCollectionPageSize
+	if listCalls := atomic.LoadInt64(&storeWithCounter.listCounter); listCalls != expectedCalls {
+		t.Errorf("Unexpected number of list calls: %d, expected: %d", listCalls, expectedCalls)
 	}
 
-	if _, err := registry.Get(testContext, podA.Name, &metav1.GetOptions{}); !errors.IsNotFound(err) {
-		t.Errorf("Unexpected error: %v", err)
-	}
-	if _, err := registry.Get(testContext, podB.Name, &metav1.GetOptions{}); !errors.IsNotFound(err) {
-		t.Errorf("Unexpected error: %v", err)
+	for i := 0; i < numPods; i++ {
+		if _, err := registry.Get(testContext, fmt.Sprintf("foo-%d", i), &metav1.GetOptions{}); !errors.IsNotFound(err) {
+			t.Errorf("Unexpected error: %v", err)
+		}
 	}
 }
 
@@ -2306,7 +2435,7 @@ func newTestGenericStoreRegistry(t *testing.T, scheme *runtime.Scheme, hasCacheE
 	newListFunc := func() runtime.Object { return &example.PodList{} }
 
 	sc.Codec = apitesting.TestStorageCodec(codecs, examplev1.SchemeGroupVersion)
-	s, dFunc, err := factory.Create(*sc.ForResource(schema.GroupResource{Resource: "pods"}), newFunc)
+	s, dFunc, err := factory.Create(*sc.ForResource(schema.GroupResource{Resource: "pods"}), newFunc, newListFunc, "/pods")
 	if err != nil {
 		t.Fatalf("Error creating storage: %v", err)
 	}
@@ -2316,23 +2445,34 @@ func newTestGenericStoreRegistry(t *testing.T, scheme *runtime.Scheme, hasCacheE
 	}
 	if hasCacheEnabled {
 		config := cacherstorage.Config{
-			Storage:        s,
-			Versioner:      storage.APIObjectVersioner{},
-			GroupResource:  schema.GroupResource{Resource: "pods"},
-			ResourcePrefix: podPrefix,
-			KeyFunc:        func(obj runtime.Object) (string, error) { return storage.NoNamespaceKeyFunc(podPrefix, obj) },
-			GetAttrsFunc:   getPodAttrs,
-			NewFunc:        newFunc,
-			NewListFunc:    newListFunc,
-			Codec:          sc.Codec,
+			Storage:             s,
+			Versioner:           storage.APIObjectVersioner{},
+			GroupResource:       schema.GroupResource{Resource: "pods"},
+			EventsHistoryWindow: cacherstorage.DefaultEventFreshDuration,
+			ResourcePrefix:      podPrefix,
+			KeyFunc:             func(obj runtime.Object) (string, error) { return storage.NoNamespaceKeyFunc(podPrefix, obj) },
+			GetAttrsFunc:        getPodAttrs,
+			NewFunc:             newFunc,
+			NewListFunc:         newListFunc,
+			Codec:               sc.Codec,
 		}
 		cacher, err := cacherstorage.NewCacherFromConfig(config)
 		if err != nil {
 			t.Fatalf("Couldn't create cacher: %v", err)
 		}
+		if utilfeature.DefaultFeatureGate.Enabled(features.ResilientWatchCacheInitialization) {
+			// The tests assume that Get/GetList/Watch calls shouldn't fail.
+			// However, 429 error can now be returned if watchcache is under initialization.
+			// To avoid rewriting all tests, we wait for watchcache to initialize.
+			if err := cacher.Wait(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		}
 		d := destroyFunc
-		s = cacher
+		delegator := cacherstorage.NewCacheDelegator(cacher, s)
+		s = delegator
 		destroyFunc = func() {
+			delegator.Stop()
 			cacher.Stop()
 			d()
 		}
@@ -2857,6 +2997,10 @@ func (p *predictableNameGenerator) GenerateName(base string) string {
 }
 
 func TestStoreCreateGenerateNameConflict(t *testing.T) {
+	// Preserve testing of disabled RetryGenerateName feature gate since it can still be disabled when emulation version is set.
+	featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.31"))
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.RetryGenerateName, false)
+
 	// podA will be stored with name foo12345
 	podA := &example.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo1", Namespace: "test"},

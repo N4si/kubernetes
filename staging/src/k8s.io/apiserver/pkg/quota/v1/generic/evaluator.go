@@ -199,7 +199,7 @@ func CalculateUsageStats(options quota.UsageStatsOptions,
 		// need to verify that the item matches the set of scopes
 		matchesScopes := true
 		for _, scope := range options.Scopes {
-			innerMatch, err := scopeFunc(corev1.ScopedResourceSelectorRequirement{ScopeName: scope}, item)
+			innerMatch, err := scopeFunc(corev1.ScopedResourceSelectorRequirement{ScopeName: scope, Operator: corev1.ScopeSelectorOpExists}, item)
 			if err != nil {
 				return result, nil
 			}
@@ -250,6 +250,9 @@ func (o *objectCountEvaluator) Constraints(required []corev1.ResourceName, item 
 
 // Handles returns true if the object count evaluator needs to track this attributes.
 func (o *objectCountEvaluator) Handles(a admission.Attributes) bool {
+	if a.GetSubresource() != "" {
+		return false
+	}
 	operation := a.GetOperation()
 	return operation == admission.Create
 }

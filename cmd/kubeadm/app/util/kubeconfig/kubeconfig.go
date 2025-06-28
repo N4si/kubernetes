@@ -20,11 +20,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/pkg/errors"
-
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 // CreateBasic creates a basic, general KubeConfig object that then can be extended
@@ -70,7 +70,7 @@ func CreateWithToken(serverURL, clusterName, userName string, caCert []byte, tok
 }
 
 // ClientSetFromFile returns a ready-to-use client from a kubeconfig file
-func ClientSetFromFile(path string) (*clientset.Clientset, error) {
+func ClientSetFromFile(path string) (clientset.Interface, error) {
 	config, err := clientcmd.LoadFromFile(path)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to load admin kubeconfig")
@@ -79,7 +79,7 @@ func ClientSetFromFile(path string) (*clientset.Clientset, error) {
 }
 
 // ToClientSet converts a KubeConfig object to a client
-func ToClientSet(config *clientcmdapi.Config) (*clientset.Clientset, error) {
+func ToClientSet(config *clientcmdapi.Config) (clientset.Interface, error) {
 	overrides := clientcmd.ConfigOverrides{Timeout: "10s"}
 	clientConfig, err := clientcmd.NewDefaultClientConfig(*config, &overrides).ClientConfig()
 	if err != nil {

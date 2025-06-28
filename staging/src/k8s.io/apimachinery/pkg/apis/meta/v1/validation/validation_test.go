@@ -21,9 +21,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+
+	"k8s.io/utils/ptr"
 )
 
 func TestValidateLabels(t *testing.T) {
@@ -132,35 +136,131 @@ func boolPtr(b bool) *bool {
 	return &b
 }
 
+func TestValidateDeleteOptionsWithIgnoreStoreReadError(t *testing.T) {
+	fieldPath := field.NewPath("ignoreStoreReadErrorWithClusterBreakingPotential")
+	tests := []struct {
+		name           string
+		opts           metav1.DeleteOptions
+		expectedErrors field.ErrorList
+	}{
+		{
+			name: "option is nil",
+			opts: metav1.DeleteOptions{
+				IgnoreStoreReadErrorWithClusterBreakingPotential: nil,
+				DryRun: []string{"All"},
+			},
+			expectedErrors: field.ErrorList{},
+		},
+		{
+			name: "option is false, PropagationPolicy is set",
+			opts: metav1.DeleteOptions{
+				IgnoreStoreReadErrorWithClusterBreakingPotential: ptr.To[bool](false),
+				DryRun:             []string{"All"},
+				PropagationPolicy:  ptr.To[metav1.DeletionPropagation](metav1.DeletePropagationBackground),
+				GracePeriodSeconds: ptr.To[int64](0),
+				Preconditions:      &metav1.Preconditions{},
+			},
+			expectedErrors: field.ErrorList{},
+		},
+		{
+			name: "option is false, OrphanDependents is set",
+			opts: metav1.DeleteOptions{
+				IgnoreStoreReadErrorWithClusterBreakingPotential: ptr.To[bool](false),
+				DryRun: []string{"All"},
+				//nolint:staticcheck // until it's being removed
+				OrphanDependents:   ptr.To[bool](true),
+				GracePeriodSeconds: ptr.To[int64](0),
+				Preconditions:      &metav1.Preconditions{},
+			},
+			expectedErrors: field.ErrorList{},
+		},
+		{
+			name: "option is true, PropagationPolicy is set",
+			opts: metav1.DeleteOptions{
+				IgnoreStoreReadErrorWithClusterBreakingPotential: ptr.To[bool](true),
+				DryRun:             []string{"All"},
+				PropagationPolicy:  ptr.To[metav1.DeletionPropagation](metav1.DeletePropagationBackground),
+				GracePeriodSeconds: ptr.To[int64](0),
+				Preconditions:      &metav1.Preconditions{},
+			},
+			expectedErrors: field.ErrorList{
+				field.Invalid(fieldPath, true, "cannot be set together with .dryRun"),
+				field.Invalid(fieldPath, true, "cannot be set together with .propagationPolicy"),
+				field.Invalid(fieldPath, true, "cannot be set together with .gracePeriodSeconds"),
+				field.Invalid(fieldPath, true, "cannot be set together with .preconditions"),
+			},
+		},
+		{
+			name: "option is true, OrphanDependents is set",
+			opts: metav1.DeleteOptions{
+				IgnoreStoreReadErrorWithClusterBreakingPotential: ptr.To[bool](true),
+				DryRun: []string{"All"},
+				//nolint:staticcheck // until it's being removed
+				OrphanDependents:   ptr.To[bool](true),
+				GracePeriodSeconds: ptr.To[int64](0),
+				Preconditions:      &metav1.Preconditions{},
+			},
+			expectedErrors: field.ErrorList{
+				field.Invalid(fieldPath, true, "cannot be set together with .dryRun"),
+				field.Invalid(fieldPath, true, "cannot be set together with .orphanDependents"),
+				field.Invalid(fieldPath, true, "cannot be set together with .gracePeriodSeconds"),
+				field.Invalid(fieldPath, true, "cannot be set together with .preconditions"),
+			},
+		},
+		{
+			name: "option is true, no other option is set",
+			opts: metav1.DeleteOptions{
+				IgnoreStoreReadErrorWithClusterBreakingPotential: ptr.To[bool](false),
+			},
+			expectedErrors: field.ErrorList{},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			errGot := ValidateDeleteOptions(&test.opts)
+			if !cmp.Equal(test.expectedErrors, errGot) {
+				t.Errorf("expected error(s) to match, diff: %s", cmp.Diff(test.expectedErrors, errGot))
+			}
+		})
+	}
+}
+
 func TestValidPatchOptions(t *testing.T) {
 	tests := []struct {
 		opts      metav1.PatchOptions
 		patchType types.PatchType
-	}{
-		{
-			opts: metav1.PatchOptions{
-				Force:        boolPtr(true),
-				FieldManager: "kubectl",
-			},
-			patchType: types.ApplyPatchType,
+	}{{
+		opts: metav1.PatchOptions{
+			Force:        boolPtr(true),
+			FieldManager: "kubectl",
 		},
-		{
-			opts: metav1.PatchOptions{
-				FieldManager: "kubectl",
-			},
-			patchType: types.ApplyPatchType,
+		patchType: types.ApplyYAMLPatchType,
+	}, {
+		opts: metav1.PatchOptions{
+			FieldManager: "kubectl",
 		},
-		{
-			opts:      metav1.PatchOptions{},
-			patchType: types.MergePatchType,
+		patchType: types.ApplyYAMLPatchType,
+	}, {
+		opts: metav1.PatchOptions{
+			Force:        boolPtr(true),
+			FieldManager: "kubectl",
 		},
-		{
-			opts: metav1.PatchOptions{
-				FieldManager: "patcher",
-			},
-			patchType: types.MergePatchType,
+		patchType: types.ApplyCBORPatchType,
+	}, {
+		opts: metav1.PatchOptions{
+			FieldManager: "kubectl",
 		},
-	}
+		patchType: types.ApplyCBORPatchType,
+	}, {
+		opts:      metav1.PatchOptions{},
+		patchType: types.MergePatchType,
+	}, {
+		opts: metav1.PatchOptions{
+			FieldManager: "patcher",
+		},
+		patchType: types.MergePatchType,
+	}}
 
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%v", test.opts), func(t *testing.T) {
@@ -180,7 +280,12 @@ func TestInvalidPatchOptions(t *testing.T) {
 		// missing manager
 		{
 			opts:      metav1.PatchOptions{},
-			patchType: types.ApplyPatchType,
+			patchType: types.ApplyYAMLPatchType,
+		},
+		// missing manager
+		{
+			opts:      metav1.PatchOptions{},
+			patchType: types.ApplyCBORPatchType,
 		},
 		// force on non-apply
 		{
@@ -243,36 +348,30 @@ func TestValidateFieldManagerInvalid(t *testing.T) {
 }
 
 func TestValidateManagedFieldsInvalid(t *testing.T) {
-	tests := []metav1.ManagedFieldsEntry{
-		{
-			Operation:  metav1.ManagedFieldsOperationUpdate,
-			FieldsType: "RandomVersion",
-			APIVersion: "v1",
-		},
-		{
-			Operation:  "RandomOperation",
-			FieldsType: "FieldsV1",
-			APIVersion: "v1",
-		},
-		{
-			// Operation is missing
-			FieldsType: "FieldsV1",
-			APIVersion: "v1",
-		},
-		{
-			Operation:  metav1.ManagedFieldsOperationUpdate,
-			FieldsType: "FieldsV1",
-			// Invalid fieldManager
-			Manager:    "field\nmanager",
-			APIVersion: "v1",
-		},
-		{
-			Operation:   metav1.ManagedFieldsOperationApply,
-			FieldsType:  "FieldsV1",
-			APIVersion:  "v1",
-			Subresource: "TooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLong",
-		},
-	}
+	tests := []metav1.ManagedFieldsEntry{{
+		Operation:  metav1.ManagedFieldsOperationUpdate,
+		FieldsType: "RandomVersion",
+		APIVersion: "v1",
+	}, {
+		Operation:  "RandomOperation",
+		FieldsType: "FieldsV1",
+		APIVersion: "v1",
+	}, {
+		// Operation is missing
+		FieldsType: "FieldsV1",
+		APIVersion: "v1",
+	}, {
+		Operation:  metav1.ManagedFieldsOperationUpdate,
+		FieldsType: "FieldsV1",
+		// Invalid fieldManager
+		Manager:    "field\nmanager",
+		APIVersion: "v1",
+	}, {
+		Operation:   metav1.ManagedFieldsOperationApply,
+		FieldsType:  "FieldsV1",
+		APIVersion:  "v1",
+		Subresource: "TooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLongTooLong",
+	}}
 
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%#v", test), func(t *testing.T) {
@@ -285,30 +384,25 @@ func TestValidateManagedFieldsInvalid(t *testing.T) {
 }
 
 func TestValidateMangedFieldsValid(t *testing.T) {
-	tests := []metav1.ManagedFieldsEntry{
-		{
-			Operation:  metav1.ManagedFieldsOperationUpdate,
-			APIVersion: "v1",
-			// FieldsType is missing
-		},
-		{
-			Operation:  metav1.ManagedFieldsOperationUpdate,
-			FieldsType: "FieldsV1",
-			APIVersion: "v1",
-		},
-		{
-			Operation:   metav1.ManagedFieldsOperationApply,
-			FieldsType:  "FieldsV1",
-			APIVersion:  "v1",
-			Subresource: "scale",
-		},
-		{
-			Operation:  metav1.ManagedFieldsOperationApply,
-			FieldsType: "FieldsV1",
-			APIVersion: "v1",
-			Manager:    "🍔",
-		},
-	}
+	tests := []metav1.ManagedFieldsEntry{{
+		Operation:  metav1.ManagedFieldsOperationUpdate,
+		APIVersion: "v1",
+		// FieldsType is missing
+	}, {
+		Operation:  metav1.ManagedFieldsOperationUpdate,
+		FieldsType: "FieldsV1",
+		APIVersion: "v1",
+	}, {
+		Operation:   metav1.ManagedFieldsOperationApply,
+		FieldsType:  "FieldsV1",
+		APIVersion:  "v1",
+		Subresource: "scale",
+	}, {
+		Operation:  metav1.ManagedFieldsOperationApply,
+		FieldsType: "FieldsV1",
+		APIVersion: "v1",
+		Manager:    "🍔",
+	}}
 
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%#v", test), func(t *testing.T) {
@@ -325,99 +419,90 @@ func TestValidateConditions(t *testing.T) {
 		name         string
 		conditions   []metav1.Condition
 		validateErrs func(t *testing.T, errs field.ErrorList)
-	}{
-		{
-			name: "bunch-of-invalid-fields",
-			conditions: []metav1.Condition{{
-				Type:               ":invalid",
-				Status:             "unknown",
-				ObservedGeneration: -1,
-				LastTransitionTime: metav1.Time{},
-				Reason:             "invalid;val",
-				Message:            "",
-			}},
-			validateErrs: func(t *testing.T, errs field.ErrorList) {
-				needle := `status.conditions[0].type: Invalid value: ":invalid": name part must consist of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character (e.g. 'MyName',  or 'my.name',  or '123-abc', regex used for validation is '([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]')`
-				if !hasError(errs, needle) {
-					t.Errorf("missing %q in\n%v", needle, errorsAsString(errs))
-				}
-				needle = `status.conditions[0].status: Unsupported value: "unknown": supported values: "False", "True", "Unknown"`
-				if !hasError(errs, needle) {
-					t.Errorf("missing %q in\n%v", needle, errorsAsString(errs))
-				}
-				needle = `status.conditions[0].observedGeneration: Invalid value: -1: must be greater than or equal to zero`
-				if !hasError(errs, needle) {
-					t.Errorf("missing %q in\n%v", needle, errorsAsString(errs))
-				}
-				needle = `status.conditions[0].lastTransitionTime: Required value: must be set`
-				if !hasError(errs, needle) {
-					t.Errorf("missing %q in\n%v", needle, errorsAsString(errs))
-				}
-				needle = `status.conditions[0].reason: Invalid value: "invalid;val": a condition reason must start with alphabetic character, optionally followed by a string of alphanumeric characters or '_,:', and must end with an alphanumeric character or '_' (e.g. 'my_name',  or 'MY_NAME',  or 'MyName',  or 'ReasonA,ReasonB',  or 'ReasonA:ReasonB', regex used for validation is '[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?')`
-				if !hasError(errs, needle) {
-					t.Errorf("missing %q in\n%v", needle, errorsAsString(errs))
-				}
-			},
+	}{{
+		name: "bunch-of-invalid-fields",
+		conditions: []metav1.Condition{{
+			Type:               ":invalid",
+			Status:             "unknown",
+			ObservedGeneration: -1,
+			LastTransitionTime: metav1.Time{},
+			Reason:             "invalid;val",
+			Message:            "",
+		}},
+		validateErrs: func(t *testing.T, errs field.ErrorList) {
+			needle := `status.conditions[0].type: Invalid value: ":invalid": name part must consist of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character (e.g. 'MyName',  or 'my.name',  or '123-abc', regex used for validation is '([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]')`
+			if !hasError(errs, needle) {
+				t.Errorf("missing %q in\n%v", needle, errorsAsString(errs))
+			}
+			needle = `status.conditions[0].status: Unsupported value: "unknown": supported values: "False", "True", "Unknown"`
+			if !hasError(errs, needle) {
+				t.Errorf("missing %q in\n%v", needle, errorsAsString(errs))
+			}
+			needle = `status.conditions[0].observedGeneration: Invalid value: -1: must be greater than or equal to zero`
+			if !hasError(errs, needle) {
+				t.Errorf("missing %q in\n%v", needle, errorsAsString(errs))
+			}
+			needle = `status.conditions[0].lastTransitionTime: Required value: must be set`
+			if !hasError(errs, needle) {
+				t.Errorf("missing %q in\n%v", needle, errorsAsString(errs))
+			}
+			needle = `status.conditions[0].reason: Invalid value: "invalid;val": a condition reason must start with alphabetic character, optionally followed by a string of alphanumeric characters or '_,:', and must end with an alphanumeric character or '_' (e.g. 'my_name',  or 'MY_NAME',  or 'MyName',  or 'ReasonA,ReasonB',  or 'ReasonA:ReasonB', regex used for validation is '[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?')`
+			if !hasError(errs, needle) {
+				t.Errorf("missing %q in\n%v", needle, errorsAsString(errs))
+			}
 		},
-		{
-			name: "duplicates",
-			conditions: []metav1.Condition{{
-				Type: "First",
-			},
-				{
-					Type: "Second",
-				},
-				{
-					Type: "First",
-				},
-			},
-			validateErrs: func(t *testing.T, errs field.ErrorList) {
-				needle := `status.conditions[2].type: Duplicate value: "First"`
-				if !hasError(errs, needle) {
-					t.Errorf("missing %q in\n%v", needle, errorsAsString(errs))
-				}
-			},
+	}, {
+		name: "duplicates",
+		conditions: []metav1.Condition{{
+			Type: "First",
+		}, {
+			Type: "Second",
+		}, {
+			Type: "First",
+		}},
+		validateErrs: func(t *testing.T, errs field.ErrorList) {
+			needle := `status.conditions[2].type: Duplicate value: "First"`
+			if !hasError(errs, needle) {
+				t.Errorf("missing %q in\n%v", needle, errorsAsString(errs))
+			}
 		},
-		{
-			name: "colon-allowed-in-reason",
-			conditions: []metav1.Condition{{
-				Type:   "First",
-				Reason: "valid:val",
-			}},
-			validateErrs: func(t *testing.T, errs field.ErrorList) {
-				needle := `status.conditions[0].reason`
-				if hasPrefixError(errs, needle) {
-					t.Errorf("has %q in\n%v", needle, errorsAsString(errs))
-				}
-			},
+	}, {
+		name: "colon-allowed-in-reason",
+		conditions: []metav1.Condition{{
+			Type:   "First",
+			Reason: "valid:val",
+		}},
+		validateErrs: func(t *testing.T, errs field.ErrorList) {
+			needle := `status.conditions[0].reason`
+			if hasPrefixError(errs, needle) {
+				t.Errorf("has %q in\n%v", needle, errorsAsString(errs))
+			}
 		},
-		{
-			name: "comma-allowed-in-reason",
-			conditions: []metav1.Condition{{
-				Type:   "First",
-				Reason: "valid,val",
-			}},
-			validateErrs: func(t *testing.T, errs field.ErrorList) {
-				needle := `status.conditions[0].reason`
-				if hasPrefixError(errs, needle) {
-					t.Errorf("has %q in\n%v", needle, errorsAsString(errs))
-				}
-			},
+	}, {
+		name: "comma-allowed-in-reason",
+		conditions: []metav1.Condition{{
+			Type:   "First",
+			Reason: "valid,val",
+		}},
+		validateErrs: func(t *testing.T, errs field.ErrorList) {
+			needle := `status.conditions[0].reason`
+			if hasPrefixError(errs, needle) {
+				t.Errorf("has %q in\n%v", needle, errorsAsString(errs))
+			}
 		},
-		{
-			name: "reason-does-not-end-in-delimiter",
-			conditions: []metav1.Condition{{
-				Type:   "First",
-				Reason: "valid,val:",
-			}},
-			validateErrs: func(t *testing.T, errs field.ErrorList) {
-				needle := `status.conditions[0].reason: Invalid value: "valid,val:": a condition reason must start with alphabetic character, optionally followed by a string of alphanumeric characters or '_,:', and must end with an alphanumeric character or '_' (e.g. 'my_name',  or 'MY_NAME',  or 'MyName',  or 'ReasonA,ReasonB',  or 'ReasonA:ReasonB', regex used for validation is '[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?')`
-				if !hasError(errs, needle) {
-					t.Errorf("missing %q in\n%v", needle, errorsAsString(errs))
-				}
-			},
+	}, {
+		name: "reason-does-not-end-in-delimiter",
+		conditions: []metav1.Condition{{
+			Type:   "First",
+			Reason: "valid,val:",
+		}},
+		validateErrs: func(t *testing.T, errs field.ErrorList) {
+			needle := `status.conditions[0].reason: Invalid value: "valid,val:": a condition reason must start with alphabetic character, optionally followed by a string of alphanumeric characters or '_,:', and must end with an alphanumeric character or '_' (e.g. 'my_name',  or 'MY_NAME',  or 'MyName',  or 'ReasonA,ReasonB',  or 'ReasonA:ReasonB', regex used for validation is '[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?')`
+			if !hasError(errs, needle) {
+				t.Errorf("missing %q in\n%v", needle, errorsAsString(errs))
+			}
 		},
-	}
+	}}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -433,82 +518,69 @@ func TestLabelSelectorMatchExpression(t *testing.T) {
 		labelSelector   *metav1.LabelSelector
 		wantErrorNumber int
 		validateErrs    func(t *testing.T, errs field.ErrorList)
-	}{
-		{
-			name: "Valid LabelSelector",
-			labelSelector: &metav1.LabelSelector{
-				MatchExpressions: []metav1.LabelSelectorRequirement{
-					{
-						Key:      "key",
-						Operator: metav1.LabelSelectorOpIn,
-						Values:   []string{"value"},
-					},
-				},
-			},
-			wantErrorNumber: 0,
-			validateErrs:    nil,
+	}{{
+		name: "Valid LabelSelector",
+		labelSelector: &metav1.LabelSelector{
+			MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key:      "key",
+				Operator: metav1.LabelSelectorOpIn,
+				Values:   []string{"value"},
+			}},
 		},
-		{
-			name: "MatchExpression's key name isn't valid",
-			labelSelector: &metav1.LabelSelector{
-				MatchExpressions: []metav1.LabelSelectorRequirement{
-					{
-						Key:      "-key",
-						Operator: metav1.LabelSelectorOpIn,
-						Values:   []string{"value"},
-					},
-				},
-			},
-			wantErrorNumber: 1,
-			validateErrs: func(t *testing.T, errs field.ErrorList) {
-				errMessage := "name part must consist of alphanumeric characters"
-				if !partStringInErrorMessage(errs, errMessage) {
-					t.Errorf("missing %q in\n%v", errMessage, errorsAsString(errs))
-				}
-			},
+		wantErrorNumber: 0,
+		validateErrs:    nil,
+	}, {
+		name: "MatchExpression's key name isn't valid",
+		labelSelector: &metav1.LabelSelector{
+			MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key:      "-key",
+				Operator: metav1.LabelSelectorOpIn,
+				Values:   []string{"value"},
+			}},
 		},
-		{
-			name: "MatchExpression's operator isn't valid",
-			labelSelector: &metav1.LabelSelector{
-				MatchExpressions: []metav1.LabelSelectorRequirement{
-					{
-						Key:      "key",
-						Operator: "abc",
-						Values:   []string{"value"},
-					},
-				},
-			},
-			wantErrorNumber: 1,
-			validateErrs: func(t *testing.T, errs field.ErrorList) {
-				errMessage := "not a valid selector operator"
-				if !partStringInErrorMessage(errs, errMessage) {
-					t.Errorf("missing %q in\n%v", errMessage, errorsAsString(errs))
-				}
-			},
+		wantErrorNumber: 1,
+		validateErrs: func(t *testing.T, errs field.ErrorList) {
+			errMessage := "name part must consist of alphanumeric characters"
+			if !partStringInErrorMessage(errs, errMessage) {
+				t.Errorf("missing %q in\n%v", errMessage, errorsAsString(errs))
+			}
 		},
-		{
-			name: "MatchExpression's value name isn't valid",
-			labelSelector: &metav1.LabelSelector{
-				MatchExpressions: []metav1.LabelSelectorRequirement{
-					{
-						Key:      "key",
-						Operator: metav1.LabelSelectorOpIn,
-						Values:   []string{"-value"},
-					},
-				},
-			},
-			wantErrorNumber: 1,
-			validateErrs: func(t *testing.T, errs field.ErrorList) {
-				errMessage := "a valid label must be an empty string or consist of"
-				if !partStringInErrorMessage(errs, errMessage) {
-					t.Errorf("missing %q in\n%v", errMessage, errorsAsString(errs))
-				}
-			},
+	}, {
+		name: "MatchExpression's operator isn't valid",
+		labelSelector: &metav1.LabelSelector{
+			MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key:      "key",
+				Operator: "abc",
+				Values:   []string{"value"},
+			}},
 		},
-	}
+		wantErrorNumber: 1,
+		validateErrs: func(t *testing.T, errs field.ErrorList) {
+			errMessage := "not a valid selector operator"
+			if !partStringInErrorMessage(errs, errMessage) {
+				t.Errorf("missing %q in\n%v", errMessage, errorsAsString(errs))
+			}
+		},
+	}, {
+		name: "MatchExpression's value name isn't valid",
+		labelSelector: &metav1.LabelSelector{
+			MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key:      "key",
+				Operator: metav1.LabelSelectorOpIn,
+				Values:   []string{"-value"},
+			}},
+		},
+		wantErrorNumber: 1,
+		validateErrs: func(t *testing.T, errs field.ErrorList) {
+			errMessage := "a valid label must be an empty string or consist of"
+			if !partStringInErrorMessage(errs, errMessage) {
+				t.Errorf("missing %q in\n%v", errMessage, errorsAsString(errs))
+			}
+		},
+	}}
 	for index, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			allErrs := ValidateLabelSelector(testCase.labelSelector, LabelSelectorValidationOptions{false}, field.NewPath("labelSelector"))
+			allErrs := ValidateLabelSelector(testCase.labelSelector, LabelSelectorValidationOptions{AllowInvalidLabelValueInSelector: false}, field.NewPath("labelSelector"))
 			if len(allErrs) != testCase.wantErrorNumber {
 				t.Errorf("case[%d]: expected failure", index)
 			}

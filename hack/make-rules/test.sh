@@ -22,6 +22,8 @@ KUBE_ROOT=$(dirname "${BASH_SOURCE[0]}")/../..
 source "${KUBE_ROOT}/hack/lib/init.sh"
 
 kube::golang::setup_env
+kube::golang::setup_gomaxprocs
+kube::util::require-jq
 
 # start the cache mutation detector by default so that cache mutators will be found
 KUBE_CACHE_MUTATION_DETECTOR="${KUBE_CACHE_MUTATION_DETECTOR:-true}"
@@ -31,30 +33,26 @@ export KUBE_CACHE_MUTATION_DETECTOR
 KUBE_PANIC_WATCH_DECODE_ERROR="${KUBE_PANIC_WATCH_DECODE_ERROR:-true}"
 export KUBE_PANIC_WATCH_DECODE_ERROR
 
-kube::test::find_dirs() {
+kube::test::find_go_packages() {
   (
     cd "${KUBE_ROOT}"
-    find -L . -not \( \
-        \( \
-          -path './_artifacts/*' \
-          -o -path './_output/*' \
-          -o -path './_gopath/*' \
-          -o -path './cmd/kubeadm/test/*' \
-          -o -path './contrib/podex/*' \
-          -o -path './output/*' \
-          -o -path './release/*' \
-          -o -path './target/*' \
-          -o -path './test/e2e/e2e_test.go' \
-          -o -path './test/e2e_node/*' \
-          -o -path './test/e2e_kubeadm/*' \
-          -o -path './test/integration/*' \
-          -o -path './third_party/*' \
-          -o -path './staging/*' \
-          -o -path './vendor/*' \
-        \) -prune \
-      \) -name '*_test.go' -print0 | xargs -0n1 dirname | sed "s|^\./|${KUBE_GO_PACKAGE}/|" | LC_ALL=C sort -u
 
-    find ./staging -name '*_test.go' -not -path '*/test/integration/*' -prune -print0 | xargs -0n1 dirname | sed 's|^\./staging/src/|./vendor/|' | LC_ALL=C sort -u
+    # Get a list of all the modules in this workspace.
+    local -a workspace_module_patterns
+    kube::util::read-array workspace_module_patterns < <(go list -m -json | jq -r '.Path + "/..."')
+
+    # Get a list of all packages which have test files, but filter out ones
+    # that we don't want to run by default (i.e. are not unit-tests).
+    go list -find \
+        -f '{{if or (gt (len .TestGoFiles) 0) (gt (len .XTestGoFiles) 0)}}{{.ImportPath}}{{end}}' \
+        "${workspace_module_patterns[@]}" \
+        | grep -vE \
+            -e '^k8s.io/kubernetes/third_party(/.*)?$' \
+            -e '^k8s.io/kubernetes/cmd/kubeadm/test(/.*)?$' \
+            -e '^k8s.io/kubernetes/test/e2e$' \
+            -e '^k8s.io/kubernetes/test/e2e_node(/.*)?$' \
+            -e '^k8s.io/kubernetes/test/e2e_kubeadm(/.*)?$' \
+            -e '^k8s.io/.*/test/integration(/.*)?$'
   )
 }
 
@@ -67,9 +65,6 @@ KUBE_COVERMODE=${KUBE_COVERMODE:-atomic}
 # The directory to save test coverage reports to, if generating them. If unset,
 # a semi-predictable temporary directory will be used.
 KUBE_COVER_REPORT_DIR="${KUBE_COVER_REPORT_DIR:-}"
-# How many 'go test' instances to run simultaneously when running tests in
-# coverage mode.
-KUBE_COVERPROCS=${KUBE_COVERPROCS:-4}
 # use KUBE_RACE="" to disable the race detector
 # this is defaulted to "-race" in make test as well
 # NOTE: DO NOT ADD A COLON HERE. KUBE_RACE="" is meaningful!
@@ -86,6 +81,8 @@ fi
 # Set to 'y' to keep the verbose stdout from tests when KUBE_JUNIT_REPORT_DIR is
 # set.
 KUBE_KEEP_VERBOSE_TEST_OUTPUT=${KUBE_KEEP_VERBOSE_TEST_OUTPUT:-n}
+# Set to 'false' to disable reduction of the JUnit file to only the top level tests.
+KUBE_PRUNE_JUNIT_TESTS=${KUBE_PRUNE_JUNIT_TESTS:-true}
 
 kube::test::usage() {
   kube::log::usage_from_stdin <<EOF
@@ -134,25 +131,21 @@ done
 shift $((OPTIND - 1))
 
 # Use eval to preserve embedded quoted strings.
+#
+# KUBE_TEST_ARGS contains arguments for `go test` (like -short)
+# and may end with `-args <arguments for test binary>`, so it
+# has to be passed to `go test` at the end of the invocation.
 testargs=()
 eval "testargs=(${KUBE_TEST_ARGS:-})"
 
-# Used to filter verbose test output.
-go_test_grep_pattern=".*"
+# gotestsum --format value
+# "standard-quiet" let's some stderr log messages through, "pkgname-and-test-fails" is similar and doesn't (https://github.com/kubernetes/kubernetes/issues/130934#issuecomment-2739957840).
+gotestsum_format=pkgname-and-test-fails
+if [[ -n "${FULL_LOG:-}" ]] ; then
+  gotestsum_format=standard-verbose
+fi
 
 goflags=()
-# The junit report tool needs full test case information to produce a
-# meaningful report.
-if [[ -n "${KUBE_JUNIT_REPORT_DIR}" ]] ; then
-  goflags+=(-v)
-  goflags+=(-json)
-  # Show only summary lines by matching lines like "status package/test"
-  go_test_grep_pattern="^[^[:space:]]\+[[:space:]]\+[^[:space:]]\+/[^[[:space:]]\+"
-fi
-
-if [[ -n "${FULL_LOG:-}" ]] ; then
-  go_test_grep_pattern=".*"
-fi
 
 # Filter out arguments that start with "-" and move them to goflags.
 testcases=()
@@ -164,7 +157,13 @@ for arg; do
   fi
 done
 if [[ ${#testcases[@]} -eq 0 ]]; then
-  while IFS='' read -r line; do testcases+=("$line"); done < <(kube::test::find_dirs)
+  # If the user passed no targets in, we want ~everything.
+  kube::util::read-array testcases < <(kube::test::find_go_packages)
+else
+  # If the user passed targets, we should normalize them.
+  # This can be slow for large numbers of inputs.
+  kube::log::status "Normalizing Go targets"
+  kube::util::read-array testcases < <(kube::golang::normalize_go_targets "${testcases[@]}")
 fi
 set -- "${testcases[@]+${testcases[@]}}"
 
@@ -181,165 +180,73 @@ junitFilenamePrefix() {
   echo "${KUBE_JUNIT_REPORT_DIR}/junit_$(kube::util::sortable_date)"
 }
 
-verifyAndSuggestPackagePath() {
-  local specified_package_path="$1"
-  local alternative_package_path="$2"
-  local original_package_path="$3"
-  local suggestion_package_path="$4"
-
-  if [[ "${specified_package_path}" =~ '/...'$ ]]; then
-    specified_package_path=${specified_package_path::-4}
-  fi
-
-  if ! [ -d "${specified_package_path}" ]; then
-    # Because k8s sets a localized $GOPATH for testing, seeing the actual
-    # directory can be confusing. Instead, just show $GOPATH if it exists in the
-    # $specified_package_path.
-    local printable_package_path
-    printable_package_path=${specified_package_path//${GOPATH}/\$\{GOPATH\}}
-    kube::log::error "specified test path '${printable_package_path}' does not exist"
-
-    if [ -d "${alternative_package_path}" ]; then
-      kube::log::info "try changing \"${original_package_path}\" to \"${suggestion_package_path}\""
-    fi
-    exit 1
-  fi
-}
-
-verifyPathsToPackagesUnderTest() {
-  local packages_under_test=("$@")
-
-  for package_path in "${packages_under_test[@]}"; do
-    local local_package_path="${package_path}"
-    local go_package_path="${GOPATH}/src/${package_path}"
-
-    if [[ "${package_path:0:2}" == "./" ]] ; then
-      verifyAndSuggestPackagePath "${local_package_path}" "${go_package_path}" "${package_path}" "${package_path:2}"
-    else
-      verifyAndSuggestPackagePath "${go_package_path}" "${local_package_path}" "${package_path}" "./${package_path}"
-    fi
-  done
-}
-
-produceJUnitXMLReport() {
-  local -r junit_filename_prefix=$1
-  if [[ -z "${junit_filename_prefix}" ]]; then
-    return
-  fi
-
-  local junit_xml_filename
-  junit_xml_filename="${junit_filename_prefix}.xml"
-
+installTools() {
   if ! command -v gotestsum >/dev/null 2>&1; then
-    kube::log::status "gotestsum not found; installing from hack/tools"
-    pushd "${KUBE_ROOT}/hack/tools" >/dev/null
-      GO111MODULE=on go install gotest.tools/gotestsum
-    popd >/dev/null
-  fi
-  gotestsum --junitfile "${junit_xml_filename}" --raw-command cat "${junit_filename_prefix}"*.stdout
-  if [[ ! ${KUBE_KEEP_VERBOSE_TEST_OUTPUT} =~ ^[yY]$ ]]; then
-    rm "${junit_filename_prefix}"*.stdout
+    kube::log::status "gotestsum not found; installing from ./hack/tools"
+    GOTOOLCHAIN="$(kube::golang::hack_tools_gotoolchain)" go -C "${KUBE_ROOT}/hack/tools" install gotest.tools/gotestsum
   fi
 
   if ! command -v prune-junit-xml >/dev/null 2>&1; then
-    kube::log::status "prune-junit-xml not found; installing from hack/tools"
-    pushd "${KUBE_ROOT}/cmd/prune-junit-xml" >/dev/null
-      GO111MODULE=on go install .
-    popd >/dev/null
+    kube::log::status "prune-junit-xml not found; installing from ./cmd"
+    go -C "${KUBE_ROOT}/cmd/prune-junit-xml" install .
   fi
-  prune-junit-xml "${junit_xml_filename}"
-
-  kube::log::status "Saved JUnit XML test report to ${junit_xml_filename}"
 }
 
 runTests() {
   local junit_filename_prefix
   junit_filename_prefix=$(junitFilenamePrefix)
 
-  verifyPathsToPackagesUnderTest "$@"
+  installTools
 
-  # If we're not collecting coverage, run all requested tests with one 'go test'
-  # command, which is much faster.
-  if [[ ! ${KUBE_COVER} =~ ^[yY]$ ]]; then
-    kube::log::status "Running tests without code coverage ${KUBE_RACE:+"and with ${KUBE_RACE}"}"
-    go test "${goflags[@]:+${goflags[@]}}" \
-     "${KUBE_TIMEOUT}" "${@}" \
-     "${testargs[@]:+${testargs[@]}}" \
-     | tee ${junit_filename_prefix:+"${junit_filename_prefix}.stdout"} \
-     | grep --binary-files=text "${go_test_grep_pattern}" && rc=$? || rc=$?
-    produceJUnitXMLReport "${junit_filename_prefix}"
-    return ${rc}
-  fi
+  # Enable coverage data collection?
+  local cover_msg
+  local COMBINED_COVER_PROFILE
 
-  kube::log::status "Running tests with code coverage ${KUBE_RACE:+"and with ${KUBE_RACE}"}"
-
-  # Create coverage report directories.
-  if [[ -z "${KUBE_COVER_REPORT_DIR}" ]]; then
-    cover_report_dir="/tmp/k8s_coverage/$(kube::util::sortable_date)"
+  if [[ ${KUBE_COVER} =~ ^[yY]$ ]]; then
+    cover_msg="with code coverage"
+    if [[ -z "${KUBE_COVER_REPORT_DIR}" ]]; then
+      cover_report_dir="/tmp/k8s_coverage/$(kube::util::sortable_date)"
+    else
+      cover_report_dir="${KUBE_COVER_REPORT_DIR}"
+    fi
+    kube::log::status "Saving coverage output in '${cover_report_dir}'"
+    mkdir -p "${@+${@/#/${cover_report_dir}/}}"
+    COMBINED_COVER_PROFILE="${cover_report_dir}/combined-coverage.out"
+    goflags+=(-cover -covermode="${KUBE_COVERMODE}" -coverprofile="${COMBINED_COVER_PROFILE}")
   else
-    cover_report_dir="${KUBE_COVER_REPORT_DIR}"
+    cover_msg="without code coverage"
   fi
-  cover_profile="coverage.out"  # Name for each individual coverage profile
-  kube::log::status "Saving coverage output in '${cover_report_dir}'"
-  mkdir -p "${@+${@/#/${cover_report_dir}/}}"
 
-  # Run all specified tests, collecting coverage results. Go currently doesn't
-  # support collecting coverage across multiple packages at once, so we must issue
-  # separate 'go test' commands for each package and then combine at the end.
-  # To speed things up considerably, we can at least use xargs -P to run multiple
-  # 'go test' commands at once.
-  # To properly parse the test results if generating a JUnit test report, we
-  # must make sure the output from PARALLEL runs is not mixed. To achieve this,
-  # we spawn a subshell for each PARALLEL process, redirecting the output to
-  # separate files.
+  # Keep the raw JSON output in addition to the JUnit file?
+  local jsonfile=""
+  if [[ -n "${junit_filename_prefix}" ]] && [[ ${KUBE_KEEP_VERBOSE_TEST_OUTPUT} =~ ^[yY]$ ]]; then
+      jsonfile="${junit_filename_prefix}.stdout"
+  fi
 
-  # ignore paths:
-  # vendor/k8s.io/code-generator/cmd/generator: is fragile when run under coverage, so ignore it for now.
-  #                            https://github.com/kubernetes/kubernetes/issues/24967
-  # vendor/k8s.io/client-go/1.4/rest: causes cover internal errors
-  #                            https://github.com/golang/go/issues/16540
-  cover_ignore_dirs="vendor/k8s.io/code-generator/cmd/generator|vendor/k8s.io/client-go/1.4/rest"
-  for path in ${cover_ignore_dirs//|/ }; do
-      echo -e "skipped\tk8s.io/kubernetes/${path}"
-  done
+  kube::log::status "Running tests ${cover_msg} ${KUBE_RACE:+"and with ${KUBE_RACE}"}"
+  gotestsum --format="${gotestsum_format}" \
+            --jsonfile="${jsonfile}" \
+            --junitfile="${junit_filename_prefix:+"${junit_filename_prefix}.xml"}" \
+            --raw-command \
+            -- \
+            go test -json \
+            "${goflags[@]:+${goflags[@]}}" \
+            "${KUBE_TIMEOUT}" \
+            "$@" \
+            "${testargs[@]:+${testargs[@]}}" \
+    && rc=$? || rc=$?
 
-  printf "%s\n" "${@}" \
-    | grep -Ev ${cover_ignore_dirs} \
-    | xargs -I{} -n 1 -P "${KUBE_COVERPROCS}" \
-    bash -c "set -o pipefail; _pkg=\"\$0\"; _pkg_out=\${_pkg//\//_}; \
-      go test ${goflags[*]:+${goflags[*]}} \
-        ${KUBE_TIMEOUT} \
-        -cover -covermode=\"${KUBE_COVERMODE}\" \
-        -coverprofile=\"${cover_report_dir}/\${_pkg}/${cover_profile}\" \
-        \"\${_pkg}\" \
-        ${testargs[*]:+${testargs[*]}} \
-      | tee ${junit_filename_prefix:+\"${junit_filename_prefix}-\$_pkg_out.stdout\"} \
-      | grep \"${go_test_grep_pattern}\"" \
-    {} \
-    && test_result=$? || test_result=$?
+  if [[ -n "${junit_filename_prefix}" ]]; then
+    prune-junit-xml -prune-tests="${KUBE_PRUNE_JUNIT_TESTS}" "${junit_filename_prefix}.xml"
+  fi
 
-  produceJUnitXMLReport "${junit_filename_prefix}"
+  if [[ ${KUBE_COVER} =~ ^[yY]$ ]]; then
+    coverage_html_file="${cover_report_dir}/combined-coverage.html"
+    go tool cover -html="${COMBINED_COVER_PROFILE}" -o="${coverage_html_file}"
+    kube::log::status "Combined coverage report: ${coverage_html_file}"
+  fi
 
-  COMBINED_COVER_PROFILE="${cover_report_dir}/combined-coverage.out"
-  {
-    # The combined coverage profile needs to start with a line indicating which
-    # coverage mode was used (set, count, or atomic). This line is included in
-    # each of the coverage profiles generated when running 'go test -cover', but
-    # we strip these lines out when combining so that there's only one.
-    echo "mode: ${KUBE_COVERMODE}"
-
-    # Include all coverage reach data in the combined profile, but exclude the
-    # 'mode' lines, as there should be only one.
-    while IFS='' read -r x; do
-      grep -h -v "^mode:" < "${x}" || true
-    done < <(find "${cover_report_dir}" -name "${cover_profile}")
-  } >"${COMBINED_COVER_PROFILE}"
-
-  coverage_html_file="${cover_report_dir}/combined-coverage.html"
-  go tool cover -html="${COMBINED_COVER_PROFILE}" -o="${coverage_html_file}"
-  kube::log::status "Combined coverage report: ${coverage_html_file}"
-
-  return ${test_result}
+  return "${rc}"
 }
 
 reportCoverageToCoveralls() {

@@ -31,11 +31,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pkg/errors"
-
 	"k8s.io/klog/v2"
 
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 // EntryMap holds a map of user or group entries.
@@ -53,7 +52,7 @@ type UsersAndGroups struct {
 }
 
 // entry is a structure that holds information about a UNIX user or group.
-// It partialially conforms parsing of both users from /etc/passwd and groups from /etc/group.
+// It partially conforms parsing of both users from /etc/passwd and groups from /etc/group.
 type entry struct {
 	name      string
 	id        int64
@@ -129,7 +128,7 @@ func (u *EntryMap) String() string {
 	return strings.Join(lines, "")
 }
 
-// Is a public wrapper around addUsersAndGroupsImpl with default system file paths.
+// AddUsersAndGroups is a public wrapper around addUsersAndGroupsImpl with default system file paths.
 func AddUsersAndGroups() (*UsersAndGroups, error) {
 	return addUsersAndGroupsImpl(fileEtcLoginDefs, fileEtcPasswd, fileEtcGroup)
 }
@@ -568,7 +567,7 @@ func entriesToString(entries []*entry) string {
 	return strings.Join(lines, ",")
 }
 
-// openFileWithLock opens the file at path by acquiring an exclive write lock.
+// openFileWithLock opens the file at path by acquiring an exclusive write lock.
 // The returned close() function should be called to release the lock and close the file.
 // If a lock cannot be obtained the function fails after a period of time.
 func openFileWithLock(path string) (f *os.File, close func(), err error) {

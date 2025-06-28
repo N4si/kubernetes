@@ -19,10 +19,10 @@ limitations under the License.
 package v1
 
 import (
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/tools/cache"
-	v1 "k8s.io/code-generator/examples/crd/apis/example/v1"
+	labels "k8s.io/apimachinery/pkg/labels"
+	listers "k8s.io/client-go/listers"
+	cache "k8s.io/client-go/tools/cache"
+	examplev1 "k8s.io/code-generator/examples/crd/apis/example/v1"
 )
 
 // TestTypeLister helps list TestTypes.
@@ -30,7 +30,7 @@ import (
 type TestTypeLister interface {
 	// List lists all TestTypes in the indexer.
 	// Objects returned here must be treated as read-only.
-	List(selector labels.Selector) (ret []*v1.TestType, err error)
+	List(selector labels.Selector) (ret []*examplev1.TestType, err error)
 	// TestTypes returns an object that can list and get TestTypes.
 	TestTypes(namespace string) TestTypeNamespaceLister
 	TestTypeListerExpansion
@@ -38,25 +38,17 @@ type TestTypeLister interface {
 
 // testTypeLister implements the TestTypeLister interface.
 type testTypeLister struct {
-	indexer cache.Indexer
+	listers.ResourceIndexer[*examplev1.TestType]
 }
 
 // NewTestTypeLister returns a new TestTypeLister.
 func NewTestTypeLister(indexer cache.Indexer) TestTypeLister {
-	return &testTypeLister{indexer: indexer}
-}
-
-// List lists all TestTypes in the indexer.
-func (s *testTypeLister) List(selector labels.Selector) (ret []*v1.TestType, err error) {
-	err = cache.ListAll(s.indexer, selector, func(m interface{}) {
-		ret = append(ret, m.(*v1.TestType))
-	})
-	return ret, err
+	return &testTypeLister{listers.New[*examplev1.TestType](indexer, examplev1.Resource("testtype"))}
 }
 
 // TestTypes returns an object that can list and get TestTypes.
 func (s *testTypeLister) TestTypes(namespace string) TestTypeNamespaceLister {
-	return testTypeNamespaceLister{indexer: s.indexer, namespace: namespace}
+	return testTypeNamespaceLister{listers.NewNamespaced[*examplev1.TestType](s.ResourceIndexer, namespace)}
 }
 
 // TestTypeNamespaceLister helps list and get TestTypes.
@@ -64,36 +56,15 @@ func (s *testTypeLister) TestTypes(namespace string) TestTypeNamespaceLister {
 type TestTypeNamespaceLister interface {
 	// List lists all TestTypes in the indexer for a given namespace.
 	// Objects returned here must be treated as read-only.
-	List(selector labels.Selector) (ret []*v1.TestType, err error)
+	List(selector labels.Selector) (ret []*examplev1.TestType, err error)
 	// Get retrieves the TestType from the indexer for a given namespace and name.
 	// Objects returned here must be treated as read-only.
-	Get(name string) (*v1.TestType, error)
+	Get(name string) (*examplev1.TestType, error)
 	TestTypeNamespaceListerExpansion
 }
 
 // testTypeNamespaceLister implements the TestTypeNamespaceLister
 // interface.
 type testTypeNamespaceLister struct {
-	indexer   cache.Indexer
-	namespace string
-}
-
-// List lists all TestTypes in the indexer for a given namespace.
-func (s testTypeNamespaceLister) List(selector labels.Selector) (ret []*v1.TestType, err error) {
-	err = cache.ListAllByNamespace(s.indexer, s.namespace, selector, func(m interface{}) {
-		ret = append(ret, m.(*v1.TestType))
-	})
-	return ret, err
-}
-
-// Get retrieves the TestType from the indexer for a given namespace and name.
-func (s testTypeNamespaceLister) Get(name string) (*v1.TestType, error) {
-	obj, exists, err := s.indexer.GetByKey(s.namespace + "/" + name)
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		return nil, errors.NewNotFound(v1.Resource("testtype"), name)
-	}
-	return obj.(*v1.TestType), nil
+	listers.ResourceIndexer[*examplev1.TestType]
 }

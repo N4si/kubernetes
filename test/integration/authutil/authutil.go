@@ -23,12 +23,15 @@ import (
 	"time"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
+	v1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
+	"k8s.io/client-go/rest"
 )
 
 // WaitForNamedAuthorizationUpdate checks if the given user can perform the named verb and action on the named resource.
@@ -64,6 +67,14 @@ func WaitForNamedAuthorizationUpdate(t *testing.T, ctx context.Context, c author
 }
 
 func GrantUserAuthorization(t *testing.T, ctx context.Context, adminClient clientset.Interface, username string, rule rbacv1.PolicyRule) {
+	grantAuthorization(t, ctx, adminClient, username, "", rbacv1.UserKind, rule)
+}
+
+func GrantServiceAccountAuthorization(t *testing.T, ctx context.Context, adminClient clientset.Interface, serviceAccountName, serviceAccountNamespace string, rule rbacv1.PolicyRule) {
+	grantAuthorization(t, ctx, adminClient, serviceAccountName, serviceAccountNamespace, rbacv1.ServiceAccountKind, rule)
+}
+
+func grantAuthorization(t *testing.T, ctx context.Context, adminClient clientset.Interface, name, namespace, accountKind string, rule rbacv1.PolicyRule) {
 	t.Helper()
 
 	cr, err := adminClient.RbacV1().ClusterRoles().Create(ctx, &rbacv1.ClusterRole{
@@ -83,10 +94,10 @@ func GrantUserAuthorization(t *testing.T, ctx context.Context, adminClient clien
 		ObjectMeta: metav1.ObjectMeta{GenerateName: strings.Replace(t.Name(), "/", "--", -1)},
 		Subjects: []rbacv1.Subject{
 			{
-				Kind:      rbacv1.UserKind,
-				APIGroup:  rbacv1.GroupName,
-				Name:      username,
-				Namespace: "",
+				Kind: accountKind,
+				// APIGroup defaults to the appropriate value for both users and service accounts
+				Name:      name,
+				Namespace: namespace,
 			},
 		},
 		RoleRef: rbacv1.RoleRef{
@@ -107,15 +118,44 @@ func GrantUserAuthorization(t *testing.T, ctx context.Context, adminClient clien
 		resourceName = rule.ResourceNames[0]
 	}
 
+	subjectName := name
+	if accountKind == rbacv1.ServiceAccountKind {
+		subjectName = "system:serviceaccount:" + namespace + ":" + name
+	}
+
 	WaitForNamedAuthorizationUpdate(
 		t,
 		ctx,
 		adminClient.AuthorizationV1(),
-		username,
-		"",
+		subjectName,
+		namespace,
 		rule.Verbs[0],
 		resourceName,
 		schema.GroupResource{Group: rule.APIGroups[0], Resource: rule.Resources[0]},
 		true,
 	)
+}
+
+type clientFn func(t *testing.T, adminClient *clientset.Clientset, clientConfig *rest.Config, rules []rbacv1.PolicyRule) *clientset.Clientset
+
+func ServiceAccountClient(namespace, name string) clientFn {
+	return func(t *testing.T, adminClient *clientset.Clientset, clientConfig *rest.Config, rules []rbacv1.PolicyRule) *clientset.Clientset {
+		clientConfig = rest.CopyConfig(clientConfig)
+		sa, err := adminClient.CoreV1().ServiceAccounts(namespace).Create(context.TODO(), &v1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name}}, metav1.CreateOptions{})
+		if err != nil && !apierrors.IsAlreadyExists(err) {
+			t.Fatal(err)
+		}
+		uid := sa.UID
+
+		clientConfig.Impersonate = rest.ImpersonationConfig{
+			UserName: "system:serviceaccount:" + namespace + ":" + name,
+			UID:      string(uid),
+		}
+		client := clientset.NewForConfigOrDie(clientConfig)
+
+		for _, rule := range rules {
+			GrantServiceAccountAuthorization(t, context.TODO(), adminClient, name, namespace, rule)
+		}
+		return client
+	}
 }

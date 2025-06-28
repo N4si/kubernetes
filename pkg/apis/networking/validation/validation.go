@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"strings"
 
-	v1 "k8s.io/api/core/v1"
 	apimachineryvalidation "k8s.io/apimachinery/pkg/api/validation"
 	pathvalidation "k8s.io/apimachinery/pkg/api/validation/path"
 	unversionedvalidation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
@@ -32,7 +31,7 @@ import (
 	apivalidation "k8s.io/kubernetes/pkg/apis/core/validation"
 	"k8s.io/kubernetes/pkg/apis/networking"
 	netutils "k8s.io/utils/net"
-	utilpointer "k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -57,6 +56,7 @@ var (
 
 type NetworkPolicyValidationOptions struct {
 	AllowInvalidLabelValueInSelector bool
+	AllowCIDRsEvenIfInvalid          []string
 }
 
 // ValidateNetworkPolicyName can be used to check whether the given networkpolicy
@@ -119,7 +119,7 @@ func ValidateNetworkPolicyPeer(peer *networking.NetworkPolicyPeer, opts NetworkP
 	}
 	if peer.IPBlock != nil {
 		numPeers++
-		allErrs = append(allErrs, ValidateIPBlock(peer.IPBlock, peerPath.Child("ipBlock"))...)
+		allErrs = append(allErrs, ValidateIPBlock(peer.IPBlock, peerPath.Child("ipBlock"), opts)...)
 	}
 
 	if numPeers == 0 {
@@ -207,41 +207,66 @@ func ValidationOptionsForNetworking(new, old *networking.NetworkPolicy) NetworkP
 
 // ValidateNetworkPolicyUpdate tests if an update to a NetworkPolicy is valid.
 func ValidateNetworkPolicyUpdate(update, old *networking.NetworkPolicy, opts NetworkPolicyValidationOptions) field.ErrorList {
+	// Record all existing CIDRs in the policy; see ValidateIPBlock.
+	var existingCIDRs []string
+	for _, ingress := range old.Spec.Ingress {
+		for _, peer := range ingress.From {
+			if peer.IPBlock != nil {
+				existingCIDRs = append(existingCIDRs, peer.IPBlock.CIDR)
+				existingCIDRs = append(existingCIDRs, peer.IPBlock.Except...)
+			}
+		}
+	}
+	for _, egress := range old.Spec.Egress {
+		for _, peer := range egress.To {
+			if peer.IPBlock != nil {
+				existingCIDRs = append(existingCIDRs, peer.IPBlock.CIDR)
+				existingCIDRs = append(existingCIDRs, peer.IPBlock.Except...)
+			}
+		}
+	}
+	opts.AllowCIDRsEvenIfInvalid = existingCIDRs
+
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, apivalidation.ValidateObjectMetaUpdate(&update.ObjectMeta, &old.ObjectMeta, field.NewPath("metadata"))...)
 	allErrs = append(allErrs, ValidateNetworkPolicySpec(&update.Spec, opts, field.NewPath("spec"))...)
 	return allErrs
 }
 
-// ValidateNetworkPolicyStatusUpdate tests if an update to a NetworkPolicy status is valid
-func ValidateNetworkPolicyStatusUpdate(status, oldstatus networking.NetworkPolicyStatus, fldPath *field.Path) field.ErrorList {
-	return unversionedvalidation.ValidateConditions(status.Conditions, fldPath.Child("conditions"))
-}
-
-// ValidateIPBlock validates a cidr and the except fields of an IpBlock NetworkPolicyPeer
-func ValidateIPBlock(ipb *networking.IPBlock, fldPath *field.Path) field.ErrorList {
+// ValidateIPBlock validates a cidr and the except fields of an IPBlock NetworkPolicyPeer.
+//
+// If a pre-existing CIDR is invalid/insecure, but it is not being changed by this update,
+// then we have to continue allowing it. But since the user may have changed the policy in
+// arbitrary ways (adding/removing rules, adding/removing peers, adding/removing
+// ipBlock.except values, etc), we can't reliably determine whether a CIDR value we see
+// here is a new value or a pre-existing one. So we just allow any CIDR value that
+// appeared in the old NetworkPolicy to be used here without revalidation.
+func ValidateIPBlock(ipb *networking.IPBlock, fldPath *field.Path, opts NetworkPolicyValidationOptions) field.ErrorList {
 	allErrs := field.ErrorList{}
-	if len(ipb.CIDR) == 0 || ipb.CIDR == "" {
+	if ipb.CIDR == "" {
 		allErrs = append(allErrs, field.Required(fldPath.Child("cidr"), ""))
 		return allErrs
 	}
-	cidrIPNet, err := apivalidation.ValidateCIDR(ipb.CIDR)
+	allErrs = append(allErrs, apivalidation.IsValidCIDRForLegacyField(fldPath.Child("cidr"), ipb.CIDR, opts.AllowCIDRsEvenIfInvalid)...)
+	_, cidrIPNet, err := netutils.ParseCIDRSloppy(ipb.CIDR)
 	if err != nil {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child("cidr"), ipb.CIDR, "not a valid CIDR"))
+		// Implies validation would have failed so we already added errors for it.
 		return allErrs
 	}
-	exceptCIDR := ipb.Except
-	for i, exceptIP := range exceptCIDR {
+
+	for i, exceptCIDRStr := range ipb.Except {
 		exceptPath := fldPath.Child("except").Index(i)
-		exceptCIDR, err := apivalidation.ValidateCIDR(exceptIP)
+		allErrs = append(allErrs, apivalidation.IsValidCIDRForLegacyField(exceptPath, exceptCIDRStr, opts.AllowCIDRsEvenIfInvalid)...)
+		_, exceptCIDR, err := netutils.ParseCIDRSloppy(exceptCIDRStr)
 		if err != nil {
-			allErrs = append(allErrs, field.Invalid(exceptPath, exceptIP, "not a valid CIDR"))
-			return allErrs
+			// Implies validation would have failed so we already added errors for it.
+			continue
 		}
+
 		cidrMaskLen, _ := cidrIPNet.Mask.Size()
 		exceptMaskLen, _ := exceptCIDR.Mask.Size()
 		if !cidrIPNet.Contains(exceptCIDR.IP) || cidrMaskLen >= exceptMaskLen {
-			allErrs = append(allErrs, field.Invalid(exceptPath, exceptIP, "must be a strict subset of `cidr`"))
+			allErrs = append(allErrs, field.Invalid(exceptPath, exceptCIDRStr, "must be a strict subset of `cidr`"))
 		}
 	}
 	return allErrs
@@ -276,9 +301,9 @@ func ValidateIngressCreate(ingress *networking.Ingress) field.ErrorList {
 	}
 	allErrs = append(allErrs, validateIngress(ingress, opts)...)
 	annotationVal, annotationIsSet := ingress.Annotations[annotationIngressClass]
-	if annotationIsSet && ingress.Spec.IngressClassName != nil {
+	if annotationIsSet && ingress.Spec.IngressClassName != nil && annotationVal != *ingress.Spec.IngressClassName {
 		annotationPath := field.NewPath("annotations").Child(annotationIngressClass)
-		allErrs = append(allErrs, field.Invalid(annotationPath, annotationVal, "can not be set when the class field is also set"))
+		allErrs = append(allErrs, field.Invalid(annotationPath, annotationVal, "must match `ingressClassName` when both are specified"))
 	}
 	return allErrs
 }
@@ -349,19 +374,28 @@ func ValidateIngressSpec(spec *networking.IngressSpec, fldPath *field.Path, opts
 // ValidateIngressStatusUpdate tests if required fields in the Ingress are set when updating status.
 func ValidateIngressStatusUpdate(ingress, oldIngress *networking.Ingress) field.ErrorList {
 	allErrs := apivalidation.ValidateObjectMetaUpdate(&ingress.ObjectMeta, &oldIngress.ObjectMeta, field.NewPath("metadata"))
-	allErrs = append(allErrs, ValidateIngressLoadBalancerStatus(&ingress.Status.LoadBalancer, field.NewPath("status", "loadBalancer"))...)
+	allErrs = append(allErrs, ValidateIngressLoadBalancerStatus(&ingress.Status.LoadBalancer, &oldIngress.Status.LoadBalancer, field.NewPath("status", "loadBalancer"))...)
 	return allErrs
 }
 
-// ValidateLIngressoadBalancerStatus validates required fields on an IngressLoadBalancerStatus
-func ValidateIngressLoadBalancerStatus(status *networking.IngressLoadBalancerStatus, fldPath *field.Path) field.ErrorList {
+// ValidateIngressLoadBalancerStatus validates required fields on an IngressLoadBalancerStatus
+func ValidateIngressLoadBalancerStatus(status, oldStatus *networking.IngressLoadBalancerStatus, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
+
+	var existingIngressIPs []string
+	if oldStatus != nil {
+		existingIngressIPs = make([]string, 0, len(oldStatus.Ingress))
+		for _, ingress := range oldStatus.Ingress {
+			if len(ingress.IP) > 0 {
+				existingIngressIPs = append(existingIngressIPs, ingress.IP)
+			}
+		}
+	}
+
 	for i, ingress := range status.Ingress {
 		idxPath := fldPath.Child("ingress").Index(i)
 		if len(ingress.IP) > 0 {
-			if isIP := (netutils.ParseIPSloppy(ingress.IP) != nil); !isIP {
-				allErrs = append(allErrs, field.Invalid(idxPath.Child("ip"), ingress.IP, "must be a valid IP address"))
-			}
+			allErrs = append(allErrs, apivalidation.IsValidIPForLegacyField(idxPath.Child("ip"), ingress.IP, existingIngressIPs)...)
 		}
 		if len(ingress.Hostname) > 0 {
 			for _, msg := range validation.IsDNS1123Subdomain(ingress.Hostname) {
@@ -377,9 +411,7 @@ func ValidateIngressLoadBalancerStatus(status *networking.IngressLoadBalancerSta
 
 func validateIngressRules(ingressRules []networking.IngressRule, fldPath *field.Path, opts IngressValidationOptions) field.ErrorList {
 	allErrs := field.ErrorList{}
-	if len(ingressRules) == 0 {
-		return append(allErrs, field.Required(fldPath, ""))
-	}
+
 	for i, ih := range ingressRules {
 		wildcardHost := false
 		if len(ih.Host) > 0 {
@@ -530,7 +562,7 @@ func ValidateIngressClassUpdate(newIngressClass, oldIngressClass *networking.Ing
 func validateIngressClassSpec(spec *networking.IngressClassSpec, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if len(spec.Controller) > maxLenIngressClassController {
-		allErrs = append(allErrs, field.TooLong(fldPath.Child("controller"), spec.Controller, maxLenIngressClassController))
+		allErrs = append(allErrs, field.TooLong(fldPath.Child("controller"), "" /*unused*/, maxLenIngressClassController))
 	}
 	allErrs = append(allErrs, validation.IsDomainPrefixedPath(fldPath.Child("controller"), spec.Controller)...)
 	allErrs = append(allErrs, validateIngressClassParametersReference(spec.Parameters, fldPath.Child("parameters"))...)
@@ -598,27 +630,24 @@ func validateIngressClassParametersReference(params *networking.IngressClassPara
 		return allErrs
 	}
 
-	if params.Scope != nil || params.Namespace != nil {
-		scope := utilpointer.StringDeref(params.Scope, "")
+	scope := ptr.Deref(params.Scope, "")
 
-		if !supportedIngressClassParametersReferenceScopes.Has(scope) {
-			allErrs = append(allErrs, field.NotSupported(fldPath.Child("scope"), scope,
-				supportedIngressClassParametersReferenceScopes.List()))
-		} else {
-
-			if scope == networking.IngressClassParametersReferenceScopeNamespace {
-				if params.Namespace == nil {
-					allErrs = append(allErrs, field.Required(fldPath.Child("namespace"), "`parameters.scope` is set to 'Namespace'"))
-				} else {
-					for _, msg := range apivalidation.ValidateNamespaceName(*params.Namespace, false) {
-						allErrs = append(allErrs, field.Invalid(fldPath.Child("namespace"), *params.Namespace, msg))
-					}
+	if !supportedIngressClassParametersReferenceScopes.Has(scope) {
+		allErrs = append(allErrs, field.NotSupported(fldPath.Child("scope"), scope,
+			supportedIngressClassParametersReferenceScopes.List()))
+	} else {
+		if scope == networking.IngressClassParametersReferenceScopeNamespace {
+			if params.Namespace == nil {
+				allErrs = append(allErrs, field.Required(fldPath.Child("namespace"), "`parameters.scope` is set to 'Namespace'"))
+			} else {
+				for _, msg := range apivalidation.ValidateNamespaceName(*params.Namespace, false) {
+					allErrs = append(allErrs, field.Invalid(fldPath.Child("namespace"), *params.Namespace, msg))
 				}
 			}
+		}
 
-			if scope == networking.IngressClassParametersReferenceScopeCluster && params.Namespace != nil {
-				allErrs = append(allErrs, field.Forbidden(fldPath.Child("namespace"), "`parameters.scope` is set to 'Cluster'"))
-			}
+		if scope == networking.IngressClassParametersReferenceScopeCluster && params.Namespace != nil {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("namespace"), "`parameters.scope` is set to 'Cluster'"))
 		}
 	}
 
@@ -656,88 +685,145 @@ func allowInvalidWildcardHostRule(oldIngress *networking.Ingress) bool {
 	return false
 }
 
-// ValidateClusterCIDRName validates that the given name can be used as an
-// ClusterCIDR name.
-var ValidateClusterCIDRName = apimachineryvalidation.NameIsDNSLabel
+// ValidateIPAddressName validates that the name is the decimal representation of an IP address.
+// IPAddress does not support generating names, prefix is not considered.
+func ValidateIPAddressName(name string, prefix bool) []string {
+	var errs []string
 
-// ValidateClusterCIDR validates a ClusterCIDR.
-func ValidateClusterCIDR(cc *networking.ClusterCIDR) field.ErrorList {
-	allErrs := apivalidation.ValidateObjectMeta(&cc.ObjectMeta, false, ValidateClusterCIDRName, field.NewPath("metadata"))
-	allErrs = append(allErrs, ValidateClusterCIDRSpec(&cc.Spec, field.NewPath("spec"))...)
-	return allErrs
+	allErrs := validation.IsValidIP(&field.Path{}, name)
+	// Need to unconvert the field.Error from IsValidIP back to a string so our caller
+	// can convert it back to a field.Error!
+	for _, err := range allErrs {
+		errs = append(errs, err.Detail)
+	}
+	return errs
 }
 
-// ValidateClusterCIDRSpec validates ClusterCIDR Spec.
-func ValidateClusterCIDRSpec(spec *networking.ClusterCIDRSpec, fldPath *field.Path) field.ErrorList {
-	var allErrs field.ErrorList
-	if spec.NodeSelector != nil {
-		allErrs = append(allErrs, apivalidation.ValidateNodeSelector(spec.NodeSelector, fldPath.Child("nodeSelector"))...)
-	}
+func ValidateIPAddress(ipAddress *networking.IPAddress) field.ErrorList {
+	allErrs := apivalidation.ValidateObjectMeta(&ipAddress.ObjectMeta, false, ValidateIPAddressName, field.NewPath("metadata"))
+	errs := validateIPAddressParentReference(ipAddress.Spec.ParentRef, field.NewPath("spec"))
+	allErrs = append(allErrs, errs...)
+	return allErrs
 
-	// Validate if CIDR is specified for at least one IP Family(IPv4/IPv6).
-	if spec.IPv4 == "" && spec.IPv6 == "" {
-		allErrs = append(allErrs, field.Required(fldPath, "one or both of `ipv4` and `ipv6` must be specified"))
+}
+
+// validateIPAddressParentReference ensures that the IPAddress ParenteReference exists and is valid.
+func validateIPAddressParentReference(params *networking.ParentReference, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	if params == nil {
+		allErrs = append(allErrs, field.Required(fldPath.Child("parentRef"), ""))
 		return allErrs
 	}
 
-	// Validate specified IPv4 CIDR and PerNodeHostBits.
-	if spec.IPv4 != "" {
-		allErrs = append(allErrs, validateCIDRConfig(spec.IPv4, spec.PerNodeHostBits, 32, v1.IPv4Protocol, fldPath)...)
+	fldPath = fldPath.Child("parentRef")
+	// group is required but the Core group used by Services is the empty value, so it can not be enforced
+	if params.Group != "" {
+		for _, msg := range validation.IsDNS1123Subdomain(params.Group) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("group"), params.Group, msg))
+		}
 	}
 
-	// Validate specified IPv6 CIDR and PerNodeHostBits.
-	if spec.IPv6 != "" {
-		allErrs = append(allErrs, validateCIDRConfig(spec.IPv6, spec.PerNodeHostBits, 128, v1.IPv6Protocol, fldPath)...)
+	// resource is required
+	if params.Resource == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("resource"), ""))
+	} else {
+		for _, msg := range pathvalidation.IsValidPathSegmentName(params.Resource) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("resource"), params.Resource, msg))
+		}
 	}
 
-	return allErrs
-}
-
-func validateCIDRConfig(configCIDR string, perNodeHostBits, maxMaskSize int32, ipFamily v1.IPFamily, fldPath *field.Path) field.ErrorList {
-	var allErrs field.ErrorList
-	minPerNodeHostBits := int32(4)
-
-	ip, ipNet, err := netutils.ParseCIDRSloppy(configCIDR)
-	if err != nil {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child(string(ipFamily)), configCIDR, fmt.Sprintf("must be a valid CIDR: %s", configCIDR)))
-		return allErrs
+	// name is required
+	if params.Name == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("name"), ""))
+	} else {
+		for _, msg := range pathvalidation.IsValidPathSegmentName(params.Name) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("name"), params.Name, msg))
+		}
 	}
 
-	if ipFamily == v1.IPv4Protocol && !netutils.IsIPv4(ip) {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child(string(ipFamily)), configCIDR, "must be a valid IPv4 CIDR"))
-	}
-	if ipFamily == v1.IPv6Protocol && !netutils.IsIPv6(ip) {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child(string(ipFamily)), configCIDR, "must be a valid IPv6 CIDR"))
-	}
-
-	// Validate PerNodeHostBits
-	maskSize, _ := ipNet.Mask.Size()
-	maxPerNodeHostBits := maxMaskSize - int32(maskSize)
-
-	if perNodeHostBits < minPerNodeHostBits {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child("perNodeHostBits"), perNodeHostBits, fmt.Sprintf("must be greater than or equal to %d", minPerNodeHostBits)))
-	}
-	if perNodeHostBits > maxPerNodeHostBits {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child("perNodeHostBits"), perNodeHostBits, fmt.Sprintf("must be less than or equal to %d", maxPerNodeHostBits)))
+	// namespace is optional
+	if params.Namespace != "" {
+		for _, msg := range pathvalidation.IsValidPathSegmentName(params.Namespace) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("namespace"), params.Namespace, msg))
+		}
 	}
 	return allErrs
 }
 
-// ValidateClusterCIDRUpdate tests if an update to a ClusterCIDR is valid.
-func ValidateClusterCIDRUpdate(update, old *networking.ClusterCIDR) field.ErrorList {
+// ValidateIPAddressUpdate tests if an update to an IPAddress is valid.
+func ValidateIPAddressUpdate(update, old *networking.IPAddress) field.ErrorList {
 	var allErrs field.ErrorList
 	allErrs = append(allErrs, apivalidation.ValidateObjectMetaUpdate(&update.ObjectMeta, &old.ObjectMeta, field.NewPath("metadata"))...)
-	allErrs = append(allErrs, validateClusterCIDRUpdateSpec(&update.Spec, &old.Spec, field.NewPath("spec"))...)
+	allErrs = append(allErrs, apivalidation.ValidateImmutableField(update.Spec.ParentRef, old.Spec.ParentRef, field.NewPath("spec").Child("parentRef"))...)
 	return allErrs
 }
 
-func validateClusterCIDRUpdateSpec(update, old *networking.ClusterCIDRSpec, fldPath *field.Path) field.ErrorList {
+var ValidateServiceCIDRName = apimachineryvalidation.NameIsDNSSubdomain
+
+func ValidateServiceCIDR(cidrConfig *networking.ServiceCIDR) field.ErrorList {
+	allErrs := apivalidation.ValidateObjectMeta(&cidrConfig.ObjectMeta, false, ValidateServiceCIDRName, field.NewPath("metadata"))
+	allErrs = append(allErrs, validateServiceCIDRSpec(&cidrConfig.Spec, field.NewPath("spec", "cidrs"))...)
+	return allErrs
+}
+
+func validateServiceCIDRSpec(cidrConfigSpec *networking.ServiceCIDRSpec, fieldPath *field.Path) field.ErrorList {
 	var allErrs field.ErrorList
+	if len(cidrConfigSpec.CIDRs) == 0 {
+		allErrs = append(allErrs, field.Required(fieldPath, "at least one CIDR required"))
+		return allErrs
+	}
 
-	allErrs = append(allErrs, apivalidation.ValidateImmutableField(update.NodeSelector, old.NodeSelector, fldPath.Child("nodeSelector"))...)
-	allErrs = append(allErrs, apivalidation.ValidateImmutableField(update.PerNodeHostBits, old.PerNodeHostBits, fldPath.Child("perNodeHostBits"))...)
-	allErrs = append(allErrs, apivalidation.ValidateImmutableField(update.IPv4, old.IPv4, fldPath.Child("ipv4"))...)
-	allErrs = append(allErrs, apivalidation.ValidateImmutableField(update.IPv6, old.IPv6, fldPath.Child("ipv6"))...)
+	if len(cidrConfigSpec.CIDRs) > 2 {
+		allErrs = append(allErrs, field.Invalid(fieldPath, cidrConfigSpec, "may only hold up to 2 values"))
+		return allErrs
+	}
 
+	for i, cidr := range cidrConfigSpec.CIDRs {
+		allErrs = append(allErrs, validation.IsValidCIDR(fieldPath.Index(i), cidr)...)
+	}
+
+	// validate cidrs are dual stack, one of each IP family
+	if len(cidrConfigSpec.CIDRs) == 2 &&
+		netutils.IPFamilyOfCIDRString(cidrConfigSpec.CIDRs[0]) == netutils.IPFamilyOfCIDRString(cidrConfigSpec.CIDRs[1]) &&
+		netutils.IPFamilyOfCIDRString(cidrConfigSpec.CIDRs[0]) != netutils.IPFamilyUnknown {
+		allErrs = append(allErrs, field.Invalid(fieldPath, cidrConfigSpec.CIDRs, "may specify no more than one IP for each IP family, i.e 192.168.0.0/24 and 2001:db8::/64"))
+	}
+
+	return allErrs
+}
+
+// ValidateServiceCIDRUpdate tests if an update to a ServiceCIDR is valid.
+func ValidateServiceCIDRUpdate(update, old *networking.ServiceCIDR) field.ErrorList {
+	var allErrs field.ErrorList
+	allErrs = append(allErrs, apivalidation.ValidateObjectMetaUpdate(&update.ObjectMeta, &old.ObjectMeta, field.NewPath("metadata"))...)
+	switch {
+	// no change in Spec.CIDRs lengths fields must not change
+	case len(old.Spec.CIDRs) == len(update.Spec.CIDRs):
+		for i, ip := range old.Spec.CIDRs {
+			if ip != update.Spec.CIDRs[i] {
+				allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("cidrs").Index(i), update.Spec.CIDRs[i], apimachineryvalidation.FieldImmutableErrorMsg))
+			}
+		}
+		// added a new CIDR is allowed to convert to Dual Stack
+		// ref: https://issues.k8s.io/131261
+	case len(old.Spec.CIDRs) == 1 && len(update.Spec.CIDRs) == 2:
+		// existing CIDR can not change
+		if update.Spec.CIDRs[0] != old.Spec.CIDRs[0] {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("cidrs").Index(0), update.Spec.CIDRs[0], apimachineryvalidation.FieldImmutableErrorMsg))
+		}
+		// validate the new added CIDR
+		allErrs = append(allErrs, validateServiceCIDRSpec(&update.Spec, field.NewPath("spec", "cidrs"))...)
+
+		// no other changes allowed
+	default:
+		allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("cidrs"), update.Spec.CIDRs, apimachineryvalidation.FieldImmutableErrorMsg))
+	}
+	return allErrs
+}
+
+// ValidateServiceCIDRStatusUpdate tests if if an update to a ServiceCIDR Status is valid.
+func ValidateServiceCIDRStatusUpdate(update, old *networking.ServiceCIDR) field.ErrorList {
+	allErrs := apivalidation.ValidateObjectMetaUpdate(&update.ObjectMeta, &old.ObjectMeta, field.NewPath("metadata"))
 	return allErrs
 }

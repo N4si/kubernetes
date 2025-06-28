@@ -17,15 +17,24 @@ limitations under the License.
 package clusterinfo
 
 import (
-	"os"
+	"bytes"
+	"context"
 	"testing"
 	"text/template"
+	"time"
 
+	rbac "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apiserver/pkg/authentication/user"
 	clientsetfake "k8s.io/client-go/kubernetes/fake"
 	core "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/clientcmd"
+	bootstrapapi "k8s.io/cluster-bootstrap/token/api"
+
+	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 )
 
 var testConfigTempl = template.Must(template.New("test").Parse(`apiVersion: v1
@@ -40,7 +49,6 @@ contexts:
   name: kubernetes-admin@kubernetes
 current-context: kubernetes-admin@kubernetes
 kind: Config
-preferences: {}
 users:
 - name: kubernetes-admin`))
 
@@ -48,25 +56,21 @@ func TestCreateBootstrapConfigMapIfNotExists(t *testing.T) {
 	tests := []struct {
 		name      string
 		createErr error
-		updateErr error
 		expectErr bool
 	}{
 		{
 			"successful case should have no error",
 			nil,
-			nil,
 			false,
 		},
 		{
-			"if both create and update errors, return error",
+			"if configmap already exists, return error",
 			apierrors.NewAlreadyExists(schema.GroupResource{Resource: "configmaps"}, "test"),
-			apierrors.NewUnauthorized("go away!"),
 			true,
 		},
 		{
 			"unexpected error should be returned",
 			apierrors.NewUnauthorized("go away!"),
-			nil,
 			true,
 		},
 	}
@@ -79,19 +83,19 @@ func TestCreateBootstrapConfigMapIfNotExists(t *testing.T) {
 	}
 
 	for _, server := range servers {
-		file, err := os.CreateTemp("", "")
-		if err != nil {
-			t.Fatalf("could not create tempfile: %v", err)
-		}
-		defer os.Remove(file.Name())
+		var buf bytes.Buffer
 
-		if err := testConfigTempl.Execute(file, server); err != nil {
+		if err := testConfigTempl.Execute(&buf, server); err != nil {
 			t.Fatalf("could not write to tempfile: %v", err)
 		}
 
-		if err := file.Close(); err != nil {
-			t.Fatalf("could not close tempfile: %v", err)
-		}
+		// Override the default timeouts to be shorter
+		defaultTimeouts := kubeadmapi.GetActiveTimeouts()
+		defaultAPICallTimeout := defaultTimeouts.KubernetesAPICall
+		defaultTimeouts.KubernetesAPICall = &metav1.Duration{Duration: time.Microsecond * 500}
+		defer func() {
+			defaultTimeouts.KubernetesAPICall = defaultAPICallTimeout
+		}()
 
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
@@ -102,7 +106,12 @@ func TestCreateBootstrapConfigMapIfNotExists(t *testing.T) {
 					})
 				}
 
-				err := CreateBootstrapConfigMapIfNotExists(client, file.Name())
+				kubeconfig, err := clientcmd.Load(buf.Bytes())
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				err = CreateBootstrapConfigMapIfNotExists(client, kubeconfig)
 				if tc.expectErr && err == nil {
 					t.Errorf("CreateBootstrapConfigMapIfNotExists(%s) wanted error, got nil", tc.name)
 				} else if !tc.expectErr && err != nil {
@@ -111,4 +120,72 @@ func TestCreateBootstrapConfigMapIfNotExists(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestCreateClusterInfoRBACRules(t *testing.T) {
+	tests := []struct {
+		name   string
+		client *clientsetfake.Clientset
+	}{
+		{
+			name:   "the RBAC rules already exist",
+			client: newMockClientForTest(t),
+		},
+		{
+			name:   "the RBAC rules do not exist",
+			client: clientsetfake.NewSimpleClientset(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := CreateClusterInfoRBACRules(tt.client); err != nil {
+				t.Errorf("CreateClusterInfoRBACRules() hits unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func newMockClientForTest(t *testing.T) *clientsetfake.Clientset {
+	client := clientsetfake.NewSimpleClientset()
+
+	_, err := client.RbacV1().Roles(metav1.NamespacePublic).Create(context.TODO(), &rbac.Role{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      BootstrapSignerClusterRoleName,
+			Namespace: metav1.NamespacePublic,
+		},
+		Rules: []rbac.PolicyRule{
+			{
+				Verbs:         []string{"get"},
+				APIGroups:     []string{""},
+				Resources:     []string{"Secret"},
+				ResourceNames: []string{bootstrapapi.ConfigMapClusterInfo},
+			},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("error creating role: %v", err)
+	}
+
+	_, err = client.RbacV1().RoleBindings(metav1.NamespacePublic).Create(context.TODO(), &rbac.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      BootstrapSignerClusterRoleName,
+			Namespace: metav1.NamespacePublic,
+		},
+		RoleRef: rbac.RoleRef{
+			APIGroup: rbac.GroupName,
+			Kind:     "Role",
+			Name:     BootstrapSignerClusterRoleName,
+		},
+		Subjects: []rbac.Subject{
+			{
+				Kind: rbac.UserKind,
+				Name: user.Anonymous,
+			},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("error creating rolebinding: %v", err)
+	}
+
+	return client
 }

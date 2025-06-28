@@ -20,12 +20,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
-	"github.com/docker/distribution/reference"
+	"github.com/distribution/reference"
 	"github.com/spf13/cobra"
-	"k8s.io/klog/v2"
-	"k8s.io/utils/pointer"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -38,12 +37,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/cli-runtime/pkg/resource"
 	"k8s.io/client-go/kubernetes"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	watchtools "k8s.io/client-go/tools/watch"
+	"k8s.io/klog/v2"
 	"k8s.io/kubectl/pkg/cmd/attach"
 	"k8s.io/kubectl/pkg/cmd/exec"
 	"k8s.io/kubectl/pkg/cmd/logs"
@@ -54,6 +55,8 @@ import (
 	"k8s.io/kubectl/pkg/util/interrupt"
 	"k8s.io/kubectl/pkg/util/templates"
 	"k8s.io/kubectl/pkg/util/term"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/yaml"
 )
 
 var (
@@ -72,6 +75,9 @@ var (
 		            debugging utilities without restarting the pod.
 		* Node: Create a new pod that runs in the node's host namespaces and can access
 		        the node's filesystem.
+
+		Note: When a non-root user is configured for the entire target Pod, some capabilities granted 
+		by debug profile may not work.
 `))
 
 	debugExample = templates.Examples(i18n.T(`
@@ -105,28 +111,39 @@ var (
 
 var nameSuffixFunc = utilrand.String
 
+type DebugAttachFunc func(ctx context.Context, restClientGetter genericclioptions.RESTClientGetter, cmdPath string, ns, podName, containerName string) error
+
 // DebugOptions holds the options for an invocation of kubectl debug.
 type DebugOptions struct {
-	Args            []string
-	ArgsOnly        bool
-	Attach          bool
-	Container       string
-	CopyTo          string
-	Replace         bool
-	Env             []corev1.EnvVar
-	Image           string
-	Interactive     bool
-	Namespace       string
-	TargetNames     []string
-	PullPolicy      corev1.PullPolicy
-	Quiet           bool
-	SameNode        bool
-	SetImages       map[string]string
-	ShareProcesses  bool
-	TargetContainer string
-	TTY             bool
-	Profile         string
-	Applier         ProfileApplier
+	Args               []string
+	ArgsOnly           bool
+	Attach             bool
+	AttachFunc         DebugAttachFunc
+	Container          string
+	CopyTo             string
+	Replace            bool
+	Env                []corev1.EnvVar
+	Image              string
+	Interactive        bool
+	KeepLabels         bool
+	KeepAnnotations    bool
+	KeepLiveness       bool
+	KeepReadiness      bool
+	KeepStartup        bool
+	KeepInitContainers bool
+	Namespace          string
+	TargetNames        []string
+	PullPolicy         corev1.PullPolicy
+	Quiet              bool
+	SameNode           bool
+	SetImages          map[string]string
+	ShareProcesses     bool
+	TargetContainer    string
+	TTY                bool
+	Profile            string
+	CustomProfileFile  string
+	CustomProfile      *corev1.Container
+	Applier            ProfileApplier
 
 	explicitNamespace     bool
 	attachChanged         bool
@@ -135,24 +152,25 @@ type DebugOptions struct {
 	podClient corev1client.CoreV1Interface
 
 	Builder *resource.Builder
-	genericclioptions.IOStreams
+	genericiooptions.IOStreams
 	WarningPrinter *printers.WarningPrinter
 
 	resource.FilenameOptions
 }
 
 // NewDebugOptions returns a DebugOptions initialized with default values.
-func NewDebugOptions(streams genericclioptions.IOStreams) *DebugOptions {
+func NewDebugOptions(streams genericiooptions.IOStreams) *DebugOptions {
 	return &DebugOptions{
-		Args:           []string{},
-		IOStreams:      streams,
-		TargetNames:    []string{},
-		ShareProcesses: true,
+		Args:               []string{},
+		IOStreams:          streams,
+		KeepInitContainers: true,
+		TargetNames:        []string{},
+		ShareProcesses:     true,
 	}
 }
 
 // NewCmdDebug returns a cobra command that runs kubectl debug.
-func NewCmdDebug(restClientGetter genericclioptions.RESTClientGetter, streams genericclioptions.IOStreams) *cobra.Command {
+func NewCmdDebug(restClientGetter genericclioptions.RESTClientGetter, streams genericiooptions.IOStreams) *cobra.Command {
 	o := NewDebugOptions(streams)
 
 	cmd := &cobra.Command{
@@ -182,6 +200,12 @@ func (o *DebugOptions) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&o.Replace, "replace", o.Replace, i18n.T("When used with '--copy-to', delete the original Pod."))
 	cmd.Flags().StringToString("env", nil, i18n.T("Environment variables to set in the container."))
 	cmd.Flags().StringVar(&o.Image, "image", o.Image, i18n.T("Container image to use for debug container."))
+	cmd.Flags().BoolVar(&o.KeepLabels, "keep-labels", o.KeepLabels, i18n.T("If true, keep the original pod labels.(This flag only works when used with '--copy-to')"))
+	cmd.Flags().BoolVar(&o.KeepAnnotations, "keep-annotations", o.KeepAnnotations, i18n.T("If true, keep the original pod annotations.(This flag only works when used with '--copy-to')"))
+	cmd.Flags().BoolVar(&o.KeepLiveness, "keep-liveness", o.KeepLiveness, i18n.T("If true, keep the original pod liveness probes.(This flag only works when used with '--copy-to')"))
+	cmd.Flags().BoolVar(&o.KeepReadiness, "keep-readiness", o.KeepReadiness, i18n.T("If true, keep the original pod readiness probes.(This flag only works when used with '--copy-to')"))
+	cmd.Flags().BoolVar(&o.KeepStartup, "keep-startup", o.KeepStartup, i18n.T("If true, keep the original startup probes.(This flag only works when used with '--copy-to')"))
+	cmd.Flags().BoolVar(&o.KeepInitContainers, "keep-init-containers", o.KeepInitContainers, i18n.T("Run the init containers for the pod. Defaults to true.(This flag only works when used with '--copy-to')"))
 	cmd.Flags().StringToStringVar(&o.SetImages, "set-image", o.SetImages, i18n.T("When used with '--copy-to', a list of name=image pairs for changing container images, similar to how 'kubectl set image' works."))
 	cmd.Flags().String("image-pull-policy", "", i18n.T("The image pull policy for the container. If left empty, this value will not be specified by the client and defaulted by the server."))
 	cmd.Flags().BoolVarP(&o.Interactive, "stdin", "i", o.Interactive, i18n.T("Keep stdin open on the container(s) in the pod, even if nothing is attached."))
@@ -190,7 +214,8 @@ func (o *DebugOptions) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&o.ShareProcesses, "share-processes", o.ShareProcesses, i18n.T("When used with '--copy-to', enable process namespace sharing in the copy."))
 	cmd.Flags().StringVar(&o.TargetContainer, "target", "", i18n.T("When using an ephemeral container, target processes in this container name."))
 	cmd.Flags().BoolVarP(&o.TTY, "tty", "t", o.TTY, i18n.T("Allocate a TTY for the debugging container."))
-	cmd.Flags().StringVar(&o.Profile, "profile", ProfileLegacy, i18n.T(`Debugging profile. Options are "legacy", "general", "baseline", "netadmin", or "restricted".`))
+	cmd.Flags().StringVar(&o.Profile, "profile", ProfileLegacy, i18n.T(`Options are "legacy", "general", "baseline", "netadmin", "restricted" or "sysadmin".`))
+	cmd.Flags().StringVar(&o.CustomProfileFile, "custom", o.CustomProfileFile, i18n.T("Path to a JSON or YAML file containing a partial container spec to customize built-in debug profiles."))
 }
 
 // Complete finishes run-time initialization of debug.DebugOptions.
@@ -211,6 +236,15 @@ func (o *DebugOptions) Complete(restClientGetter genericclioptions.RESTClientGet
 	attachFlag := cmd.Flags().Lookup("attach")
 	if !attachFlag.Changed && o.Interactive {
 		o.Attach = true
+	}
+
+	// Downstream tools may want to use their own customized
+	// attach function to do extra work or use attach command
+	// with different flags instead of the static one defined in
+	// handleAttachPod. But if this function is not set explicitly,
+	// we fall back to default.
+	if o.AttachFunc == nil {
+		o.AttachFunc = o.handleAttachPod
 	}
 
 	// Environment
@@ -238,11 +272,34 @@ func (o *DebugOptions) Complete(restClientGetter genericclioptions.RESTClientGet
 	}
 
 	if o.Applier == nil {
-		applier, err := NewProfileApplier(o.Profile)
+		kflags := KeepFlags{
+			Labels:         o.KeepLabels,
+			Annotations:    o.KeepAnnotations,
+			Liveness:       o.KeepLiveness,
+			Readiness:      o.KeepReadiness,
+			Startup:        o.KeepStartup,
+			InitContainers: o.KeepInitContainers,
+		}
+		applier, err := NewProfileApplier(o.Profile, kflags)
 		if err != nil {
 			return err
 		}
 		o.Applier = applier
+	}
+
+	if o.CustomProfileFile != "" {
+		customProfileBytes, err := os.ReadFile(o.CustomProfileFile)
+		if err != nil {
+			return fmt.Errorf("must pass a container spec json file for custom profile: %w", err)
+		}
+
+		err = json.Unmarshal(customProfileBytes, &o.CustomProfile)
+		if err != nil {
+			err = yaml.Unmarshal(customProfileBytes, &o.CustomProfile)
+			if err != nil {
+				return fmt.Errorf("%s does not contain a valid container spec: %w", o.CustomProfileFile, err)
+			}
+		}
 	}
 
 	clientConfig, err := restClientGetter.ToRESTConfig()
@@ -337,6 +394,17 @@ func (o *DebugOptions) Validate() error {
 		return fmt.Errorf("WarningPrinter can not be used without initialization")
 	}
 
+	if o.CustomProfile != nil {
+		if o.CustomProfile.Name != "" || len(o.CustomProfile.Command) > 0 || o.CustomProfile.Image != "" || o.CustomProfile.Lifecycle != nil || len(o.CustomProfile.VolumeDevices) > 0 {
+			return fmt.Errorf("name, command, image, lifecycle and volume devices are not modifiable via custom profile")
+		}
+	}
+
+	// Warning for legacy profile
+	if o.Profile == ProfileLegacy {
+		fmt.Fprintln(o.ErrOut, `--profile=legacy is deprecated and will be removed in the future. It is recommended to explicitly specify a profile, for example "--profile=general".`)
+	}
+
 	return nil
 }
 
@@ -376,26 +444,8 @@ func (o *DebugOptions) Run(restClientGetter genericclioptions.RESTClientGetter, 
 			return visitErr
 		}
 
-		if o.Attach && len(containerName) > 0 {
-			opts := &attach.AttachOptions{
-				StreamOptions: exec.StreamOptions{
-					IOStreams: o.IOStreams,
-					Stdin:     o.Interactive,
-					TTY:       o.TTY,
-					Quiet:     o.Quiet,
-				},
-				CommandName: cmd.Parent().CommandPath() + " attach",
-
-				Attach: &attach.DefaultRemoteAttach{},
-			}
-			config, err := restClientGetter.ToRESTConfig()
-			if err != nil {
-				return err
-			}
-			opts.Config = config
-			opts.AttachFunc = attach.DefaultAttachFunc
-
-			if err := o.handleAttachPod(ctx, restClientGetter, debugPod.Namespace, debugPod.Name, containerName, opts); err != nil {
+		if o.Attach && len(containerName) > 0 && o.AttachFunc != nil {
+			if err := o.AttachFunc(ctx, restClientGetter, cmd.Parent().CommandPath(), debugPod.Namespace, debugPod.Name, containerName); err != nil {
 				return err
 			}
 		}
@@ -448,6 +498,8 @@ func (o *DebugOptions) debugByEphemeralContainer(ctx context.Context, pod *corev
 	}
 	klog.V(2).Infof("new ephemeral container: %#v", debugContainer)
 
+	o.displayWarning((*corev1.Container)(&debugContainer.EphemeralContainerCommon), pod)
+
 	debugJS, err := json.Marshal(debugPod)
 	if err != nil {
 		return nil, "", fmt.Errorf("error creating JSON for debug container: %v", err)
@@ -468,51 +520,94 @@ func (o *DebugOptions) debugByEphemeralContainer(ctx context.Context, pod *corev
 			return nil, "", fmt.Errorf("ephemeral containers are disabled for this cluster (error from server: %q)", err)
 		}
 
-		// The Kind used for the /ephemeralcontainers subresource changed in 1.22. When presented with an unexpected
-		// Kind the api server will respond with a not-registered error. When this happens we can optimistically try
-		// using the old API.
-		if runtime.IsNotRegisteredError(err) {
-			klog.V(1).Infof("Falling back to legacy API because server returned error: %v", err)
-			return o.debugByEphemeralContainerLegacy(ctx, pod, debugContainer)
-		}
-
 		return nil, "", err
 	}
 
 	return result, debugContainer.Name, nil
 }
 
-// debugByEphemeralContainerLegacy adds debugContainer as an ephemeral container using the pre-1.22 /ephemeralcontainers API
-// This may be removed when we no longer wish to support releases prior to 1.22.
-func (o *DebugOptions) debugByEphemeralContainerLegacy(ctx context.Context, pod *corev1.Pod, debugContainer *corev1.EphemeralContainer) (*corev1.Pod, string, error) {
-	// We no longer have the v1.EphemeralContainers Kind since it was removed in 1.22, but
-	// we can present a JSON 6902 patch that the api server will apply.
-	patch, err := json.Marshal([]map[string]interface{}{{
-		"op":    "add",
-		"path":  "/ephemeralContainers/-",
-		"value": debugContainer,
-	}})
+// applyCustomProfile applies given partial container json file on to the profile
+// incorporated debug pod.
+func (o *DebugOptions) applyCustomProfile(debugPod *corev1.Pod, containerName string) error {
+	o.CustomProfile.Name = containerName
+	customJS, err := json.Marshal(o.CustomProfile)
 	if err != nil {
-		return nil, "", fmt.Errorf("error creating JSON 6902 patch for old /ephemeralcontainers API: %s", err)
+		return fmt.Errorf("unable to marshall custom profile: %w", err)
 	}
 
-	result := o.podClient.RESTClient().Patch(types.JSONPatchType).
-		Namespace(pod.Namespace).
-		Resource("pods").
-		Name(pod.Name).
-		SubResource("ephemeralcontainers").
-		Body(patch).
-		Do(ctx)
-	if err := result.Error(); err != nil {
-		return nil, "", err
+	var index int
+	found := false
+	for i, val := range debugPod.Spec.Containers {
+		if val.Name == containerName {
+			index = i
+			found = true
+			break
+		}
 	}
 
-	newPod, err := o.podClient.Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if !found {
+		return fmt.Errorf("unable to find the %s container in the pod %s", containerName, debugPod.Name)
+	}
+
+	var debugContainerJS []byte
+	debugContainerJS, err = json.Marshal(debugPod.Spec.Containers[index])
 	if err != nil {
-		return nil, "", err
+		return fmt.Errorf("unable to marshall container: %w", err)
 	}
 
-	return newPod, debugContainer.Name, nil
+	patchedContainer, err := strategicpatch.StrategicMergePatch(debugContainerJS, customJS, corev1.Container{})
+	if err != nil {
+		return fmt.Errorf("error creating three way patch to add debug container: %w", err)
+	}
+
+	err = json.Unmarshal(patchedContainer, &debugPod.Spec.Containers[index])
+	if err != nil {
+		return fmt.Errorf("unable to unmarshall patched container to container: %w", err)
+	}
+
+	return nil
+}
+
+// applyCustomProfileEphemeral applies given partial container json file on to the profile
+// incorporated ephemeral container of the pod.
+func (o *DebugOptions) applyCustomProfileEphemeral(debugPod *corev1.Pod, containerName string) error {
+	o.CustomProfile.Name = containerName
+	customJS, err := json.Marshal(o.CustomProfile)
+	if err != nil {
+		return fmt.Errorf("unable to marshall custom profile: %w", err)
+	}
+
+	var index int
+	found := false
+	for i, val := range debugPod.Spec.EphemeralContainers {
+		if val.Name == containerName {
+			index = i
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("unable to find the %s ephemeral container in the pod %s", containerName, debugPod.Name)
+	}
+
+	var debugContainerJS []byte
+	debugContainerJS, err = json.Marshal(debugPod.Spec.EphemeralContainers[index])
+	if err != nil {
+		return fmt.Errorf("unable to marshall ephemeral container:%w", err)
+	}
+
+	patchedContainer, err := strategicpatch.StrategicMergePatch(debugContainerJS, customJS, corev1.Container{})
+	if err != nil {
+		return fmt.Errorf("error creating three way patch to add debug container: %w", err)
+	}
+
+	err = json.Unmarshal(patchedContainer, &debugPod.Spec.EphemeralContainers[index])
+	if err != nil {
+		return fmt.Errorf("unable to unmarshall patched container to ephemeral container: %w", err)
+	}
+
+	return nil
 }
 
 // debugByCopy runs a copy of the target Pod with a debug container added or an original container modified
@@ -521,6 +616,16 @@ func (o *DebugOptions) debugByCopy(ctx context.Context, pod *corev1.Pod) (*corev
 	if err != nil {
 		return nil, "", err
 	}
+
+	var debugContainer *corev1.Container
+	for i := range copied.Spec.Containers {
+		if copied.Spec.Containers[i].Name == dc {
+			debugContainer = &copied.Spec.Containers[i]
+			break
+		}
+	}
+	o.displayWarning(debugContainer, copied)
+
 	created, err := o.podClient.Pods(copied.Namespace).Create(ctx, copied, metav1.CreateOptions{})
 	if err != nil {
 		return nil, "", err
@@ -532,6 +637,32 @@ func (o *DebugOptions) debugByCopy(ctx context.Context, pod *corev1.Pod) (*corev
 		}
 	}
 	return created, dc, nil
+}
+
+// Display warning message if some capabilities are set by profile and non-root user is specified in .Spec.SecurityContext.RunAsUser.(#1650)
+func (o *DebugOptions) displayWarning(container *corev1.Container, pod *corev1.Pod) {
+	if container == nil {
+		return
+	}
+
+	if pod.Spec.SecurityContext.RunAsUser == nil || *pod.Spec.SecurityContext.RunAsUser == 0 {
+		return
+	}
+
+	if container.SecurityContext == nil {
+		return
+	}
+
+	if container.SecurityContext.RunAsUser != nil && *container.SecurityContext.RunAsUser == 0 {
+		return
+	}
+
+	if (container.SecurityContext.Privileged == nil || !*container.SecurityContext.Privileged) &&
+		(container.SecurityContext.Capabilities == nil || len(container.SecurityContext.Capabilities.Add) == 0) {
+		return
+	}
+
+	_, _ = fmt.Fprintln(o.ErrOut, `Warning: Non-root user is configured for the entire target Pod, and some capabilities granted by debug profile may not work. Please consider using "--custom" with a custom profile that specifies "securityContext.runAsUser: 0".`)
 }
 
 // generateDebugContainer returns a debugging pod and an EphemeralContainer suitable for use as a debug container
@@ -561,6 +692,13 @@ func (o *DebugOptions) generateDebugContainer(pod *corev1.Pod) (*corev1.Pod, *co
 	copied.Spec.EphemeralContainers = append(copied.Spec.EphemeralContainers, *ec)
 	if err := o.Applier.Apply(copied, name, copied); err != nil {
 		return nil, nil, err
+	}
+
+	if o.CustomProfile != nil {
+		err := o.applyCustomProfileEphemeral(copied, ec.Name)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	ec = &copied.Spec.EphemeralContainers[len(copied.Spec.EphemeralContainers)-1]
@@ -622,6 +760,13 @@ func (o *DebugOptions) generateNodeDebugPod(node *corev1.Node) (*corev1.Pod, err
 		return nil, err
 	}
 
+	if o.CustomProfile != nil {
+		err := o.applyCustomProfile(p, cn)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return p, nil
 }
 
@@ -632,6 +777,7 @@ func (o *DebugOptions) generatePodCopyWithDebugContainer(pod *corev1.Pod) (*core
 			Name:        o.CopyTo,
 			Namespace:   pod.Namespace,
 			Annotations: pod.Annotations,
+			Labels:      pod.Labels,
 		},
 		Spec: *pod.Spec.DeepCopy(),
 	}
@@ -639,7 +785,7 @@ func (o *DebugOptions) generatePodCopyWithDebugContainer(pod *corev1.Pod) (*core
 	copied.Spec.EphemeralContainers = nil
 	// change ShareProcessNamespace configuration only when commanded explicitly
 	if o.shareProcessedChanged {
-		copied.Spec.ShareProcessNamespace = pointer.Bool(o.ShareProcesses)
+		copied.Spec.ShareProcessNamespace = ptr.To(o.ShareProcesses)
 	}
 	if !o.SameNode {
 		copied.Spec.NodeName = ""
@@ -702,6 +848,13 @@ func (o *DebugOptions) generatePodCopyWithDebugContainer(pod *corev1.Pod) (*core
 	err := o.Applier.Apply(copied, c.Name, pod)
 	if err != nil {
 		return nil, "", err
+	}
+
+	if o.CustomProfile != nil {
+		err = o.applyCustomProfile(copied, name)
+		if err != nil {
+			return nil, "", err
+		}
 	}
 
 	return copied, name, nil
@@ -794,7 +947,25 @@ func (o *DebugOptions) waitForContainer(ctx context.Context, ns, podName, contai
 	return result, err
 }
 
-func (o *DebugOptions) handleAttachPod(ctx context.Context, restClientGetter genericclioptions.RESTClientGetter, ns, podName, containerName string, opts *attach.AttachOptions) error {
+func (o *DebugOptions) handleAttachPod(ctx context.Context, restClientGetter genericclioptions.RESTClientGetter, cmdPath string, ns, podName, containerName string) error {
+	opts := &attach.AttachOptions{
+		StreamOptions: exec.StreamOptions{
+			IOStreams: o.IOStreams,
+			Stdin:     o.Interactive,
+			TTY:       o.TTY,
+			Quiet:     o.Quiet,
+		},
+		CommandName: cmdPath + " attach",
+
+		Attach: &attach.DefaultRemoteAttach{},
+	}
+	config, err := restClientGetter.ToRESTConfig()
+	if err != nil {
+		return err
+	}
+	opts.Config = config
+	opts.AttachFunc = attach.DefaultAttachFunc
+
 	pod, err := o.waitForContainer(ctx, ns, podName, containerName)
 	if err != nil {
 		return err
@@ -815,12 +986,12 @@ func (o *DebugOptions) handleAttachPod(ctx context.Context, restClientGetter gen
 	}
 	if status.State.Terminated != nil {
 		klog.V(1).Info("Ephemeral container terminated, falling back to logs")
-		return logOpts(restClientGetter, pod, opts)
+		return logOpts(ctx, restClientGetter, pod, opts)
 	}
 
 	if err := opts.Run(); err != nil {
 		fmt.Fprintf(opts.ErrOut, "warning: couldn't attach to pod/%s, falling back to streaming logs: %v\n", podName, err)
-		return logOpts(restClientGetter, pod, opts)
+		return logOpts(ctx, restClientGetter, pod, opts)
 	}
 	return nil
 }
@@ -838,7 +1009,7 @@ func getContainerStatusByName(pod *corev1.Pod, containerName string) *corev1.Con
 }
 
 // logOpts logs output from opts to the pods log.
-func logOpts(restClientGetter genericclioptions.RESTClientGetter, pod *corev1.Pod, opts *attach.AttachOptions) error {
+func logOpts(ctx context.Context, restClientGetter genericclioptions.RESTClientGetter, pod *corev1.Pod, opts *attach.AttachOptions) error {
 	ctrName, err := opts.GetContainerName(pod)
 	if err != nil {
 		return err
@@ -849,7 +1020,7 @@ func logOpts(restClientGetter genericclioptions.RESTClientGetter, pod *corev1.Po
 		return err
 	}
 	for _, request := range requests {
-		if err := logs.DefaultConsumeRequest(request, opts.Out); err != nil {
+		if err := logs.DefaultConsumeRequest(ctx, request, opts.Out); err != nil {
 			return err
 		}
 	}

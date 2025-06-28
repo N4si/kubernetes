@@ -21,9 +21,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"k8s.io/utils/exec"
-	fakeexec "k8s.io/utils/exec/testing"
-
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/preflight"
 )
@@ -68,6 +65,7 @@ func TestConfigDirCleaner(t *testing.T) {
 				"manifests/kube-apiserver.yaml",
 				"pki/ca.pem",
 				kubeadmconstants.AdminKubeConfigFileName,
+				kubeadmconstants.SuperAdminKubeConfigFileName,
 				kubeadmconstants.KubeletKubeConfigFileName,
 			},
 			verifyExists: []string{
@@ -187,7 +185,7 @@ func TestConfigDirCleaner(t *testing.T) {
 			dirsToClean := []string{
 				filepath.Join(tmpDir, test.resetDir),
 				filepath.Join(tmpDir, kubeadmconstants.ManifestsSubDirName),
-				filepath.Join(tmpDir, kubeadmconstants.TempDirForKubeadm),
+				filepath.Join(tmpDir, kubeadmconstants.TempDir),
 			}
 			resetConfigDir(tmpDir, dirsToClean, false)
 
@@ -210,28 +208,4 @@ func TestConfigDirCleaner(t *testing.T) {
 			os.RemoveAll(tmpDir)
 		})
 	}
-}
-
-func TestRemoveContainers(t *testing.T) {
-	fcmd := fakeexec.FakeCmd{
-		CombinedOutputScript: []fakeexec.FakeAction{
-			func() ([]byte, []byte, error) { return []byte("id1\nid2"), nil, nil },
-			func() ([]byte, []byte, error) { return []byte(""), nil, nil },
-			func() ([]byte, []byte, error) { return []byte(""), nil, nil },
-			func() ([]byte, []byte, error) { return []byte(""), nil, nil },
-			func() ([]byte, []byte, error) { return []byte(""), nil, nil },
-		},
-	}
-	fexec := &fakeexec.FakeExec{
-		CommandScript: []fakeexec.FakeCommandAction{
-			func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
-			func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
-			func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
-			func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
-			func(cmd string, args ...string) exec.Cmd { return fakeexec.InitFakeCmd(&fcmd, cmd, args...) },
-		},
-		LookPathFunc: func(cmd string) (string, error) { return "/usr/bin/crictl", nil },
-	}
-
-	removeContainers(fexec, "unix:///var/run/crio/crio.sock")
 }

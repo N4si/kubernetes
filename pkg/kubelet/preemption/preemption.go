@@ -23,6 +23,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/api/v1/resource"
 	v1qos "k8s.io/kubernetes/pkg/apis/core/v1/helper/qos"
 	"k8s.io/kubernetes/pkg/kubelet/events"
@@ -98,11 +99,18 @@ func (c *CriticalPodAdmissionHandler) evictPodsToFreeRequests(admitPod *v1.Pod, 
 		// record that we are evicting the pod
 		c.recorder.Eventf(pod, v1.EventTypeWarning, events.PreemptContainer, message)
 		// this is a blocking call and should only return when the pod and its containers are killed.
-		klog.V(3).InfoS("Preempting pod to free up resources", "pod", klog.KObj(pod), "podUID", pod.UID, "insufficientResources", insufficientResources)
+		klog.V(3).InfoS("Preempting pod to free up resources", "pod", klog.KObj(pod), "podUID", pod.UID, "insufficientResources", insufficientResources.toString())
 		err := c.killPodFunc(pod, true, nil, func(status *v1.PodStatus) {
 			status.Phase = v1.PodFailed
 			status.Reason = events.PreemptContainer
 			status.Message = message
+			podutil.UpdatePodCondition(status, &v1.PodCondition{
+				Type:               v1.DisruptionTarget,
+				ObservedGeneration: podutil.CalculatePodConditionObservedGeneration(status, pod.Generation, v1.DisruptionTarget),
+				Status:             v1.ConditionTrue,
+				Reason:             v1.PodReasonTerminationByKubelet,
+				Message:            "Pod was preempted by Kubelet to accommodate a critical pod.",
+			})
 		})
 		if err != nil {
 			klog.ErrorS(err, "Failed to evict pod", "pod", klog.KObj(pod))

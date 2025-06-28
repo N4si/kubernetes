@@ -48,6 +48,13 @@ func (kl *Kubelet) getRootDir() string {
 	return kl.rootDirectory
 }
 
+// getPodLogsDir returns the full path to the directory that kubelet can use
+// to store pod's log files. This defaults to /var/log/pods if not specified
+// otherwise in the config file.
+func (kl *Kubelet) getPodLogsDir() string {
+	return kl.podLogsDirectory
+}
+
 // getPodsDir returns the full path to the directory under which pod
 // directories are created.
 func (kl *Kubelet) getPodsDir() string {
@@ -102,6 +109,50 @@ func (kl *Kubelet) getVolumeDevicePluginDir(pluginName string) string {
 // specified pod. This directory may not exist if the pod does not exist.
 func (kl *Kubelet) GetPodDir(podUID types.UID) string {
 	return kl.getPodDir(podUID)
+}
+
+// ListPodsFromDisk gets a list of pods that have data directories.
+func (kl *Kubelet) ListPodsFromDisk() ([]types.UID, error) {
+	return kl.listPodsFromDisk()
+}
+
+// HandlerSupportsUserNamespaces checks whether the specified handler supports
+// user namespaces.
+func (kl *Kubelet) HandlerSupportsUserNamespaces(rtHandler string) (bool, error) {
+	rtHandlers := kl.runtimeState.runtimeHandlers()
+	if len(rtHandlers) == 0 {
+		// The slice is empty if the runtime is old and doesn't support this message.
+		return false, nil
+	}
+	for _, h := range rtHandlers {
+		if h.Name == rtHandler {
+			return h.SupportsUserNamespaces, nil
+		}
+	}
+	return false, fmt.Errorf("the handler %q is not known", rtHandler)
+}
+
+// GetKubeletMappings gets the additional IDs allocated for the Kubelet.
+func (kl *Kubelet) GetKubeletMappings() (uint32, uint32, error) {
+	return kl.getKubeletMappings()
+}
+
+func (kl *Kubelet) GetMaxPods() int {
+	return kl.maxPods
+}
+
+func (kl *Kubelet) GetUserNamespacesIDsPerPod() uint32 {
+	userNs := kl.kubeletConfiguration.UserNamespaces
+	if userNs == nil {
+		return config.DefaultKubeletUserNamespacesIDsPerPod
+	}
+	idsPerPod := userNs.IDsPerPod
+	if idsPerPod == nil || *idsPerPod == 0 {
+		return config.DefaultKubeletUserNamespacesIDsPerPod
+	}
+	// The value is already validated to be <= MaxUint32,
+	// so we can safely drop the upper bits.
+	return uint32(*idsPerPod)
 }
 
 // getPodDir returns the full path to the per-pod directory for the pod with
@@ -174,13 +225,16 @@ func (kl *Kubelet) getPodResourcesDir() string {
 // pods.
 func (kl *Kubelet) GetPods() []*v1.Pod {
 	pods := kl.podManager.GetPods()
-	// a kubelet running without apiserver requires an additional
-	// update of the static pod status. See #57106
-	for _, p := range pods {
+	for i, p := range pods {
+		// Pod cache does not get updated status for static pods.
+		// TODO(tallclair): Most callers of GetPods() do not need pod status. We should either parameterize this,
+		// or move the status injection to only the callers that do need it (maybe just the /pods http handler?).
 		if kubelettypes.IsStaticPod(p) {
 			if status, ok := kl.statusManager.GetPodStatus(p.UID); ok {
-				klog.V(2).InfoS("Pod status updated", "pod", klog.KObj(p), "status", status.Phase)
+				// do not mutate the cache
+				p = p.DeepCopy()
 				p.Status = status
+				pods[i] = p
 			}
 		}
 	}
@@ -224,11 +278,6 @@ func (kl *Kubelet) GetPodByCgroupfs(cgroupfs string) (*v1.Pod, bool) {
 		return kl.podManager.GetPodByUID(podUID)
 	}
 	return nil, false
-}
-
-// GetHostname Returns the hostname as the kubelet sees it.
-func (kl *Kubelet) GetHostname() string {
-	return kl.hostname
 }
 
 // getRuntime returns the current Runtime implementation in use by the kubelet.
@@ -426,4 +475,14 @@ func (kl *Kubelet) setCachedMachineInfo(info *cadvisorapiv1.MachineInfo) {
 	kl.machineInfoLock.Lock()
 	defer kl.machineInfoLock.Unlock()
 	kl.machineInfo = info
+}
+
+// getLastStableNodeAddresses returns the last observed node addresses.
+func (kl *Kubelet) getLastObservedNodeAddresses() []v1.NodeAddress {
+	node, err := kl.GetNode()
+	if err != nil || node == nil {
+		klog.V(4).InfoS("fail to obtain node from local cache", "node", kl.nodeName, "error", err)
+		return nil
+	}
+	return node.Status.Addresses
 }

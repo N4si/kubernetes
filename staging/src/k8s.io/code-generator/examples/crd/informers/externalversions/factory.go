@@ -28,8 +28,10 @@ import (
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
 	versioned "k8s.io/code-generator/examples/crd/clientset/versioned"
+	conflicting "k8s.io/code-generator/examples/crd/informers/externalversions/conflicting"
 	example "k8s.io/code-generator/examples/crd/informers/externalversions/example"
 	example2 "k8s.io/code-generator/examples/crd/informers/externalversions/example2"
+	extensions "k8s.io/code-generator/examples/crd/informers/externalversions/extensions"
 	internalinterfaces "k8s.io/code-generator/examples/crd/informers/externalversions/internalinterfaces"
 )
 
@@ -43,6 +45,7 @@ type sharedInformerFactory struct {
 	lock             sync.Mutex
 	defaultResync    time.Duration
 	customResync     map[reflect.Type]time.Duration
+	transform        cache.TransformFunc
 
 	informers map[reflect.Type]cache.SharedIndexInformer
 	// startedInformers is used for tracking which informers have been started.
@@ -77,6 +80,14 @@ func WithTweakListOptions(tweakListOptions internalinterfaces.TweakListOptionsFu
 func WithNamespace(namespace string) SharedInformerOption {
 	return func(factory *sharedInformerFactory) *sharedInformerFactory {
 		factory.namespace = namespace
+		return factory
+	}
+}
+
+// WithTransform sets a transform on all informers.
+func WithTransform(transform cache.TransformFunc) SharedInformerOption {
+	return func(factory *sharedInformerFactory) *sharedInformerFactory {
+		factory.transform = transform
 		return factory
 	}
 }
@@ -167,7 +178,7 @@ func (f *sharedInformerFactory) WaitForCacheSync(stopCh <-chan struct{}) map[ref
 	return res
 }
 
-// InternalInformerFor returns the SharedIndexInformer for obj using an internal
+// InformerFor returns the SharedIndexInformer for obj using an internal
 // client.
 func (f *sharedInformerFactory) InformerFor(obj runtime.Object, newFunc internalinterfaces.NewInformerFunc) cache.SharedIndexInformer {
 	f.lock.Lock()
@@ -185,6 +196,7 @@ func (f *sharedInformerFactory) InformerFor(obj runtime.Object, newFunc internal
 	}
 
 	informer = newFunc(f.client, resyncPeriod)
+	informer.SetTransform(f.transform)
 	f.informers[informerType] = informer
 
 	return informer
@@ -219,6 +231,7 @@ type SharedInformerFactory interface {
 
 	// Start initializes all requested informers. They are handled in goroutines
 	// which run until the stop channel gets closed.
+	// Warning: Start does not block. When run in a go-routine, it will race with a later WaitForCacheSync.
 	Start(stopCh <-chan struct{})
 
 	// Shutdown marks a factory as shutting down. At that point no new
@@ -240,12 +253,18 @@ type SharedInformerFactory interface {
 	// ForResource gives generic access to a shared informer of the matching type.
 	ForResource(resource schema.GroupVersionResource) (GenericInformer, error)
 
-	// InternalInformerFor returns the SharedIndexInformer for obj using an internal
+	// InformerFor returns the SharedIndexInformer for obj using an internal
 	// client.
 	InformerFor(obj runtime.Object, newFunc internalinterfaces.NewInformerFunc) cache.SharedIndexInformer
 
+	ConflictingExample() conflicting.Interface
 	Example() example.Interface
 	SecondExample() example2.Interface
+	ExtensionsExample() extensions.Interface
+}
+
+func (f *sharedInformerFactory) ConflictingExample() conflicting.Interface {
+	return conflicting.New(f, f.namespace, f.tweakListOptions)
 }
 
 func (f *sharedInformerFactory) Example() example.Interface {
@@ -254,4 +273,8 @@ func (f *sharedInformerFactory) Example() example.Interface {
 
 func (f *sharedInformerFactory) SecondExample() example2.Interface {
 	return example2.New(f, f.namespace, f.tweakListOptions)
+}
+
+func (f *sharedInformerFactory) ExtensionsExample() extensions.Interface {
+	return extensions.New(f, f.namespace, f.tweakListOptions)
 }

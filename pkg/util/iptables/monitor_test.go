@@ -41,17 +41,17 @@ import (
 type monitorFakeExec struct {
 	sync.Mutex
 
-	tables map[string]sets.String
+	tables map[string]sets.Set[string]
 
 	block      bool
 	wasBlocked bool
 }
 
 func newMonitorFakeExec() *monitorFakeExec {
-	tables := make(map[string]sets.String)
-	tables["mangle"] = sets.NewString()
-	tables["filter"] = sets.NewString()
-	tables["nat"] = sets.NewString()
+	tables := make(map[string]sets.Set[string])
+	tables["mangle"] = sets.New[string]()
+	tables["filter"] = sets.New[string]()
+	tables["nat"] = sets.New[string]()
 	return &monitorFakeExec{tables: tables}
 }
 
@@ -101,12 +101,12 @@ func (mfc *monitorFakeCmd) CombinedOutput() ([]byte, error) {
 		return []byte("iptables v1.6.2"), nil
 	}
 
-	if len(mfc.args) != 8 || mfc.args[0] != WaitString || mfc.args[1] != WaitSecondsValue || mfc.args[2] != WaitIntervalString || mfc.args[3] != WaitIntervalUsecondsValue || mfc.args[6] != "-t" {
+	if len(mfc.args) != 6 || mfc.args[0] != WaitString || mfc.args[1] != WaitSecondsValue || mfc.args[4] != "-t" {
 		panic(fmt.Sprintf("bad args %#v", mfc.args))
 	}
-	op := operation(mfc.args[4])
-	chainName := mfc.args[5]
-	tableName := mfc.args[7]
+	op := operation(mfc.args[2])
+	chainName := mfc.args[3]
+	tableName := mfc.args[5]
 
 	mfc.mfe.Lock()
 	defer mfc.mfe.Unlock()
@@ -148,40 +148,50 @@ func (mfc *monitorFakeCmd) SetStdin(in io.Reader) {
 func (mfc *monitorFakeCmd) Run() error {
 	panic("should not be reached")
 }
+
 func (mfc *monitorFakeCmd) Output() ([]byte, error) {
 	panic("should not be reached")
 }
+
 func (mfc *monitorFakeCmd) SetDir(dir string) {
 	panic("should not be reached")
 }
+
 func (mfc *monitorFakeCmd) SetStdout(out io.Writer) {
 	panic("should not be reached")
 }
+
 func (mfc *monitorFakeCmd) SetStderr(out io.Writer) {
 	panic("should not be reached")
 }
+
 func (mfc *monitorFakeCmd) SetEnv(env []string) {
 	panic("should not be reached")
 }
+
 func (mfc *monitorFakeCmd) StdoutPipe() (io.ReadCloser, error) {
 	panic("should not be reached")
 }
+
 func (mfc *monitorFakeCmd) StderrPipe() (io.ReadCloser, error) {
 	panic("should not be reached")
 }
+
 func (mfc *monitorFakeCmd) Start() error {
 	panic("should not be reached")
 }
+
 func (mfc *monitorFakeCmd) Wait() error {
 	panic("should not be reached")
 }
+
 func (mfc *monitorFakeCmd) Stop() {
 	panic("should not be reached")
 }
 
 func TestIPTablesMonitor(t *testing.T) {
 	mfe := newMonitorFakeExec()
-	ipt := New(mfe, ProtocolIPv4)
+	ipt := newInternal(mfe, ProtocolIPv4, "", "")
 
 	var reloads uint32
 	stopCh := make(chan struct{})

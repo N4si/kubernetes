@@ -18,9 +18,7 @@ package prober
 
 import (
 	"context"
-	"fmt"
 	"math/rand"
-	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -28,7 +26,6 @@ import (
 	"k8s.io/component-base/metrics"
 	"k8s.io/klog/v2"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
-	"k8s.io/kubernetes/pkg/apis/apps"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/prober/results"
 )
@@ -115,12 +112,10 @@ func newWorker(
 		w.initialValue = results.Unknown
 	}
 
-	podName := getPodLabelName(w.pod)
-
 	basicMetricLabels := metrics.Labels{
 		"probe_type": w.probeType.String(),
 		"container":  w.container.Name,
-		"pod":        podName,
+		"pod":        w.pod.Name,
 		"namespace":  w.pod.Namespace,
 		"pod_uid":    string(w.pod.UID),
 	}
@@ -128,7 +123,7 @@ func newWorker(
 	proberDurationLabels := metrics.Labels{
 		"probe_type": w.probeType.String(),
 		"container":  w.container.Name,
-		"pod":        podName,
+		"pod":        w.pod.Name,
 		"namespace":  w.pod.Namespace,
 	}
 
@@ -183,7 +178,12 @@ probeLoop:
 		case <-w.stopCh:
 			break probeLoop
 		case <-probeTicker.C:
+			// continue
 		case <-w.manualTriggerCh:
+			// Updating the periodic timer to run the probe again at intervals of probeTickerPeriod
+			// starting from the moment a manual run occurs.
+			probeTicker.Reset(probeTickerPeriod)
+			klog.V(4).InfoS("Triggered Probe by manual run", "probeType", w.probeType, "pod", klog.KObj(w.pod), "podUID", w.pod.UID, "containerName", w.container.Name)
 			// continue
 		}
 	}
@@ -221,10 +221,13 @@ func (w *worker) doProbe(ctx context.Context) (keepGoing bool) {
 
 	c, ok := podutil.GetContainerStatus(status.ContainerStatuses, w.container.Name)
 	if !ok || len(c.ContainerID) == 0 {
-		// Either the container has not been created yet, or it was deleted.
-		klog.V(3).InfoS("Probe target container not found",
-			"pod", klog.KObj(w.pod), "containerName", w.container.Name)
-		return true // Wait for more information.
+		c, ok = podutil.GetContainerStatus(status.InitContainerStatuses, w.container.Name)
+		if !ok || len(c.ContainerID) == 0 {
+			// Either the container has not been created yet, or it was deleted.
+			klog.V(3).InfoS("Probe target container not found",
+				"pod", klog.KObj(w.pod), "containerName", w.container.Name)
+			return true // Wait for more information.
+		}
 	}
 
 	if w.containerID.String() != c.ContainerID {
@@ -318,11 +321,14 @@ func (w *worker) doProbe(ctx context.Context) (keepGoing bool) {
 
 	w.resultsManager.Set(w.containerID, result, w.pod)
 
-	if (w.probeType == liveness || w.probeType == startup) && result == results.Failure {
+	if (w.probeType == liveness && result == results.Failure) || w.probeType == startup {
 		// The container fails a liveness/startup check, it will need to be restarted.
 		// Stop probing until we see a new container ID. This is to reduce the
 		// chance of hitting #21751, where running `docker exec` when a
 		// container is being stopped may lead to corrupted container state.
+		// In addition, if the threshold for each result of a startup probe is exceeded, we should stop probing
+		// until the container is restarted.
+		// This is to prevent extra Probe executions #117153.
 		w.onHold = true
 		w.resultRun = 0
 	}
@@ -336,16 +342,4 @@ func deepCopyPrometheusLabels(m metrics.Labels) metrics.Labels {
 		ret[k] = v
 	}
 	return ret
-}
-
-func getPodLabelName(pod *v1.Pod) string {
-	podName := pod.Name
-	if pod.GenerateName != "" {
-		podNameSlice := strings.Split(pod.Name, "-")
-		podName = strings.Join(podNameSlice[:len(podNameSlice)-1], "-")
-		if label, ok := pod.GetLabels()[apps.DefaultDeploymentUniqueLabelKey]; ok {
-			podName = strings.ReplaceAll(podName, fmt.Sprintf("-%s", label), "")
-		}
-	}
-	return podName
 }

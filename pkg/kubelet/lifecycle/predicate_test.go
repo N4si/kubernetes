@@ -24,12 +24,16 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilversion "k8s.io/apimachinery/pkg/util/version"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/kubelet/types"
 	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodename"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodeports"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/tainttoleration"
+	"k8s.io/utils/ptr"
 )
 
 var (
@@ -106,6 +110,14 @@ func makeTestPod(requests, limits v1.ResourceList) *v1.Pod {
 					},
 				},
 			},
+			InitContainers: []v1.Container{
+				{
+					Resources: v1.ResourceRequirements{
+						Requests: requests,
+						Limits:   limits,
+					},
+				},
+			},
 		},
 	}
 }
@@ -123,16 +135,14 @@ var (
 	hugePageResourceA = v1helper.HugePageResourceName(resource.MustParse("2Mi"))
 )
 
-func makeResources(milliCPU, memory, pods, extendedA, storage, hugePageA int64) v1.NodeResources {
-	return v1.NodeResources{
-		Capacity: v1.ResourceList{
-			v1.ResourceCPU:              *resource.NewMilliQuantity(milliCPU, resource.DecimalSI),
-			v1.ResourceMemory:           *resource.NewQuantity(memory, resource.BinarySI),
-			v1.ResourcePods:             *resource.NewQuantity(pods, resource.DecimalSI),
-			extendedResourceA:           *resource.NewQuantity(extendedA, resource.DecimalSI),
-			v1.ResourceEphemeralStorage: *resource.NewQuantity(storage, resource.BinarySI),
-			hugePageResourceA:           *resource.NewQuantity(hugePageA, resource.BinarySI),
-		},
+func makeResources(milliCPU, memory, pods, extendedA, storage, hugePageA int64) v1.ResourceList {
+	return v1.ResourceList{
+		v1.ResourceCPU:              *resource.NewMilliQuantity(milliCPU, resource.DecimalSI),
+		v1.ResourceMemory:           *resource.NewQuantity(memory, resource.BinarySI),
+		v1.ResourcePods:             *resource.NewQuantity(pods, resource.DecimalSI),
+		extendedResourceA:           *resource.NewQuantity(extendedA, resource.DecimalSI),
+		v1.ResourceEphemeralStorage: *resource.NewQuantity(storage, resource.BinarySI),
+		hugePageResourceA:           *resource.NewQuantity(hugePageA, resource.BinarySI),
 	}
 }
 
@@ -194,7 +204,7 @@ func TestGeneralPredicates(t *testing.T) {
 				})),
 			node: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{Name: "machine1"},
-				Status:     v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0).Capacity, Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
+				Status:     v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0), Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
 			},
 			name: "no resources/port/host requested always fits",
 		},
@@ -210,7 +220,7 @@ func TestGeneralPredicates(t *testing.T) {
 				})),
 			node: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{Name: "machine1"},
-				Status:     v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0).Capacity, Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
+				Status:     v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0), Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
 			},
 			reasons: []PredicateFailureReason{
 				&InsufficientResourceError{ResourceName: v1.ResourceCPU, Requested: 8, Used: 5, Capacity: 10},
@@ -227,7 +237,7 @@ func TestGeneralPredicates(t *testing.T) {
 			nodeInfo: schedulerframework.NewNodeInfo(),
 			node: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{Name: "machine1"},
-				Status:     v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0).Capacity, Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
+				Status:     v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0), Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
 			},
 			reasons: []PredicateFailureReason{&PredicateFailureError{nodename.Name, nodename.ErrReason}},
 			name:    "host not match",
@@ -237,7 +247,7 @@ func TestGeneralPredicates(t *testing.T) {
 			nodeInfo: schedulerframework.NewNodeInfo(newPodWithPort(123)),
 			node: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{Name: "machine1"},
-				Status:     v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0).Capacity, Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
+				Status:     v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0), Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
 			},
 			reasons: []PredicateFailureReason{&PredicateFailureError{nodeports.Name, nodeports.ErrReason}},
 			name:    "hostport conflict",
@@ -260,7 +270,7 @@ func TestGeneralPredicates(t *testing.T) {
 						{Key: "bar", Effect: v1.TaintEffectNoExecute},
 					},
 				},
-				Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0).Capacity, Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
+				Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0), Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
 			},
 			name: "taint/toleration match",
 		},
@@ -274,7 +284,7 @@ func TestGeneralPredicates(t *testing.T) {
 						{Key: "foo", Effect: v1.TaintEffectNoSchedule},
 					},
 				},
-				Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0).Capacity, Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
+				Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0), Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
 			},
 			name: "NoSchedule taint/toleration not match",
 		},
@@ -288,7 +298,7 @@ func TestGeneralPredicates(t *testing.T) {
 						{Key: "bar", Effect: v1.TaintEffectNoExecute},
 					},
 				},
-				Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0).Capacity, Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
+				Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0), Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
 			},
 			reasons: []PredicateFailureReason{&PredicateFailureError{tainttoleration.Name, tainttoleration.ErrReasonNotMatch}},
 			name:    "NoExecute taint/toleration not match",
@@ -303,7 +313,7 @@ func TestGeneralPredicates(t *testing.T) {
 						{Key: "baz", Effect: v1.TaintEffectPreferNoSchedule},
 					},
 				},
-				Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0).Capacity, Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
+				Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0), Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
 			},
 			name: "PreferNoSchedule taint/toleration not match",
 		},
@@ -324,7 +334,7 @@ func TestGeneralPredicates(t *testing.T) {
 						{Key: "bar", Effect: v1.TaintEffectNoExecute},
 					},
 				},
-				Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0).Capacity, Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
+				Status: v1.NodeStatus{Capacity: makeResources(10, 20, 32, 0, 0, 0), Allocatable: makeAllocatableResources(10, 20, 32, 0, 0, 0)},
 			},
 			name: "static pods ignore taints",
 		},
@@ -419,6 +429,118 @@ func TestRejectPodAdmissionBasedOnOSField(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			actualResult := rejectPodAdmissionBasedOnOSField(test.pod)
+			if test.expectRejection != actualResult {
+				t.Errorf("unexpected result, expected %v but got %v", test.expectRejection, actualResult)
+			}
+		})
+	}
+}
+
+func TestPodAdmissionBasedOnSupplementalGroupsPolicy(t *testing.T) {
+	nodeWithFeature := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "test"},
+		Status: v1.NodeStatus{
+			Features: &v1.NodeFeatures{
+				SupplementalGroupsPolicy: ptr.To(true),
+			},
+		},
+	}
+	nodeWithoutFeature := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "test"},
+	}
+	podNotUsingFeature := &v1.Pod{}
+	podUsingFeature := &v1.Pod{Spec: v1.PodSpec{
+		SecurityContext: &v1.PodSecurityContext{
+			SupplementalGroupsPolicy: ptr.To(v1.SupplementalGroupsPolicyStrict),
+		},
+	}}
+	tests := []struct {
+		name             string
+		emulationVersion *utilversion.Version
+		node             *v1.Node
+		pod              *v1.Pod
+		expectRejection  bool
+	}{
+		// The feature is Beta in v1.33
+		{
+			name:             "feature=Beta, node=feature not supported, pod=in use: it should REJECT",
+			emulationVersion: utilversion.MustParse("1.33"),
+			node:             nodeWithoutFeature,
+			pod:              podUsingFeature,
+			expectRejection:  true,
+		},
+		{
+			name:             "feature=Beta, node=feature supported, pod=in use: it should ADMIT",
+			emulationVersion: utilversion.MustParse("1.33"),
+			node:             nodeWithFeature,
+			pod:              podUsingFeature,
+			expectRejection:  false,
+		},
+		{
+			name:             "feature=Beta, node=feature not supported, pod=not in use: it should ADMIT",
+			emulationVersion: utilversion.MustParse("1.33"),
+			node:             nodeWithoutFeature,
+			pod:              podNotUsingFeature,
+			expectRejection:  false,
+		},
+		{
+			name:             "feature=Beta, node=feature supported, pod=not in use: it should ADMIT",
+			emulationVersion: utilversion.MustParse("1.33"),
+			node:             nodeWithFeature,
+			pod:              podNotUsingFeature,
+			expectRejection:  false,
+		},
+		// The feature is Alpha(v1.31, v1.32) in emulated version
+		// Note: When the feature is alpha in emulated version, it should always admit for backward compatibility
+		{
+			name:             "feature=Alpha, node=feature not supported, pod=feature used: it should ADMIT",
+			emulationVersion: utilversion.MustParse("1.32"),
+			node:             nodeWithoutFeature,
+			pod:              podUsingFeature,
+			expectRejection:  false,
+		},
+		{
+			name:             "feature=Alpha, node=feature not supported, pod=feature not used: it should ADMIT",
+			emulationVersion: utilversion.MustParse("1.32"),
+			node:             nodeWithoutFeature,
+			pod:              podNotUsingFeature,
+			expectRejection:  false,
+		},
+		{
+			name:             "feature=Alpha, node=feature supported, pod=feature used: it should ADMIT",
+			emulationVersion: utilversion.MustParse("1.32"),
+			node:             nodeWithFeature,
+			pod:              podUsingFeature,
+			expectRejection:  false,
+		},
+		{
+			name:             "feature=Alpha, node=feature supported, pod=feature not used: it should ADMIT",
+			emulationVersion: utilversion.MustParse("1.32"),
+			node:             nodeWithFeature,
+			pod:              podNotUsingFeature,
+			expectRejection:  false,
+		},
+		// The feature is not yet released (< v1.31) in emulated version (this can happen when only kubelet downgraded).
+		// Note: When the feature is not yet released in emulated version, it should always admit for backward compatibility
+		{
+			name:             "feature=NotReleased, node=feature not supported, pod=feature used: it should ADMIT",
+			emulationVersion: utilversion.MustParse("1.30"),
+			node:             nodeWithoutFeature,
+			pod:              podUsingFeature,
+			expectRejection:  false,
+		},
+		{
+			name:             "feature=NotReleased, node=feature not supported, pod=feature not used: it should ADMIT",
+			emulationVersion: utilversion.MustParse("1.30"),
+			node:             nodeWithoutFeature,
+			pod:              podNotUsingFeature,
+			expectRejection:  false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, test.emulationVersion)
+			actualResult := rejectPodAdmissionBasedOnSupplementalGroupsPolicy(test.pod, test.node)
 			if test.expectRejection != actualResult {
 				t.Errorf("unexpected result, expected %v but got %v", test.expectRejection, actualResult)
 			}

@@ -24,13 +24,15 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/component-base/metrics/testutil"
+	endpointsliceutil "k8s.io/endpointslice/util"
 	endpointsv1 "k8s.io/kubernetes/pkg/api/v1/endpoints"
 	"k8s.io/kubernetes/pkg/controller/endpointslicemirroring/metrics"
-	endpointsliceutil "k8s.io/kubernetes/pkg/controller/util/endpointslice"
+	"k8s.io/kubernetes/test/utils/ktesting"
 	"k8s.io/utils/pointer"
 )
 
@@ -47,6 +49,7 @@ func TestReconcile(t *testing.T) {
 		subsets                  []corev1.EndpointSubset
 		epLabels                 map[string]string
 		epAnnotations            map[string]string
+		uid                      string
 		endpointsDeletionPending bool
 		maxEndpointsPerSubset    int32
 		existingEndpointSlices   []*discovery.EndpointSlice
@@ -218,9 +221,19 @@ func TestReconcile(t *testing.T) {
 				Hostname: "pod-1",
 			}},
 		}},
+		uid: "d8f2c1f6-5285-4b3c-b3c1-9b89f9e7ed7a",
 		existingEndpointSlices: []*discovery.EndpointSlice{{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "test-ep-1",
+				Name:      "test-ep-1",
+				Namespace: "test",
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "v1",
+						Kind:       "Endpoints",
+						Name:       "test-ep",
+						UID:        "d8f2c1f6-5285-4b3c-b3c1-9b89f9e7ed7a",
+					},
+				},
 			},
 			AddressType: discovery.AddressTypeIPv4,
 			Ports: []discovery.EndpointPort{{
@@ -236,6 +249,47 @@ func TestReconcile(t *testing.T) {
 		}},
 		expectedNumSlices:     1,
 		expectedClientActions: 0,
+	}, {
+		testName: "Endpoints with 1 subset, port, and address and existing slice with same fields but different OwnerReferences",
+		subsets: []corev1.EndpointSubset{{
+			Ports: []corev1.EndpointPort{{
+				Name:     "http",
+				Port:     80,
+				Protocol: corev1.ProtocolTCP,
+			}},
+			Addresses: []corev1.EndpointAddress{{
+				IP:       "10.0.0.1",
+				Hostname: "pod-1",
+			}},
+		}},
+		uid: "d8f2c1f6-5285-4b3c-b3c1-9b89f9e7ed7a",
+		existingEndpointSlices: []*discovery.EndpointSlice{{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-ep-1",
+				Namespace: "test",
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: "v1",
+						Kind:       "Endpoints",
+						Name:       "test-ep",
+						UID:        "fb91e798-1875-4857-b5eb-e2c878157b4d",
+					},
+				},
+			},
+			AddressType: discovery.AddressTypeIPv4,
+			Ports: []discovery.EndpointPort{{
+				Name:     pointer.String("http"),
+				Port:     pointer.Int32(80),
+				Protocol: &protoTCP,
+			}},
+			Endpoints: []discovery.Endpoint{{
+				Addresses:  []string{"10.0.0.1"},
+				Hostname:   pointer.String("pod-1"),
+				Conditions: discovery.EndpointConditions{Ready: pointer.Bool(true)},
+			}},
+		}},
+		expectedNumSlices:     1,
+		expectedClientActions: 1,
 	}, {
 		testName: "Endpoints with 1 subset, port, and address and existing slice with an additional annotation",
 		subsets: []corev1.EndpointSubset{{
@@ -1006,11 +1060,12 @@ func TestReconcile(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.testName, func(t *testing.T) {
+			tCtx := ktesting.Init(t)
 			client := newClientset()
 			setupMetrics()
 			namespace := "test"
 			endpoints := corev1.Endpoints{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-ep", Namespace: namespace, Labels: tc.epLabels, Annotations: tc.epAnnotations},
+				ObjectMeta: metav1.ObjectMeta{Name: "test-ep", Namespace: namespace, Labels: tc.epLabels, Annotations: tc.epAnnotations, UID: types.UID(tc.uid)},
 				Subsets:    tc.subsets,
 			}
 
@@ -1023,7 +1078,7 @@ func TestReconcile(t *testing.T) {
 			for _, epSlice := range tc.existingEndpointSlices {
 				epSlice.Labels = map[string]string{
 					discovery.LabelServiceName: endpoints.Name,
-					discovery.LabelManagedBy:   controllerName,
+					discovery.LabelManagedBy:   ControllerName,
 				}
 				_, err := client.DiscoveryV1().EndpointSlices(namespace).Create(context.TODO(), epSlice, metav1.CreateOptions{})
 				if err != nil {
@@ -1036,7 +1091,7 @@ func TestReconcile(t *testing.T) {
 			if maxEndpointsPerSubset == 0 {
 				maxEndpointsPerSubset = defaultMaxEndpointsPerSubset
 			}
-			r := newReconciler(client, maxEndpointsPerSubset)
+			r := newReconciler(tCtx, client, maxEndpointsPerSubset)
 			reconcileHelper(t, r, &endpoints, tc.existingEndpointSlices)
 
 			numExtraActions := len(client.Actions()) - numInitialActions
@@ -1056,8 +1111,8 @@ func TestReconcile(t *testing.T) {
 
 // Test Helpers
 
-func newReconciler(client *fake.Clientset, maxEndpointsPerSubset int32) *reconciler {
-	broadcaster := record.NewBroadcaster()
+func newReconciler(ctx context.Context, client *fake.Clientset, maxEndpointsPerSubset int32) *reconciler {
+	broadcaster := record.NewBroadcaster(record.WithContext(ctx))
 	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "endpoint-slice-mirroring-controller"})
 
 	return &reconciler{
@@ -1190,7 +1245,7 @@ func expectMatchingAddresses(t *testing.T, epSubset corev1.EndpointSubset, esEnd
 	expectedEndpoints := map[string]addressInfo{}
 
 	for _, address := range epSubset.Addresses {
-		at := getAddressType(address.IP)
+		_, at := addressToEndpoint(address, true)
 		if at != nil && *at == addrType && len(expectedEndpoints) < maxEndpointsPerSubset {
 			expectedEndpoints[address.IP] = addressInfo{
 				ready:     true,
@@ -1200,7 +1255,7 @@ func expectMatchingAddresses(t *testing.T, epSubset corev1.EndpointSubset, esEnd
 	}
 
 	for _, address := range epSubset.NotReadyAddresses {
-		at := getAddressType(address.IP)
+		_, at := addressToEndpoint(address, true)
 		if at != nil && *at == addrType && len(expectedEndpoints) < maxEndpointsPerSubset {
 			expectedEndpoints[address.IP] = addressInfo{
 				ready:     false,
@@ -1250,7 +1305,7 @@ func expectMatchingAddresses(t *testing.T, epSubset corev1.EndpointSubset, esEnd
 func fetchEndpointSlices(t *testing.T, client *fake.Clientset, namespace string) []discovery.EndpointSlice {
 	t.Helper()
 	fetchedSlices, err := client.DiscoveryV1().EndpointSlices(namespace).List(context.TODO(), metav1.ListOptions{
-		LabelSelector: discovery.LabelManagedBy + "=" + controllerName,
+		LabelSelector: discovery.LabelManagedBy + "=" + ControllerName,
 	})
 	if err != nil {
 		t.Fatalf("Expected no error fetching Endpoint Slices, got: %v", err)
@@ -1261,7 +1316,8 @@ func fetchEndpointSlices(t *testing.T, client *fake.Clientset, namespace string)
 
 func reconcileHelper(t *testing.T, r *reconciler, endpoints *corev1.Endpoints, existingSlices []*discovery.EndpointSlice) {
 	t.Helper()
-	err := r.reconcile(endpoints, existingSlices)
+	logger, _ := ktesting.NewTestContext(t)
+	err := r.reconcile(logger, endpoints, existingSlices)
 	if err != nil {
 		t.Fatalf("Expected no error reconciling Endpoint Slices, got: %v", err)
 	}

@@ -303,7 +303,8 @@
               }
             ]
           }
-        }
+        },
+        "volumeAttributesClassName": "volumeAttributesClassNameValue"
       }
     },
     "nodeName": "nodeNameValue"
@@ -315,11 +316,13 @@
     },
     "attachError": {
       "time": "2001-01-01T01:01:01Z",
-      "message": "messageValue"
+      "message": "messageValue",
+      "errorCode": 3
     },
     "detachError": {
       "time": "2001-01-01T01:01:01Z",
-      "message": "messageValue"
+      "message": "messageValue",
+      "errorCode": 3
     }
   }
 }

@@ -34,8 +34,41 @@ import (
 	containertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
 	"k8s.io/kubernetes/pkg/kubelet/runtimeclass"
 	rctest "k8s.io/kubernetes/pkg/kubelet/runtimeclass/testing"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
+
+const testPodLogsDirectory = "/var/log/pods"
+
+func TestGeneratePodSandboxConfig(t *testing.T) {
+	_, _, m, err := createTestRuntimeManager()
+	require.NoError(t, err)
+	pod := newTestPod()
+
+	expectedLogDirectory := filepath.Join(testPodLogsDirectory, pod.Namespace+"_"+pod.Name+"_12345678")
+	expectedLabels := map[string]string{
+		"io.kubernetes.pod.name":      pod.Name,
+		"io.kubernetes.pod.namespace": pod.Namespace,
+		"io.kubernetes.pod.uid":       string(pod.UID),
+	}
+	expectedMetadata := &runtimeapi.PodSandboxMetadata{
+		Name:      pod.Name,
+		Namespace: pod.Namespace,
+		Uid:       string(pod.UID),
+		Attempt:   uint32(1),
+	}
+	expectedPortMappings := []*runtimeapi.PortMapping{
+		{
+			HostPort: 8080,
+		},
+	}
+
+	podSandboxConfig, err := m.generatePodSandboxConfig(pod, 1)
+	assert.NoError(t, err)
+	assert.Equal(t, expectedLabels, podSandboxConfig.Labels)
+	assert.Equal(t, expectedLogDirectory, podSandboxConfig.LogDirectory)
+	assert.Equal(t, expectedMetadata, podSandboxConfig.Metadata)
+	assert.Equal(t, expectedPortMappings, podSandboxConfig.PortMappings)
+}
 
 // TestCreatePodSandbox tests creating sandbox and its corresponding pod log directory.
 func TestCreatePodSandbox(t *testing.T) {
@@ -47,7 +80,7 @@ func TestCreatePodSandbox(t *testing.T) {
 	fakeOS := m.osInterface.(*containertest.FakeOS)
 	fakeOS.MkdirAllFn = func(path string, perm os.FileMode) error {
 		// Check pod logs root directory is created.
-		assert.Equal(t, filepath.Join(podLogsRootDirectory, pod.Namespace+"_"+pod.Name+"_12345678"), path)
+		assert.Equal(t, filepath.Join(testPodLogsDirectory, pod.Namespace+"_"+pod.Name+"_12345678"), path)
 		assert.Equal(t, os.FileMode(0755), perm)
 		return nil
 	}
@@ -56,8 +89,9 @@ func TestCreatePodSandbox(t *testing.T) {
 	assert.Contains(t, fakeRuntime.Called, "RunPodSandbox")
 	sandboxes, err := fakeRuntime.ListPodSandbox(ctx, &runtimeapi.PodSandboxFilter{Id: id})
 	assert.NoError(t, err)
-	assert.Equal(t, len(sandboxes), 1)
-	// TODO Check pod sandbox configuration
+	assert.Len(t, sandboxes, 1)
+	assert.Equal(t, sandboxes[0].Id, fmt.Sprintf("%s_%s_%s_1", pod.Name, pod.Namespace, pod.UID))
+	assert.Equal(t, runtimeapi.PodSandboxState_SANDBOX_READY, sandboxes[0].State)
 }
 
 func TestGeneratePodSandboxLinuxConfigSeccomp(t *testing.T) {
@@ -67,39 +101,39 @@ func TestGeneratePodSandboxLinuxConfigSeccomp(t *testing.T) {
 	tests := []struct {
 		description     string
 		pod             *v1.Pod
-		expectedProfile string
+		expectedProfile v1.SeccompProfileType
 	}{
 		{
 			description:     "no seccomp defined at pod level should return runtime/default",
 			pod:             newSeccompPod(nil, nil, "", "runtime/default"),
-			expectedProfile: "runtime/default",
+			expectedProfile: v1.SeccompProfileTypeRuntimeDefault,
 		},
 		{
 			description:     "seccomp field defined at pod level should not be honoured",
 			pod:             newSeccompPod(&v1.SeccompProfile{Type: v1.SeccompProfileTypeUnconfined}, nil, "", ""),
-			expectedProfile: "runtime/default",
+			expectedProfile: v1.SeccompProfileTypeRuntimeDefault,
 		},
 		{
 			description:     "seccomp field defined at container level should not be honoured",
 			pod:             newSeccompPod(nil, &v1.SeccompProfile{Type: v1.SeccompProfileTypeUnconfined}, "", ""),
-			expectedProfile: "runtime/default",
+			expectedProfile: v1.SeccompProfileTypeRuntimeDefault,
 		},
 		{
 			description:     "seccomp annotation defined at pod level should not be honoured",
 			pod:             newSeccompPod(nil, nil, "unconfined", ""),
-			expectedProfile: "runtime/default",
+			expectedProfile: v1.SeccompProfileTypeRuntimeDefault,
 		},
 		{
 			description:     "seccomp annotation defined at container level should not be honoured",
 			pod:             newSeccompPod(nil, nil, "", "unconfined"),
-			expectedProfile: "runtime/default",
+			expectedProfile: v1.SeccompProfileTypeRuntimeDefault,
 		},
 	}
 
 	for i, test := range tests {
 		config, _ := m.generatePodSandboxLinuxConfig(test.pod)
-		actualProfile := config.SecurityContext.SeccompProfilePath
-		assert.Equal(t, test.expectedProfile, actualProfile, "TestCase[%d]: %s", i, test.description)
+		actualProfile := config.SecurityContext.Seccomp.ProfileType.String()
+		assert.EqualValues(t, test.expectedProfile, actualProfile, "TestCase[%d]: %s", i, test.description)
 	}
 }
 
@@ -119,8 +153,8 @@ func TestCreatePodSandbox_RuntimeClass(t *testing.T) {
 		expectError     bool
 	}{
 		"unspecified RuntimeClass": {rcn: nil, expectedHandler: ""},
-		"valid RuntimeClass":       {rcn: pointer.String(rctest.SandboxRuntimeClass), expectedHandler: rctest.SandboxRuntimeHandler},
-		"missing RuntimeClass":     {rcn: pointer.String("phantom"), expectError: true},
+		"valid RuntimeClass":       {rcn: ptr.To(rctest.SandboxRuntimeClass), expectedHandler: rctest.SandboxRuntimeHandler},
+		"missing RuntimeClass":     {rcn: ptr.To("phantom"), expectError: true},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -153,6 +187,11 @@ func newTestPod() *v1.Pod {
 					Name:            "foo",
 					Image:           "busybox",
 					ImagePullPolicy: v1.PullIfNotPresent,
+					Ports: []v1.ContainerPort{
+						{
+							HostPort: 8080,
+						},
+					},
 				},
 			},
 		},
@@ -342,7 +381,7 @@ func TestGeneratePodSandboxWindowsConfig_HostProcess(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.WindowsHostNetwork, false)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.WindowsHostNetwork, false)
 			pod := &v1.Pod{}
 			pod.Spec = *testCase.podSpec
 
@@ -350,85 +389,6 @@ func TestGeneratePodSandboxWindowsConfig_HostProcess(t *testing.T) {
 
 			assert.Equal(t, testCase.expectedWindowsConfig, wc)
 			assert.Equal(t, testCase.expectedError, err)
-		})
-	}
-}
-
-func TestGeneratePodSandboxWindowsConfig_HostNetwork(t *testing.T) {
-	_, _, m, err := createTestRuntimeManager()
-	require.NoError(t, err)
-
-	const containerName = "container"
-
-	testCases := []struct {
-		name                      string
-		hostNetworkFeatureEnabled bool
-		podSpec                   *v1.PodSpec
-		expectedWindowsConfig     *runtimeapi.WindowsPodSandboxConfig
-	}{
-		{
-			name:                      "feature disabled, hostNetwork=false",
-			hostNetworkFeatureEnabled: false,
-			podSpec: &v1.PodSpec{
-				HostNetwork: false,
-				Containers:  []v1.Container{{Name: containerName}},
-			},
-			expectedWindowsConfig: &runtimeapi.WindowsPodSandboxConfig{
-				SecurityContext: &runtimeapi.WindowsSandboxSecurityContext{},
-			},
-		},
-		{
-			name:                      "feature disabled, hostNetwork=true",
-			hostNetworkFeatureEnabled: false,
-			podSpec: &v1.PodSpec{
-				HostNetwork: true,
-				Containers:  []v1.Container{{Name: containerName}},
-			},
-			expectedWindowsConfig: &runtimeapi.WindowsPodSandboxConfig{
-				SecurityContext: &runtimeapi.WindowsSandboxSecurityContext{},
-			}},
-		{
-			name:                      "feature enabled, hostNetwork=false",
-			hostNetworkFeatureEnabled: true,
-			podSpec: &v1.PodSpec{
-				HostNetwork: false,
-				Containers:  []v1.Container{{Name: containerName}},
-			},
-			expectedWindowsConfig: &runtimeapi.WindowsPodSandboxConfig{
-				SecurityContext: &runtimeapi.WindowsSandboxSecurityContext{
-					NamespaceOptions: &runtimeapi.WindowsNamespaceOption{
-						Network: runtimeapi.NamespaceMode_POD,
-					},
-				},
-			},
-		},
-		{
-			name:                      "feature enabled, hostNetwork=true",
-			hostNetworkFeatureEnabled: true,
-			podSpec: &v1.PodSpec{
-				HostNetwork: true,
-				Containers:  []v1.Container{{Name: containerName}},
-			},
-			expectedWindowsConfig: &runtimeapi.WindowsPodSandboxConfig{
-				SecurityContext: &runtimeapi.WindowsSandboxSecurityContext{
-					NamespaceOptions: &runtimeapi.WindowsNamespaceOption{
-						Network: runtimeapi.NamespaceMode_NODE,
-					},
-				},
-			},
-		},
-	}
-
-	for _, testCase := range testCases {
-		t.Run(testCase.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.WindowsHostNetwork, testCase.hostNetworkFeatureEnabled)()
-			pod := &v1.Pod{}
-			pod.Spec = *testCase.podSpec
-
-			wc, err := m.generatePodSandboxWindowsConfig(pod)
-
-			assert.Equal(t, testCase.expectedWindowsConfig, wc)
-			assert.Equal(t, nil, err)
 		})
 	}
 }

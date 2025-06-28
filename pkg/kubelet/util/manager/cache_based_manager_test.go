@@ -73,8 +73,8 @@ func newSecretStore(fakeClient clientset.Interface, clock clock.Clock, getTTL Ge
 	}
 }
 
-func getSecretNames(pod *v1.Pod) sets.String {
-	result := sets.NewString()
+func getSecretNames(pod *v1.Pod) sets.Set[string] {
+	result := sets.New[string]()
 	podutil.VisitPodSecretNames(pod, func(name string) bool {
 		result.Insert(name)
 		return true
@@ -89,17 +89,17 @@ func newCacheBasedSecretManager(store Store) Manager {
 func TestSecretStore(t *testing.T) {
 	fakeClient := &fake.Clientset{}
 	store := newSecretStore(fakeClient, clock.RealClock{}, noObjectTTL, 0)
-	store.AddReference("ns1", "name1")
-	store.AddReference("ns2", "name2")
-	store.AddReference("ns1", "name1")
-	store.AddReference("ns1", "name1")
-	store.DeleteReference("ns1", "name1")
-	store.DeleteReference("ns2", "name2")
-	store.AddReference("ns3", "name3")
+	store.AddReference("ns1", "name1", "pod1")
+	store.AddReference("ns2", "name2", "pod2")
+	store.AddReference("ns1", "name1", "pod3")
+	store.AddReference("ns1", "name1", "pod4")
+	store.DeleteReference("ns1", "name1", "pod1")
+	store.DeleteReference("ns2", "name2", "pod2")
+	store.AddReference("ns3", "name3", "pod5")
 
 	// Adds don't issue Get requests.
 	actions := fakeClient.Actions()
-	assert.Equal(t, 0, len(actions), "unexpected actions: %#v", actions)
+	assert.Empty(t, actions, "unexpected actions")
 	// Should issue Get request
 	store.Get("ns1", "name1")
 	// Shouldn't issue Get request, as secret is not registered
@@ -108,7 +108,7 @@ func TestSecretStore(t *testing.T) {
 	store.Get("ns3", "name3")
 
 	actions = fakeClient.Actions()
-	assert.Equal(t, 2, len(actions), "unexpected actions: %#v", actions)
+	assert.Len(t, actions, 2, "unexpected actions")
 
 	for _, a := range actions {
 		assert.True(t, a.Matches("get", "secrets"), "unexpected actions: %#v", a)
@@ -123,7 +123,7 @@ func TestSecretStore(t *testing.T) {
 func TestSecretStoreDeletingSecret(t *testing.T) {
 	fakeClient := &fake.Clientset{}
 	store := newSecretStore(fakeClient, clock.RealClock{}, noObjectTTL, 0)
-	store.AddReference("ns", "name")
+	store.AddReference("ns", "name", "pod")
 
 	result := &v1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "name", ResourceVersion: "10"}}
 	fakeClient.AddReactor("get", "secrets", func(action core.Action) (bool, runtime.Object, error) {
@@ -155,7 +155,7 @@ func TestSecretStoreGetAlwaysRefresh(t *testing.T) {
 	store := newSecretStore(fakeClient, fakeClock, noObjectTTL, 0)
 
 	for i := 0; i < 10; i++ {
-		store.AddReference(fmt.Sprintf("ns-%d", i), fmt.Sprintf("name-%d", i))
+		store.AddReference(fmt.Sprintf("ns-%d", i), fmt.Sprintf("name-%d", i), types.UID(fmt.Sprintf("pod-%d", i)))
 	}
 	fakeClient.ClearActions()
 
@@ -169,7 +169,7 @@ func TestSecretStoreGetAlwaysRefresh(t *testing.T) {
 	}
 	wg.Wait()
 	actions := fakeClient.Actions()
-	assert.Equal(t, 100, len(actions), "unexpected actions: %#v", actions)
+	assert.Len(t, actions, 100, "unexpected actions")
 
 	for _, a := range actions {
 		assert.True(t, a.Matches("get", "secrets"), "unexpected actions: %#v", a)
@@ -182,7 +182,7 @@ func TestSecretStoreGetNeverRefresh(t *testing.T) {
 	store := newSecretStore(fakeClient, fakeClock, noObjectTTL, time.Minute)
 
 	for i := 0; i < 10; i++ {
-		store.AddReference(fmt.Sprintf("ns-%d", i), fmt.Sprintf("name-%d", i))
+		store.AddReference(fmt.Sprintf("ns-%d", i), fmt.Sprintf("name-%d", i), types.UID(fmt.Sprintf("pod-%d", i)))
 	}
 	fakeClient.ClearActions()
 
@@ -197,7 +197,7 @@ func TestSecretStoreGetNeverRefresh(t *testing.T) {
 	wg.Wait()
 	actions := fakeClient.Actions()
 	// Only first Get, should forward the Get request.
-	assert.Equal(t, 10, len(actions), "unexpected actions: %#v", actions)
+	assert.Len(t, actions, 10, "unexpected actions")
 }
 
 func TestCustomTTL(t *testing.T) {
@@ -211,7 +211,7 @@ func TestCustomTTL(t *testing.T) {
 	fakeClock := testingclock.NewFakeClock(time.Time{})
 	store := newSecretStore(fakeClient, fakeClock, customTTL, time.Minute)
 
-	store.AddReference("ns", "name")
+	store.AddReference("ns", "name", "pod")
 	store.Get("ns", "name")
 	fakeClient.ClearActions()
 
@@ -220,24 +220,24 @@ func TestCustomTTL(t *testing.T) {
 	ttlExists = true
 	store.Get("ns", "name")
 	actions := fakeClient.Actions()
-	assert.Equal(t, 1, len(actions), "unexpected actions: %#v", actions)
+	assert.Len(t, actions, 1, "unexpected actions")
 	fakeClient.ClearActions()
 
 	// Set 5-minute ttl and see if this works.
 	ttl = time.Duration(5) * time.Minute
 	store.Get("ns", "name")
 	actions = fakeClient.Actions()
-	assert.Equal(t, 0, len(actions), "unexpected actions: %#v", actions)
+	assert.Empty(t, actions, "unexpected actions")
 	// Still no effect after 4 minutes.
 	fakeClock.Step(4 * time.Minute)
 	store.Get("ns", "name")
 	actions = fakeClient.Actions()
-	assert.Equal(t, 0, len(actions), "unexpected actions: %#v", actions)
+	assert.Empty(t, actions, "unexpected actions")
 	// Now it should have an effect.
 	fakeClock.Step(time.Minute)
 	store.Get("ns", "name")
 	actions = fakeClient.Actions()
-	assert.Equal(t, 1, len(actions), "unexpected actions: %#v", actions)
+	assert.Len(t, actions, 1, "unexpected actions")
 	fakeClient.ClearActions()
 
 	// Now remove the custom ttl and see if that works.
@@ -245,12 +245,12 @@ func TestCustomTTL(t *testing.T) {
 	fakeClock.Step(55 * time.Second)
 	store.Get("ns", "name")
 	actions = fakeClient.Actions()
-	assert.Equal(t, 0, len(actions), "unexpected actions: %#v", actions)
+	assert.Empty(t, actions, "unexpected action")
 	// Pass the minute and it should be triggered now.
 	fakeClock.Step(5 * time.Second)
 	store.Get("ns", "name")
 	actions = fakeClient.Actions()
-	assert.Equal(t, 1, len(actions), "unexpected actions: %#v", actions)
+	assert.Len(t, actions, 1, "unexpected actions")
 }
 
 func TestParseNodeAnnotation(t *testing.T) {
@@ -336,7 +336,7 @@ type secretsToAttach struct {
 }
 
 func podWithSecrets(ns, podName string, toAttach secretsToAttach) *v1.Pod {
-	return podWithSecretsAndUID(ns, podName, "", toAttach)
+	return podWithSecretsAndUID(ns, podName, fmt.Sprintf("%s/%s", ns, podName), toAttach)
 }
 
 func podWithSecretsAndUID(ns, podName, podUID string, toAttach secretsToAttach) *v1.Pod {
@@ -402,7 +402,7 @@ func TestCacheInvalidation(t *testing.T) {
 	store.Get("ns1", "s10")
 	store.Get("ns1", "s2")
 	actions := fakeClient.Actions()
-	assert.Equal(t, 3, len(actions), "unexpected actions: %#v", actions)
+	assert.Len(t, actions, 3, "unexpected number of actions")
 	fakeClient.ClearActions()
 
 	// Update a pod with a new secret.
@@ -415,13 +415,13 @@ func TestCacheInvalidation(t *testing.T) {
 		},
 	}
 	manager.RegisterPod(podWithSecrets("ns1", "name1", s2))
-	// All secrets should be invalidated - this should trigger get operations.
+	// Fetch only s3 and s20 secrets - this should trigger get operations.
 	store.Get("ns1", "s1")
 	store.Get("ns1", "s2")
 	store.Get("ns1", "s20")
 	store.Get("ns1", "s3")
 	actions = fakeClient.Actions()
-	assert.Equal(t, 4, len(actions), "unexpected actions: %#v", actions)
+	assert.Len(t, actions, 2, "unexpected actions")
 	fakeClient.ClearActions()
 
 	// Create a new pod that is refencing the first three secrets - those should
@@ -433,8 +433,33 @@ func TestCacheInvalidation(t *testing.T) {
 	store.Get("ns1", "s20")
 	store.Get("ns1", "s3")
 	actions = fakeClient.Actions()
-	assert.Equal(t, 3, len(actions), "unexpected actions: %#v", actions)
+	assert.Len(t, actions, 3, "unexpected actions")
 	fakeClient.ClearActions()
+}
+
+func TestResourceContentExpired(t *testing.T) {
+	fakeClient := &fake.Clientset{}
+	fakeClock := testingclock.NewFakeClock(time.Now())
+	store := newSecretStore(fakeClient, fakeClock, noObjectTTL, time.Minute)
+	manager := newCacheBasedSecretManager(store)
+
+	// Create a pod with some secrets.
+	s1 := secretsToAttach{
+		imagePullSecretNames: []string{"s1"},
+		containerEnvSecrets: []envSecrets{
+			{envVarNames: []string{"s1"}, envFromNames: []string{"s10"}},
+			{envVarNames: []string{"s2"}},
+		},
+	}
+
+	// emulate a requested resource content that has expired from the server
+	manager.RegisterPod(podWithSecrets("dummy-ns", "dummy-name", s1))
+	fakeClient.PrependReactor("get", "secrets", func(action core.Action) (bool, runtime.Object, error) {
+		return true, &v1.Secret{}, apierrors.NewResourceExpired("expired")
+	})
+	// should fail to fetch the latest object
+	_, err := manager.GetObject("dummy-ns", "s1")
+	assert.Error(t, err)
 }
 
 func TestRegisterIdempotence(t *testing.T) {

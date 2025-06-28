@@ -41,6 +41,7 @@ import (
 	emfake "k8s.io/metrics/pkg/client/external_metrics/fake"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var fixedTimestamp = time.Date(2015, time.November, 10, 12, 30, 0, 0, time.UTC)
@@ -209,11 +210,11 @@ func (tc *restClientTestCase) prepareTestClient(t *testing.T) (*metricsfake.Clie
 
 func (tc *restClientTestCase) verifyResults(t *testing.T, metrics PodMetricsInfo, timestamp time.Time, err error) {
 	if tc.desiredError != nil {
-		assert.Error(t, err, "there should be an error retrieving the metrics")
+		require.Error(t, err, "there should be an error retrieving the metrics")
 		assert.Contains(t, fmt.Sprintf("%v", err), fmt.Sprintf("%v", tc.desiredError), "the error message should be as expected")
 		return
 	}
-	assert.NoError(t, err, "there should be no error retrieving the metrics")
+	require.NoError(t, err, "there should be no error retrieving the metrics")
 	assert.NotNil(t, metrics, "there should be metrics returned")
 
 	if len(metrics) != len(tc.desiredMetricValues) {
@@ -230,7 +231,7 @@ func (tc *restClientTestCase) verifyResults(t *testing.T, metrics PodMetricsInfo
 	}
 
 	targetTimestamp := offsetTimestampBy(tc.targetTimestamp)
-	assert.True(t, targetTimestamp.Equal(timestamp), fmt.Sprintf("the timestamp should be as expected (%s) but was %s", targetTimestamp, timestamp))
+	assert.True(t, targetTimestamp.Equal(timestamp), "the timestamp should be as expected (%s) but was %s", targetTimestamp, timestamp)
 }
 
 func (tc *restClientTestCase) runTest(t *testing.T) {
@@ -428,7 +429,22 @@ func TestRESTClientContainerCPUEmptyMetricsForOnePod(t *testing.T) {
 		container:          "test-1",
 		targetTimestamp:    targetTimestamp,
 		window:             window,
-		desiredError:       fmt.Errorf("failed to get container metrics"),
+		reportedPodMetrics: []map[string]int64{{"test-1": 100}, {"test-1": 300, "test-2": 400}, {}},
+	}
+	tc.runTest(t)
+}
+
+func TestRESTClientContainerCPUEmptyMetricsForOnePodReturnsOnlyFoundContainer(t *testing.T) {
+	targetTimestamp := 1
+	window := 30 * time.Second
+	tc := restClientTestCase{
+		resourceName: v1.ResourceCPU,
+		desiredMetricValues: PodMetricsInfo{
+			"test-pod-1": {Value: 400, Timestamp: offsetTimestampBy(targetTimestamp), Window: window},
+		},
+		container:          "test-2",
+		targetTimestamp:    targetTimestamp,
+		window:             window,
 		reportedPodMetrics: []map[string]int64{{"test-1": 100}, {"test-1": 300, "test-2": 400}, {}},
 	}
 	tc.runTest(t)

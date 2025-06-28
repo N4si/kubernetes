@@ -20,7 +20,9 @@ import (
 	"os"
 	"testing"
 
-	"k8s.io/cli-runtime/pkg/genericclioptions"
+	utiltesting "k8s.io/client-go/util/testing"
+
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -83,7 +85,6 @@ contexts:
   name: my-cluster
 current-context: minikube
 kind: Config
-preferences: {}
 users:
 - name: minikube
   user:
@@ -163,7 +164,6 @@ contexts:
   name: my-cluster
 current-context: minikube
 kind: Config
-preferences: {}
 users:
 - name: minikube
   user:
@@ -245,7 +245,6 @@ contexts:
   name: minikube
 current-context: minikube
 kind: Config
-preferences: {}
 users:
 - name: minikube
   user:
@@ -270,7 +269,6 @@ contexts:
   name: my-cluster
 current-context: my-cluster
 kind: Config
-preferences: {}
 users:
 - name: mu-cluster
   user:
@@ -297,7 +295,7 @@ func (test viewClusterTest) run(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer os.Remove(fakeKubeFile.Name())
+	defer utiltesting.CloseAndRemove(t, fakeKubeFile)
 	err = clientcmd.WriteToFile(test.config, fakeKubeFile.Name())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -305,7 +303,7 @@ func (test viewClusterTest) run(t *testing.T) {
 	pathOptions := clientcmd.NewDefaultPathOptions()
 	pathOptions.GlobalFile = fakeKubeFile.Name()
 	pathOptions.EnvVar = ""
-	streams, _, buf, _ := genericclioptions.NewTestIOStreams()
+	streams, _, buf, _ := genericiooptions.NewTestIOStreams()
 	cmd := NewCmdConfigView(streams, pathOptions)
 	// "context" is a global flag, inherited from base kubectl command in the real world
 	cmd.Flags().String("context", "", "The name of the kubeconfig context to use")

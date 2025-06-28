@@ -31,10 +31,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
+	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	kubeconfigutil "k8s.io/kubernetes/cmd/kubeadm/app/util/kubeconfig"
 )
 
@@ -48,12 +50,12 @@ discovery:
 controlPlane:
   certificateKey: c39a18bae4a72e71b178661f437363da218a3efb83ddb03f1cd91d9ae1da41bd
 nodeRegistration:
-  criSocket: unix:///var/run/containerd/containerd.sock
+  criSocket: %s
   name: someName
   ignorePreflightErrors:
     - c
     - d
-`, kubeadmapiv1.SchemeGroupVersion.String())
+`, kubeadmapiv1.SchemeGroupVersion.String(), expectedCRISocket)
 
 func TestNewJoinData(t *testing.T) {
 	// create temp directory
@@ -218,9 +220,10 @@ func TestNewJoinData(t *testing.T) {
 						TypeMeta: metav1.TypeMeta{Kind: "", APIVersion: ""},
 						NodeRegistration: kubeadmapi.NodeRegistrationOptions{
 							Name:                  "somename",
-							CRISocket:             "unix:///var/run/containerd/containerd.sock",
+							CRISocket:             expectedCRISocket,
 							IgnorePreflightErrors: []string{"c", "d"},
 							ImagePullPolicy:       "IfNotPresent",
+							ImagePullSerial:       ptr.To(true),
 							Taints:                []v1.Taint{{Key: "node-role.kubernetes.io/control-plane", Effect: "NoSchedule"}},
 						},
 						CACertPath: kubeadmapiv1.DefaultCACertPath,
@@ -231,7 +234,7 @@ func TestNewJoinData(t *testing.T) {
 								UnsafeSkipCAVerification: true,
 							},
 							TLSBootstrapToken: "abcdef.0123456789abcdef",
-							Timeout:           &metav1.Duration{Duration: kubeadmapiv1.DefaultDiscoveryTimeout},
+							Timeout:           &metav1.Duration{Duration: constants.DiscoveryTimeout},
 						},
 						ControlPlane: &kubeadmapi.JoinControlPlane{
 							CertificateKey: "c39a18bae4a72e71b178661f437363da218a3efb83ddb03f1cd91d9ae1da41bd",
@@ -239,7 +242,7 @@ func TestNewJoinData(t *testing.T) {
 					},
 					ignorePreflightErrors: sets.New("c", "d"),
 				}
-				if diff := cmp.Diff(validData, data, cmp.AllowUnexported(joinData{}), cmpopts.IgnoreFields(joinData{}, "client", "initCfg", "cfg.ControlPlane.LocalAPIEndpoint")); diff != "" {
+				if diff := cmp.Diff(validData, data, cmp.AllowUnexported(joinData{}), cmpopts.IgnoreFields(joinData{}, "client", "initCfg", "cfg.ControlPlane.LocalAPIEndpoint", "cfg.Timeouts")); diff != "" {
 					t.Fatalf("newJoinData returned data (-want,+got):\n%s", diff)
 				}
 			},
@@ -311,6 +314,7 @@ func TestNewJoinData(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// initialize an external join option and inject it to the join cmd
 			joinOptions := newJoinOptions()
+			joinOptions.skipCRIDetect = true // avoid CRI detection in unit tests
 			cmd := newCmdJoin(nil, joinOptions)
 
 			// set klog output destination to bytes.Buffer so that log could be fetched and verified later.

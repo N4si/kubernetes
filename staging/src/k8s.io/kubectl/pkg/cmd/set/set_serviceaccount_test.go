@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/cli-runtime/pkg/resource"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/rest/fake"
@@ -78,7 +79,7 @@ func TestSetServiceAccountLocal(t *testing.T) {
 
 			outputFormat := "yaml"
 
-			streams, _, buf, _ := genericclioptions.NewTestIOStreams()
+			streams, _, buf, _ := genericiooptions.NewTestIOStreams()
 			cmd := NewCmdServiceAccount(tf, streams)
 			cmd.Flags().Set("output", outputFormat)
 			cmd.Flags().Set("local", "true")
@@ -93,7 +94,7 @@ func TestSetServiceAccountLocal(t *testing.T) {
 			assert.NoError(t, err)
 			err = saConfig.Run()
 			assert.NoError(t, err)
-			assert.Contains(t, buf.String(), "serviceAccountName: "+serviceAccount, fmt.Sprintf("serviceaccount not updated for %s", input.yaml))
+			assert.Containsf(t, buf.String(), "serviceAccountName: "+serviceAccount, "serviceaccount not updated for %s", input.yaml)
 		})
 	}
 }
@@ -114,7 +115,7 @@ func TestSetServiceAccountMultiLocal(t *testing.T) {
 
 	outputFormat := "name"
 
-	streams, _, buf, _ := genericclioptions.NewTestIOStreams()
+	streams, _, buf, _ := genericiooptions.NewTestIOStreams()
 	cmd := NewCmdServiceAccount(tf, streams)
 	cmd.Flags().Set("output", outputFormat)
 	cmd.Flags().Set("local", "true")
@@ -336,7 +337,7 @@ func TestSetServiceAccountRemote(t *testing.T) {
 						if err != nil {
 							return nil, err
 						}
-						assert.Contains(t, string(bytes), `"serviceAccountName":`+`"`+serviceAccount+`"`, fmt.Sprintf("serviceaccount not updated for %#v", input.object))
+						assert.Containsf(t, string(bytes), `"serviceAccountName":`+`"`+serviceAccount+`"`, "serviceaccount not updated for %#v", input.object)
 						return &http.Response{StatusCode: http.StatusOK, Header: cmdtesting.DefaultHeader(), Body: objBody(input.object)}, nil
 					default:
 						t.Errorf("%s: unexpected request: %s %#v\n%#v", "serviceaccount", req.Method, req.URL, req)
@@ -347,7 +348,7 @@ func TestSetServiceAccountRemote(t *testing.T) {
 
 			outputFormat := "yaml"
 
-			streams := genericclioptions.NewTestIOStreamsDiscard()
+			streams := genericiooptions.NewTestIOStreamsDiscard()
 			cmd := NewCmdServiceAccount(tf, streams)
 			cmd.Flags().Set("output", outputFormat)
 			saConfig := SetServiceAccountOptions{
@@ -388,7 +389,7 @@ func TestServiceAccountValidation(t *testing.T) {
 
 			outputFormat := ""
 
-			streams := genericclioptions.NewTestIOStreamsDiscard()
+			streams := genericiooptions.NewTestIOStreamsDiscard()
 			cmd := NewCmdServiceAccount(tf, streams)
 
 			saConfig := &SetServiceAccountOptions{

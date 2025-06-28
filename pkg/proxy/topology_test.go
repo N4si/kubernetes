@@ -28,10 +28,10 @@ import (
 	"k8s.io/kubernetes/pkg/features"
 )
 
-func checkExpectedEndpoints(expected sets.String, actual []Endpoint) error {
+func checkExpectedEndpoints(expected sets.Set[string], actual []Endpoint) error {
 	var errs []error
 
-	expectedCopy := sets.NewString(expected.UnsortedList()...)
+	expectedCopy := sets.New[string](expected.UnsortedList()...)
 	for _, ep := range actual {
 		if !expectedCopy.Has(ep.String()) {
 			errs = append(errs, fmt.Errorf("unexpected endpoint %v", ep))
@@ -47,452 +47,356 @@ func checkExpectedEndpoints(expected sets.String, actual []Endpoint) error {
 
 func TestCategorizeEndpoints(t *testing.T) {
 	testCases := []struct {
-		name         string
-		hintsEnabled bool
-		pteEnabled   bool
-		nodeLabels   map[string]string
-		serviceInfo  ServicePort
-		endpoints    []Endpoint
+		name              string
+		preferSameEnabled bool
+		nodeName          string
+		nodeLabels        map[string]string
+		serviceInfo       ServicePort
+		endpoints         []Endpoint
 
 		// We distinguish `nil` ("service doesn't use this kind of endpoints") from
-		// `sets.String()` ("service uses this kind of endpoints but has no endpoints").
+		// `sets.Set[string]()` ("service uses this kind of endpoints but has no endpoints").
 		// allEndpoints can be left unset if only one of clusterEndpoints and
 		// localEndpoints is set, and allEndpoints is identical to it.
 		// onlyRemoteEndpoints should be true if CategorizeEndpoints returns true for
 		// hasAnyEndpoints despite allEndpoints being empty.
-		clusterEndpoints    sets.String
-		localEndpoints      sets.String
-		allEndpoints        sets.String
+		clusterEndpoints    sets.Set[string]
+		localEndpoints      sets.Set[string]
+		allEndpoints        sets.Set[string]
 		onlyRemoteEndpoints bool
 	}{{
-		name:         "hints enabled, hints annotation == auto",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: "auto"},
+		name:        "should use topology since all endpoints have hints, node has a zone label and and there are endpoints for the node's zone",
+		nodeLabels:  map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo: &BaseServicePortInfo{},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.3:80", zoneHints: sets.New[string]("zone-a"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.4:80", zoneHints: sets.New[string]("zone-b"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.5:80", zoneHints: sets.New[string]("zone-c"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.6:80", zoneHints: sets.New[string]("zone-a"), ready: true},
 		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.6:80"),
+		clusterEndpoints: sets.New[string]("10.1.2.3:80", "10.1.2.6:80"),
 		localEndpoints:   nil,
 	}, {
-		name:         "hints, hints annotation == disabled, hints ignored",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: "disabled"},
+		name:        "externalTrafficPolicy: Local, topology ignored for Local endpoints",
+		nodeLabels:  map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo: &BaseServicePortInfo{externalPolicyLocal: true, nodePort: 8080},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.3:80", zoneHints: sets.New[string]("zone-a"), ready: true, isLocal: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.4:80", zoneHints: sets.New[string]("zone-b"), ready: true, isLocal: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.5:80", zoneHints: sets.New[string]("zone-c"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.6:80", zoneHints: sets.New[string]("zone-a"), ready: true},
 		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
+		clusterEndpoints: sets.New[string]("10.1.2.3:80", "10.1.2.6:80"),
+		localEndpoints:   sets.New[string]("10.1.2.3:80", "10.1.2.4:80"),
+		allEndpoints:     sets.New[string]("10.1.2.3:80", "10.1.2.4:80", "10.1.2.6:80"),
+	}, {
+		name:        "internalTrafficPolicy: Local, topology ignored for Local endpoints",
+		nodeLabels:  map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo: &BaseServicePortInfo{internalPolicyLocal: true, externalPolicyLocal: false, nodePort: 8080},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{endpoint: "10.1.2.3:80", zoneHints: sets.New[string]("zone-a"), ready: true, isLocal: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.4:80", zoneHints: sets.New[string]("zone-b"), ready: true, isLocal: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.5:80", zoneHints: sets.New[string]("zone-c"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.6:80", zoneHints: sets.New[string]("zone-a"), ready: true},
+		},
+		clusterEndpoints: sets.New[string]("10.1.2.3:80", "10.1.2.6:80"),
+		localEndpoints:   sets.New[string]("10.1.2.3:80", "10.1.2.4:80"),
+		allEndpoints:     sets.New[string]("10.1.2.3:80", "10.1.2.4:80", "10.1.2.6:80"),
+	}, {
+		name:        "empty node labels",
+		nodeLabels:  map[string]string{},
+		serviceInfo: &BaseServicePortInfo{},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{endpoint: "10.1.2.3:80", zoneHints: sets.New[string]("zone-a"), ready: true},
+		},
+		clusterEndpoints: sets.New[string]("10.1.2.3:80"),
 		localEndpoints:   nil,
 	}, {
-		name:         "hints disabled, hints annotation == auto",
-		hintsEnabled: false,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: "auto"},
+		name:        "empty zone label",
+		nodeLabels:  map[string]string{v1.LabelTopologyZone: ""},
+		serviceInfo: &BaseServicePortInfo{},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.3:80", zoneHints: sets.New[string]("zone-a"), ready: true},
 		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
+		clusterEndpoints: sets.New[string]("10.1.2.3:80"),
 		localEndpoints:   nil,
 	}, {
-
-		name:         "hints, hints annotation == aUto (wrong capitalization), hints ignored",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: "aUto"},
+		name:        "node in different zone, no endpoint filtering",
+		nodeLabels:  map[string]string{v1.LabelTopologyZone: "zone-b"},
+		serviceInfo: &BaseServicePortInfo{},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.3:80", zoneHints: sets.New[string]("zone-a"), ready: true},
 		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
+		clusterEndpoints: sets.New[string]("10.1.2.3:80"),
 		localEndpoints:   nil,
 	}, {
-		name:         "hints, hints annotation empty, hints ignored",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{},
+		name:        "unready endpoint",
+		nodeLabels:  map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo: &BaseServicePortInfo{},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.3:80", zoneHints: sets.New[string]("zone-a"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.4:80", zoneHints: sets.New[string]("zone-b"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.5:80", zoneHints: sets.New[string]("zone-c"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.6:80", zoneHints: sets.New[string]("zone-a"), ready: false}, // unready
 		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
+		clusterEndpoints: sets.New[string]("10.1.2.3:80"),
 		localEndpoints:   nil,
 	}, {
-		name:         "externalTrafficPolicy: Local, topology ignored for Local endpoints",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{externalPolicyLocal: true, nodePort: 8080, hintsAnnotation: "auto"},
+		name:        "only unready endpoints in same zone (should not filter)",
+		nodeLabels:  map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo: &BaseServicePortInfo{},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.3:80", zoneHints: sets.New[string]("zone-a"), ready: false},
+			&BaseEndpointInfo{endpoint: "10.1.2.4:80", zoneHints: sets.New[string]("zone-b"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.5:80", zoneHints: sets.New[string]("zone-c"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.6:80", zoneHints: sets.New[string]("zone-a"), ready: false},
 		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.6:80"),
-		localEndpoints:   sets.NewString("10.1.2.3:80", "10.1.2.4:80"),
-		allEndpoints:     sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.6:80"),
-	}, {
-		name:         "internalTrafficPolicy: Local, topology ignored for Local endpoints",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{internalPolicyLocal: true, hintsAnnotation: "auto", externalPolicyLocal: false, nodePort: 8080},
-		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.6:80"),
-		localEndpoints:   sets.NewString("10.1.2.3:80", "10.1.2.4:80"),
-		allEndpoints:     sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.6:80"),
-	}, {
-		name:         "empty node labels",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: "auto"},
-		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80"),
+		clusterEndpoints: sets.New[string]("10.1.2.4:80", "10.1.2.5:80"),
 		localEndpoints:   nil,
 	}, {
-		name:         "empty zone label",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: ""},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: "auto"},
+		name:        "missing hints, no filtering applied",
+		nodeLabels:  map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo: &BaseServicePortInfo{},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.3:80", zoneHints: sets.New[string]("zone-a"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.4:80", zoneHints: sets.New[string]("zone-b"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.5:80", zoneHints: nil, ready: true}, // Endpoint is missing hint.
+			&BaseEndpointInfo{endpoint: "10.1.2.6:80", zoneHints: sets.New[string]("zone-a"), ready: true},
 		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80"),
+		clusterEndpoints: sets.New[string]("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
 		localEndpoints:   nil,
 	}, {
-		name:         "node in different zone, no endpoint filtering",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-b"},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: "auto"},
+		name:        "multiple hints per endpoint, filtering includes any endpoint with zone included",
+		nodeLabels:  map[string]string{v1.LabelTopologyZone: "zone-c"},
+		serviceInfo: &BaseServicePortInfo{},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.3:80", zoneHints: sets.New[string]("zone-a", "zone-b", "zone-c"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.4:80", zoneHints: sets.New[string]("zone-b", "zone-c"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.5:80", zoneHints: sets.New[string]("zone-b", "zone-d"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.6:80", zoneHints: sets.New[string]("zone-c"), ready: true},
 		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80"),
+		clusterEndpoints: sets.New[string]("10.1.2.3:80", "10.1.2.4:80", "10.1.2.6:80"),
 		localEndpoints:   nil,
 	}, {
-		name:         "normal endpoint filtering, auto annotation",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: "auto"},
+		name:              "PreferSameNode falls back to same-zone when feature gate disabled",
+		preferSameEnabled: false,
+		nodeName:          "node-1",
+		nodeLabels:        map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:       &BaseServicePortInfo{},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.3:80", zoneHints: sets.New[string]("zone-a"), nodeHints: sets.New[string]("node-1"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.4:80", zoneHints: sets.New[string]("zone-b"), nodeHints: sets.New[string]("node-2"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.5:80", zoneHints: sets.New[string]("zone-c"), nodeHints: sets.New[string]("node-3"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.6:80", zoneHints: sets.New[string]("zone-a"), nodeHints: sets.New[string]("node-4"), ready: true},
 		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.6:80"),
+		clusterEndpoints: sets.New[string]("10.1.2.3:80", "10.1.2.6:80"),
 		localEndpoints:   nil,
 	}, {
-		name:         "unready endpoint",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: "auto"},
+		name:              "PreferSameNode available",
+		preferSameEnabled: true,
+		nodeName:          "node-1",
+		nodeLabels:        map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:       &BaseServicePortInfo{},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: false},
+			&BaseEndpointInfo{endpoint: "10.1.2.3:80", zoneHints: sets.New[string]("zone-a"), nodeHints: sets.New[string]("node-1"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.4:80", zoneHints: sets.New[string]("zone-b"), nodeHints: sets.New[string]("node-2"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.5:80", zoneHints: sets.New[string]("zone-c"), nodeHints: sets.New[string]("node-3"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.6:80", zoneHints: sets.New[string]("zone-a"), nodeHints: sets.New[string]("node-4"), ready: true},
 		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80"),
+		clusterEndpoints: sets.New[string]("10.1.2.3:80"),
 		localEndpoints:   nil,
 	}, {
-		name:         "only unready endpoints in same zone (should not filter)",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: "auto"},
+		name:              "PreferSameNode ignored if some endpoints unhinted",
+		preferSameEnabled: true,
+		nodeName:          "node-1",
+		nodeLabels:        map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:       &BaseServicePortInfo{},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: false},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: false},
+			&BaseEndpointInfo{endpoint: "10.1.2.3:80", zoneHints: sets.New[string]("zone-a"), nodeHints: sets.New[string]("node-1"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.4:80", ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.5:80", zoneHints: sets.New[string]("zone-c"), nodeHints: sets.New[string]("node-3"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.6:80", zoneHints: sets.New[string]("zone-a"), nodeHints: sets.New[string]("node-4"), ready: true},
 		},
-		clusterEndpoints: sets.NewString("10.1.2.4:80", "10.1.2.5:80"),
+		clusterEndpoints: sets.New[string]("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
 		localEndpoints:   nil,
 	}, {
-		name:         "normal endpoint filtering, Auto annotation",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: "Auto"},
+		name:              "PreferSameNode falls back to PreferSameZone if no endpoint for node",
+		preferSameEnabled: true,
+		nodeName:          "node-0",
+		nodeLabels:        map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:       &BaseServicePortInfo{},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.3:80", zoneHints: sets.New[string]("zone-a"), nodeHints: sets.New[string]("node-1"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.4:80", zoneHints: sets.New[string]("zone-b"), nodeHints: sets.New[string]("node-2"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.5:80", zoneHints: sets.New[string]("zone-c"), nodeHints: sets.New[string]("node-3"), ready: true},
+			&BaseEndpointInfo{endpoint: "10.1.2.6:80", zoneHints: sets.New[string]("zone-a"), nodeHints: sets.New[string]("node-4"), ready: true},
 		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.6:80"),
+		clusterEndpoints: sets.New[string]("10.1.2.3:80", "10.1.2.6:80"),
 		localEndpoints:   nil,
 	}, {
-		name:         "hintsAnnotation empty, no filtering applied",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: ""},
+		name:        "conflicting topology and localness require merging allEndpoints",
+		nodeLabels:  map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo: &BaseServicePortInfo{internalPolicyLocal: false, externalPolicyLocal: true, nodePort: 8080},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", zoneHints: sets.New[string]("zone-a"), ready: true, isLocal: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", zoneHints: sets.New[string]("zone-b"), ready: true, isLocal: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.2:80", zoneHints: sets.New[string]("zone-a"), ready: true, isLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.3:80", zoneHints: sets.New[string]("zone-b"), ready: true, isLocal: false},
 		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
-		localEndpoints:   nil,
-	}, {
-		name:         "hintsAnnotation disabled, no filtering applied",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: "disabled"},
-		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
-		localEndpoints:   nil,
-	}, {
-		name:         "missing hints, no filtering applied",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: "auto"},
-		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: nil, Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
-		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
-		localEndpoints:   nil,
-	}, {
-		name:         "multiple hints per endpoint, filtering includes any endpoint with zone included",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-c"},
-		serviceInfo:  &BaseServicePortInfo{hintsAnnotation: "auto"},
-		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a", "zone-b", "zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b", "zone-c"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-b", "zone-d"), Ready: true},
-			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
-		},
-		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.6:80"),
-		localEndpoints:   nil,
-	}, {
-		name:         "conflicting topology and localness require merging allEndpoints",
-		hintsEnabled: true,
-		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
-		serviceInfo:  &BaseServicePortInfo{internalPolicyLocal: false, externalPolicyLocal: true, nodePort: 8080, hintsAnnotation: "auto"},
-		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", ZoneHints: sets.NewString("zone-a"), Ready: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", ZoneHints: sets.NewString("zone-b"), Ready: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.0.0.2:80", ZoneHints: sets.NewString("zone-a"), Ready: true, IsLocal: false},
-			&BaseEndpointInfo{Endpoint: "10.0.0.3:80", ZoneHints: sets.NewString("zone-b"), Ready: true, IsLocal: false},
-		},
-		clusterEndpoints: sets.NewString("10.0.0.0:80", "10.0.0.2:80"),
-		localEndpoints:   sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
-		allEndpoints:     sets.NewString("10.0.0.0:80", "10.0.0.1:80", "10.0.0.2:80"),
+		clusterEndpoints: sets.New[string]("10.0.0.0:80", "10.0.0.2:80"),
+		localEndpoints:   sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
+		allEndpoints:     sets.New[string]("10.0.0.0:80", "10.0.0.1:80", "10.0.0.2:80"),
 	}, {
 		name:             "internalTrafficPolicy: Local, with empty endpoints",
 		serviceInfo:      &BaseServicePortInfo{internalPolicyLocal: true},
 		endpoints:        []Endpoint{},
 		clusterEndpoints: nil,
-		localEndpoints:   sets.NewString(),
+		localEndpoints:   sets.New[string](),
 	}, {
 		name:        "internalTrafficPolicy: Local, but all endpoints are remote",
 		serviceInfo: &BaseServicePortInfo{internalPolicyLocal: true},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: false},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", ready: true, isLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", ready: true, isLocal: false},
 		},
 		clusterEndpoints:    nil,
-		localEndpoints:      sets.NewString(),
+		localEndpoints:      sets.New[string](),
 		onlyRemoteEndpoints: true,
 	}, {
 		name:        "internalTrafficPolicy: Local, all endpoints are local",
 		serviceInfo: &BaseServicePortInfo{internalPolicyLocal: true},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", ready: true, isLocal: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", ready: true, isLocal: true},
 		},
 		clusterEndpoints: nil,
-		localEndpoints:   sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		localEndpoints:   sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
 	}, {
 		name:        "internalTrafficPolicy: Local, some endpoints are local",
 		serviceInfo: &BaseServicePortInfo{internalPolicyLocal: true},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", ready: true, isLocal: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", ready: true, isLocal: false},
 		},
 		clusterEndpoints: nil,
-		localEndpoints:   sets.NewString("10.0.0.0:80"),
+		localEndpoints:   sets.New[string]("10.0.0.0:80"),
 	}, {
 		name:        "Cluster traffic policy, endpoints not Ready",
 		serviceInfo: &BaseServicePortInfo{},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: false},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", ready: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", ready: false},
 		},
-		clusterEndpoints: sets.NewString(),
+		clusterEndpoints: sets.New[string](),
 		localEndpoints:   nil,
 	}, {
 		name:        "Cluster traffic policy, some endpoints are Ready",
 		serviceInfo: &BaseServicePortInfo{},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: false},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", ready: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", ready: true},
 		},
-		clusterEndpoints: sets.NewString("10.0.0.1:80"),
+		clusterEndpoints: sets.New[string]("10.0.0.1:80"),
 		localEndpoints:   nil,
 	}, {
-		name:        "Cluster traffic policy, PTE enabled, all endpoints are terminating",
-		pteEnabled:  true,
+		name:        "Cluster traffic policy, all endpoints are terminating",
 		serviceInfo: &BaseServicePortInfo{},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: false, Serving: true, Terminating: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", ready: false, serving: true, terminating: true, isLocal: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", ready: false, serving: true, terminating: true, isLocal: false},
 		},
-		clusterEndpoints: sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
-		localEndpoints:   nil,
-	}, {
-		name:        "Cluster traffic policy, PTE disabled, all endpoints are terminating",
-		pteEnabled:  false,
-		serviceInfo: &BaseServicePortInfo{},
-		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: false, Serving: true, Terminating: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
-		},
-		clusterEndpoints: sets.NewString(),
+		clusterEndpoints: sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
 		localEndpoints:   nil,
 	}, {
 		name:        "iTP: Local, eTP: Cluster, some endpoints local",
 		serviceInfo: &BaseServicePortInfo{internalPolicyLocal: true, externalPolicyLocal: false, nodePort: 8080},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", ready: true, isLocal: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", ready: true, isLocal: false},
 		},
-		clusterEndpoints: sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
-		localEndpoints:   sets.NewString("10.0.0.0:80"),
-		allEndpoints:     sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		clusterEndpoints: sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
+		localEndpoints:   sets.New[string]("10.0.0.0:80"),
+		allEndpoints:     sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
 	}, {
 		name:        "iTP: Cluster, eTP: Local, some endpoints local",
 		serviceInfo: &BaseServicePortInfo{internalPolicyLocal: false, externalPolicyLocal: true, nodePort: 8080},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", ready: true, isLocal: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", ready: true, isLocal: false},
 		},
-		clusterEndpoints: sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
-		localEndpoints:   sets.NewString("10.0.0.0:80"),
-		allEndpoints:     sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		clusterEndpoints: sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
+		localEndpoints:   sets.New[string]("10.0.0.0:80"),
+		allEndpoints:     sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
 	}, {
 		name:        "iTP: Local, eTP: Local, some endpoints local",
 		serviceInfo: &BaseServicePortInfo{internalPolicyLocal: true, externalPolicyLocal: true, nodePort: 8080},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", ready: true, isLocal: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", ready: true, isLocal: false},
 		},
-		clusterEndpoints: sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
-		localEndpoints:   sets.NewString("10.0.0.0:80"),
-		allEndpoints:     sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		clusterEndpoints: sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
+		localEndpoints:   sets.New[string]("10.0.0.0:80"),
+		allEndpoints:     sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
 	}, {
 		name:        "iTP: Local, eTP: Local, all endpoints remote",
 		serviceInfo: &BaseServicePortInfo{internalPolicyLocal: true, externalPolicyLocal: true, nodePort: 8080},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: false},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", ready: true, isLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", ready: true, isLocal: false},
 		},
-		clusterEndpoints: sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
-		localEndpoints:   sets.NewString(),
-		allEndpoints:     sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		clusterEndpoints: sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
+		localEndpoints:   sets.New[string](),
+		allEndpoints:     sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
 	}, {
-		name:        "iTP: Local, eTP: Local, PTE disabled, all endpoints remote and terminating",
+		name:        "iTP: Local, eTP: Local, all endpoints remote and terminating",
 		serviceInfo: &BaseServicePortInfo{internalPolicyLocal: true, externalPolicyLocal: true, nodePort: 8080},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", ready: false, serving: true, terminating: true, isLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", ready: false, serving: true, terminating: true, isLocal: false},
 		},
-		clusterEndpoints: sets.NewString(),
-		localEndpoints:   sets.NewString(),
-		allEndpoints:     sets.NewString(),
-	}, {
-		name:        "iTP: Local, eTP: Local, PTE enabled, all endpoints remote and terminating",
-		pteEnabled:  true,
-		serviceInfo: &BaseServicePortInfo{internalPolicyLocal: true, externalPolicyLocal: true, nodePort: 8080},
-		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
-		},
-		clusterEndpoints:    sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
-		localEndpoints:      sets.NewString(),
-		allEndpoints:        sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		clusterEndpoints:    sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
+		localEndpoints:      sets.New[string](),
+		allEndpoints:        sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
 		onlyRemoteEndpoints: true,
 	}, {
-		name:        "iTP: Cluster, eTP: Local, PTE disabled, with terminating endpoints",
+		name:        "iTP: Cluster, eTP: Local, with terminating endpoints",
 		serviceInfo: &BaseServicePortInfo{internalPolicyLocal: false, externalPolicyLocal: true, nodePort: 8080},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: false},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: false, Serving: false, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.0.0.2:80", Ready: false, Serving: true, Terminating: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.0.0.3:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", ready: true, isLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", ready: false, serving: false, isLocal: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.2:80", ready: false, serving: true, terminating: true, isLocal: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.3:80", ready: false, serving: true, terminating: true, isLocal: false},
 		},
-		clusterEndpoints: sets.NewString("10.0.0.0:80"),
-		localEndpoints:   sets.NewString(),
-		allEndpoints:     sets.NewString("10.0.0.0:80"),
-	}, {
-		name:        "iTP: Cluster, eTP: Local, PTE enabled, with terminating endpoints",
-		pteEnabled:  true,
-		serviceInfo: &BaseServicePortInfo{internalPolicyLocal: false, externalPolicyLocal: true, nodePort: 8080},
-		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: false},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: false, Serving: false, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.0.0.2:80", Ready: false, Serving: true, Terminating: true, IsLocal: true},
-			&BaseEndpointInfo{Endpoint: "10.0.0.3:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
-		},
-		clusterEndpoints: sets.NewString("10.0.0.0:80"),
-		localEndpoints:   sets.NewString("10.0.0.2:80"),
-		allEndpoints:     sets.NewString("10.0.0.0:80", "10.0.0.2:80"),
+		clusterEndpoints: sets.New[string]("10.0.0.0:80"),
+		localEndpoints:   sets.New[string]("10.0.0.2:80"),
+		allEndpoints:     sets.New[string]("10.0.0.0:80", "10.0.0.2:80"),
 	}, {
 		name:        "externalTrafficPolicy ignored if not externally accessible",
 		serviceInfo: &BaseServicePortInfo{externalPolicyLocal: true},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: false},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", ready: true, isLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", ready: true, isLocal: true},
 		},
-		clusterEndpoints: sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		clusterEndpoints: sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
 		localEndpoints:   nil,
-		allEndpoints:     sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		allEndpoints:     sets.New[string]("10.0.0.0:80", "10.0.0.1:80"),
 	}, {
 		name:        "no cluster endpoints for iTP:Local internal-only service",
 		serviceInfo: &BaseServicePortInfo{internalPolicyLocal: true},
 		endpoints: []Endpoint{
-			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: false},
-			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: true},
+			&BaseEndpointInfo{endpoint: "10.0.0.0:80", ready: true, isLocal: false},
+			&BaseEndpointInfo{endpoint: "10.0.0.1:80", ready: true, isLocal: true},
 		},
 		clusterEndpoints: nil,
-		localEndpoints:   sets.NewString("10.0.0.1:80"),
-		allEndpoints:     sets.NewString("10.0.0.1:80"),
+		localEndpoints:   sets.New[string]("10.0.0.1:80"),
+		allEndpoints:     sets.New[string]("10.0.0.1:80"),
 	}}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.TopologyAwareHints, tc.hintsEnabled)()
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ProxyTerminatingEndpoints, tc.pteEnabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PreferSameTrafficDistribution, tc.preferSameEnabled)
 
-			clusterEndpoints, localEndpoints, allEndpoints, hasAnyEndpoints := CategorizeEndpoints(tc.endpoints, tc.serviceInfo, tc.nodeLabels)
+			clusterEndpoints, localEndpoints, allEndpoints, hasAnyEndpoints := CategorizeEndpoints(tc.endpoints, tc.serviceInfo, tc.nodeName, tc.nodeLabels)
 
 			if tc.clusterEndpoints == nil && clusterEndpoints != nil {
 				t.Errorf("expected no cluster endpoints but got %v", clusterEndpoints)
@@ -512,7 +416,7 @@ func TestCategorizeEndpoints(t *testing.T) {
 				}
 			}
 
-			var expectedAllEndpoints sets.String
+			var expectedAllEndpoints sets.Set[string]
 			if tc.clusterEndpoints != nil && tc.localEndpoints == nil {
 				expectedAllEndpoints = tc.clusterEndpoints
 			} else if tc.localEndpoints != nil && tc.clusterEndpoints == nil {

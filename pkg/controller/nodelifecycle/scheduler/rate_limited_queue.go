@@ -23,7 +23,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/flowcontrol"
-
 	"k8s.io/klog/v2"
 )
 
@@ -82,7 +81,7 @@ func (h *TimedQueue) Pop() interface{} {
 type UniqueQueue struct {
 	lock  sync.Mutex
 	queue TimedQueue
-	set   sets.String
+	set   sets.Set[string]
 }
 
 // Add a new value to the queue if it wasn't added before, or was
@@ -190,7 +189,7 @@ func (q *UniqueQueue) Clear() {
 		q.queue = make(TimedQueue, 0)
 	}
 	if len(q.set) > 0 {
-		q.set = sets.NewString()
+		q.set = sets.New[string]()
 	}
 }
 
@@ -208,7 +207,7 @@ func NewRateLimitedTimedQueue(limiter flowcontrol.RateLimiter) *RateLimitedTimed
 	return &RateLimitedTimedQueue{
 		queue: UniqueQueue{
 			queue: TimedQueue{},
-			set:   sets.NewString(),
+			set:   sets.New[string](),
 		},
 		limiter: limiter,
 	}
@@ -229,14 +228,14 @@ type ActionFunc func(TimedValue) (bool, time.Duration)
 // function in NodeController when Node becomes Ready again) TODO:
 // figure out a good way to do garbage collection for all Nodes that
 // were removed from the cluster.
-func (q *RateLimitedTimedQueue) Try(fn ActionFunc) {
+func (q *RateLimitedTimedQueue) Try(logger klog.Logger, fn ActionFunc) {
 	val, ok := q.queue.Head()
 	q.limiterLock.Lock()
 	defer q.limiterLock.Unlock()
 	for ok {
 		// rate limit the queue checking
 		if !q.limiter.TryAccept() {
-			klog.V(10).Infof("Try rate limited for value: %v", val)
+			logger.V(10).Info("Try rate limited", "value", val)
 			// Try again later
 			break
 		}

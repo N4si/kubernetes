@@ -19,35 +19,41 @@ package request
 import (
 	"math"
 	"net/http"
-	"net/url"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/apiserver/pkg/features"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/apiserver/pkg/storage/cacher/delegator"
 	"k8s.io/klog/v2"
 )
 
-func newListWorkEstimator(countFn objectCountGetterFunc, config *WorkEstimatorConfig) WorkEstimatorFunc {
+func newListWorkEstimator(countFn statsGetterFunc, config *WorkEstimatorConfig, maxSeatsFn maxSeatsFunc) WorkEstimatorFunc {
 	estimator := &listWorkEstimator{
 		config:        config,
-		countGetterFn: countFn,
+		statsGetterFn: countFn,
+		maxSeatsFn:    maxSeatsFn,
 	}
 	return estimator.estimate
 }
 
 type listWorkEstimator struct {
 	config        *WorkEstimatorConfig
-	countGetterFn objectCountGetterFunc
+	statsGetterFn statsGetterFunc
+	maxSeatsFn    maxSeatsFunc
 }
 
 func (e *listWorkEstimator) estimate(r *http.Request, flowSchemaName, priorityLevelName string) WorkEstimate {
+	minSeats := e.config.MinimumSeats
+	maxSeats := e.maxSeatsFn(priorityLevelName)
+	if maxSeats == 0 || maxSeats > e.config.MaximumSeatsLimit {
+		maxSeats = e.config.MaximumSeatsLimit
+	}
+
 	requestInfo, ok := apirequest.RequestInfoFrom(r.Context())
 	if !ok {
 		// no RequestInfo should never happen, but to be on the safe side
 		// let's return maximumSeats
-		return WorkEstimate{InitialSeats: e.config.MaximumSeats}
+		return WorkEstimate{InitialSeats: maxSeats}
 	}
 
 	if requestInfo.Name != "" {
@@ -56,7 +62,7 @@ func (e *listWorkEstimator) estimate(r *http.Request, flowSchemaName, priorityLe
 		// Example of such list requests:
 		// /apis/certificates.k8s.io/v1/certificatesigningrequests?fieldSelector=metadata.name%3Dcsr-xxs4m
 		// /api/v1/namespaces/test/configmaps?fieldSelector=metadata.name%3Dbig-deployment-1&limit=500&resourceVersion=0
-		return WorkEstimate{InitialSeats: e.config.MinimumSeats}
+		return WorkEstimate{InitialSeats: minSeats}
 	}
 
 	query := r.URL.Query()
@@ -66,18 +72,33 @@ func (e *listWorkEstimator) estimate(r *http.Request, flowSchemaName, priorityLe
 
 		// This request is destined to fail in the validation layer,
 		// return maximumSeats for this request to be consistent.
-		return WorkEstimate{InitialSeats: e.config.MaximumSeats}
+		return WorkEstimate{InitialSeats: maxSeats}
 	}
-	isListFromCache := !shouldListFromStorage(query, &listOptions)
 
-	numStored, err := e.countGetterFn(key(requestInfo))
+	// For watch requests, we want to adjust the cost only if they explicitly request
+	// sending initial events.
+	if requestInfo.Verb == "watch" {
+		if listOptions.SendInitialEvents == nil || !*listOptions.SendInitialEvents {
+			return WorkEstimate{InitialSeats: e.config.MinimumSeats}
+		}
+	}
+	// TODO: Check whether watchcache is enabled.
+	result, err := delegator.ShouldDelegateListMeta(&listOptions, delegator.CacheWithoutSnapshots{})
+	if err != nil {
+		return WorkEstimate{InitialSeats: maxSeats}
+	}
+	listFromStorage := result.ShouldDelegate
+	isListFromCache := requestInfo.Verb == "watch" || !listFromStorage
+
+	stats, err := e.statsGetterFn(key(requestInfo))
+	numStored := stats.ObjectCount
 	switch {
 	case err == ObjectCountStaleErr:
 		// object count going stale is indicative of degradation, so we should
 		// be conservative here and allocate maximum seats to this list request.
 		// NOTE: if a CRD is removed, its count will go stale first and then the
 		// pruner will eventually remove the CRD from the cache.
-		return WorkEstimate{InitialSeats: e.config.MaximumSeats}
+		return WorkEstimate{InitialSeats: maxSeats}
 	case err == ObjectCountNotFoundErr:
 		// there are multiple scenarios in which we can see this error:
 		//  a. the type is truly unknown, a typo on the caller's part.
@@ -91,17 +112,16 @@ func (e *listWorkEstimator) estimate(r *http.Request, flowSchemaName, priorityLe
 		// when aggregated API calls are overestimated, we allocate the minimum
 		// possible seats (see #109106 as an example when being more conservative
 		// led to problems).
-		return WorkEstimate{InitialSeats: e.config.MinimumSeats}
+		return WorkEstimate{InitialSeats: minSeats}
 	case err != nil:
 		// we should never be here since Get returns either ObjectCountStaleErr or
 		// ObjectCountNotFoundErr, return maximumSeats to be on the safe side.
 		klog.ErrorS(err, "Unexpected error from object count tracker")
-		return WorkEstimate{InitialSeats: e.config.MaximumSeats}
+		return WorkEstimate{InitialSeats: maxSeats}
 	}
 
 	limit := numStored
-	if utilfeature.DefaultFeatureGate.Enabled(features.APIListChunking) && listOptions.Limit > 0 &&
-		listOptions.Limit < numStored {
+	if listOptions.Limit > 0 && listOptions.Limit < numStored {
 		limit = listOptions.Limit
 	}
 
@@ -125,11 +145,11 @@ func (e *listWorkEstimator) estimate(r *http.Request, flowSchemaName, priorityLe
 	seats := uint64(math.Ceil(float64(estimatedObjectsToBeProcessed) / e.config.ObjectsPerSeat))
 
 	// make sure we never return a seat of zero
-	if seats < e.config.MinimumSeats {
-		seats = e.config.MinimumSeats
+	if seats < minSeats {
+		seats = minSeats
 	}
-	if seats > e.config.MaximumSeats {
-		seats = e.config.MaximumSeats
+	if seats > maxSeats {
+		seats = maxSeats
 	}
 	return WorkEstimate{InitialSeats: seats}
 }
@@ -140,18 +160,4 @@ func key(requestInfo *apirequest.RequestInfo) string {
 		Resource: requestInfo.Resource,
 	}
 	return groupResource.String()
-}
-
-// NOTICE: Keep in sync with shouldDelegateList function in
-//
-//	staging/src/k8s.io/apiserver/pkg/storage/cacher/cacher.go
-func shouldListFromStorage(query url.Values, opts *metav1.ListOptions) bool {
-	resourceVersion := opts.ResourceVersion
-	match := opts.ResourceVersionMatch
-	pagingEnabled := utilfeature.DefaultFeatureGate.Enabled(features.APIListChunking)
-	hasContinuation := pagingEnabled && len(opts.Continue) > 0
-	hasLimit := pagingEnabled && opts.Limit > 0 && resourceVersion != "0"
-	unsupportedMatch := match != "" && match != metav1.ResourceVersionMatchNotOlderThan
-
-	return resourceVersion == "" || hasContinuation || hasLimit || unsupportedMatch
 }

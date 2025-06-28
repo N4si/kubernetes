@@ -25,13 +25,17 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/net"
 	clientsetfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/klog/v2"
+	"k8s.io/klog/v2/ktesting"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
+	st "k8s.io/kubernetes/pkg/scheduler/testing"
 )
 
 func TestGetPodFullName(t *testing.T) {
@@ -179,6 +183,7 @@ func TestRemoveNominatedNodeName(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			_, ctx := ktesting.NewTestContext(t)
 			actualPatchRequests := 0
 			var actualPatchData string
 			cs := &clientsetfake.Clientset{}
@@ -196,7 +201,7 @@ func TestRemoveNominatedNodeName(t *testing.T) {
 				Status:     v1.PodStatus{NominatedNodeName: test.currentNominatedNodeName},
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 			if err := ClearNominatedNodeName(ctx, cs, pod); err != nil {
 				t.Fatalf("Error calling removeNominatedNodeName: %v", err)
@@ -225,7 +230,7 @@ func TestPatchPodStatus(t *testing.T) {
 	}{
 		{
 			name:   "Should update pod conditions successfully",
-			client: clientsetfake.NewSimpleClientset(),
+			client: clientsetfake.NewClientset(),
 			pod: v1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "ns",
@@ -249,7 +254,7 @@ func TestPatchPodStatus(t *testing.T) {
 			// which would fail the 2-way merge patch generation on Pod patches
 			// due to the mergeKey being the name field
 			name:   "Should update pod conditions successfully on a pod Spec with secrets with empty name",
-			client: clientsetfake.NewSimpleClientset(),
+			client: clientsetfake.NewClientset(),
 			pod: v1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "ns",
@@ -272,7 +277,7 @@ func TestPatchPodStatus(t *testing.T) {
 		{
 			name: "retry patch request when an 'connection refused' error is returned",
 			client: func() *clientsetfake.Clientset {
-				client := clientsetfake.NewSimpleClientset()
+				client := clientsetfake.NewClientset()
 
 				reqcount := 0
 				client.PrependReactor("patch", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
@@ -313,7 +318,7 @@ func TestPatchPodStatus(t *testing.T) {
 		{
 			name: "only 4 retries at most",
 			client: func() *clientsetfake.Clientset {
-				client := clientsetfake.NewSimpleClientset()
+				client := clientsetfake.NewClientset()
 
 				reqcount := 0
 				client.PrependReactor("patch", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
@@ -358,7 +363,8 @@ func TestPatchPodStatus(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			ctx, cancel := context.WithCancel(context.Background())
+			_, ctx := ktesting.NewTestContext(t)
+			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 			err = PatchPodStatus(ctx, client, &tc.pod, &tc.statusToUpdate)
 			if err != nil && tc.validateErr == nil {
@@ -379,6 +385,393 @@ func TestPatchPodStatus(t *testing.T) {
 
 			if diff := cmp.Diff(tc.statusToUpdate, retrievedPod.Status); diff != "" {
 				t.Errorf("unexpected pod status (-want,+got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// Test_As tests the As function with Pod.
+func Test_As_Pod(t *testing.T) {
+	tests := []struct {
+		name       string
+		oldObj     interface{}
+		newObj     interface{}
+		wantOldObj *v1.Pod
+		wantNewObj *v1.Pod
+		wantErr    bool
+	}{
+		{
+			name:       "nil old Pod",
+			oldObj:     nil,
+			newObj:     &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}},
+			wantOldObj: nil,
+			wantNewObj: &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}},
+		},
+		{
+			name:       "nil new Pod",
+			oldObj:     &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}},
+			newObj:     nil,
+			wantOldObj: &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}},
+			wantNewObj: nil,
+		},
+		{
+			name:    "two different kinds of objects",
+			oldObj:  &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}},
+			newObj:  &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "foo"}},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotOld, gotNew, err := As[*v1.Pod](tc.oldObj, tc.newObj)
+			if err != nil && !tc.wantErr {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, but got nil")
+				}
+				return
+			}
+
+			if diff := cmp.Diff(tc.wantOldObj, gotOld); diff != "" {
+				t.Errorf("unexpected old object (-want,+got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.wantNewObj, gotNew); diff != "" {
+				t.Errorf("unexpected new object (-want,+got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// Test_As_Node tests the As function with Node.
+func Test_As_Node(t *testing.T) {
+	tests := []struct {
+		name       string
+		oldObj     interface{}
+		newObj     interface{}
+		wantOldObj *v1.Node
+		wantNewObj *v1.Node
+		wantErr    bool
+	}{
+		{
+			name:       "nil old Node",
+			oldObj:     nil,
+			newObj:     &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "foo"}},
+			wantOldObj: nil,
+			wantNewObj: &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "foo"}},
+		},
+		{
+			name:       "nil new Node",
+			oldObj:     &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "foo"}},
+			newObj:     nil,
+			wantOldObj: &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "foo"}},
+			wantNewObj: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotOld, gotNew, err := As[*v1.Node](tc.oldObj, tc.newObj)
+			if err != nil && !tc.wantErr {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, but got nil")
+				}
+				return
+			}
+
+			if diff := cmp.Diff(tc.wantOldObj, gotOld); diff != "" {
+				t.Errorf("unexpected old object (-want,+got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.wantNewObj, gotNew); diff != "" {
+				t.Errorf("unexpected new object (-want,+got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// Test_As_KMetadata tests the As function with Pod.
+func Test_As_KMetadata(t *testing.T) {
+	tests := []struct {
+		name    string
+		oldObj  interface{}
+		newObj  interface{}
+		wantErr bool
+	}{
+		{
+			name:    "nil old Pod",
+			oldObj:  nil,
+			newObj:  &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}},
+			wantErr: false,
+		},
+		{
+			name:    "nil new Pod",
+			oldObj:  &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}},
+			newObj:  nil,
+			wantErr: false,
+		},
+		{
+			name:    "two different kinds of objects",
+			oldObj:  &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}},
+			newObj:  &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "foo"}},
+			wantErr: false,
+		},
+		{
+			name:    "unknown old type",
+			oldObj:  "unknown type",
+			wantErr: true,
+		},
+		{
+			name:    "unknown new type",
+			newObj:  "unknown type",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := As[klog.KMetadata](tc.oldObj, tc.newObj)
+			if err != nil && !tc.wantErr {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, but got nil")
+				}
+				return
+			}
+		})
+	}
+}
+
+func TestGetHostPorts(t *testing.T) {
+	tests := []struct {
+		pod  *v1.Pod
+		want []v1.ContainerPort
+	}{
+		{
+			pod:  nil,
+			want: nil,
+		},
+		{
+			pod: st.MakePod().
+				ContainerPort([]v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						Protocol:      v1.ProtocolTCP,
+					}}).
+				Obj(),
+			want: nil,
+		},
+		{
+			pod: st.MakePod().
+				InitContainerPort(true /* sidecar */, []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						Protocol:      v1.ProtocolTCP,
+					}}).
+				Obj(),
+			want: nil,
+		},
+		{
+			pod: st.MakePod().
+				InitContainerPort(false /* sidecar */, []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					}}).
+				Obj(),
+			want: nil,
+		},
+		{
+			pod: st.MakePod().
+				ContainerPort([]v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					}}).
+				Obj(),
+			want: []v1.ContainerPort{{
+				ContainerPort: 8001,
+				HostPort:      8001,
+				Protocol:      v1.ProtocolTCP,
+			}},
+		},
+		{
+			pod: st.MakePod().
+				InitContainerPort(true /* sidecar */, []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					}}).
+				Obj(),
+			want: []v1.ContainerPort{{
+				ContainerPort: 8001,
+				HostPort:      8001,
+				Protocol:      v1.ProtocolTCP,
+			}},
+		},
+		{
+			pod: st.MakePod().
+				ContainerPort([]v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+					{
+						ContainerPort: 8002,
+						HostPort:      8002,
+						Protocol:      v1.ProtocolTCP,
+					}}).
+				ContainerPort([]v1.ContainerPort{
+					{
+						ContainerPort: 8003,
+						HostPort:      8003,
+						Protocol:      v1.ProtocolTCP,
+					},
+					{
+						ContainerPort: 8004,
+						HostPort:      8004,
+						Protocol:      v1.ProtocolTCP,
+					}}).
+				ContainerPort([]v1.ContainerPort{
+					{
+						ContainerPort: 8005,
+						Protocol:      v1.ProtocolTCP,
+					},
+				}).Obj(),
+			want: []v1.ContainerPort{
+				{
+					ContainerPort: 8001,
+					HostPort:      8001,
+					Protocol:      v1.ProtocolTCP,
+				},
+				{
+					ContainerPort: 8002,
+					HostPort:      8002,
+					Protocol:      v1.ProtocolTCP,
+				},
+				{
+					ContainerPort: 8003,
+					HostPort:      8003,
+					Protocol:      v1.ProtocolTCP,
+				},
+				{
+					ContainerPort: 8004,
+					HostPort:      8004,
+					Protocol:      v1.ProtocolTCP,
+				},
+			},
+		},
+		{
+			pod: st.MakePod().
+				InitContainerPort(false /* sidecar */, []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      8001,
+						Protocol:      v1.ProtocolTCP,
+					},
+					{
+						ContainerPort: 8002,
+						Protocol:      v1.ProtocolTCP,
+					},
+				}).
+				InitContainerPort(false /* sidecar */, []v1.ContainerPort{
+					{
+						ContainerPort: 8003,
+						HostPort:      8003,
+						Protocol:      v1.ProtocolTCP,
+					},
+				}).
+				InitContainerPort(true /* sidecar */, []v1.ContainerPort{
+					{
+						ContainerPort: 8004,
+						HostPort:      8004,
+						Protocol:      v1.ProtocolTCP,
+					},
+					{
+						ContainerPort: 8005,
+						Protocol:      v1.ProtocolTCP,
+					},
+					{
+						ContainerPort: 8006,
+						HostPort:      8006,
+						Protocol:      v1.ProtocolTCP,
+					},
+				}).
+				ContainerPort([]v1.ContainerPort{
+					{
+						ContainerPort: 8007,
+						HostPort:      8007,
+						Protocol:      v1.ProtocolTCP,
+					},
+					{
+						ContainerPort: 8008,
+						Protocol:      v1.ProtocolTCP,
+					},
+				}).Obj(),
+			want: []v1.ContainerPort{
+				{
+					ContainerPort: 8004,
+					HostPort:      8004,
+					Protocol:      v1.ProtocolTCP,
+				},
+				{
+					ContainerPort: 8006,
+					HostPort:      8006,
+					Protocol:      v1.ProtocolTCP,
+				},
+				{
+					ContainerPort: 8007,
+					HostPort:      8007,
+					Protocol:      v1.ProtocolTCP,
+				},
+			},
+		},
+		{
+			pod: st.MakePod().
+				InitContainerPort(true /* sidecar */, []v1.ContainerPort{
+					{
+						ContainerPort: 8001,
+						HostPort:      9001,
+						Protocol:      v1.ProtocolTCP,
+					},
+				}).
+				ContainerPort([]v1.ContainerPort{
+					{
+						ContainerPort: 8002,
+						HostPort:      9002,
+						Protocol:      v1.ProtocolTCP,
+					},
+				}).Obj(),
+			want: []v1.ContainerPort{
+				{
+					ContainerPort: 8001,
+					HostPort:      9001,
+					Protocol:      v1.ProtocolTCP,
+				},
+				{
+					ContainerPort: 8002,
+					HostPort:      9002,
+					Protocol:      v1.ProtocolTCP,
+				},
+			},
+		},
+	}
+
+	for i, test := range tests {
+		t.Run(fmt.Sprintf("case_%d", i), func(t *testing.T) {
+			result := GetHostPorts(test.pod)
+			if diff := cmp.Diff(test.want, result); diff != "" {
+				t.Errorf("GetHostPorts() unexpected diff (-want,+got): %s", diff)
 			}
 		})
 	}

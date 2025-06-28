@@ -26,12 +26,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/component-base/metrics/testutil"
+	"k8s.io/klog/v2"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	containertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
@@ -57,16 +59,18 @@ func newTestGenericPLEG() *TestGenericPLEG {
 
 func newTestGenericPLEGWithChannelSize(eventChannelCap int) *TestGenericPLEG {
 	fakeRuntime := &containertest.FakeRuntime{}
+	fakeCache := containertest.NewFakeCache(fakeRuntime)
 	clock := testingclock.NewFakeClock(time.Time{})
 	// The channel capacity should be large enough to hold all events in a
 	// single test.
-	pleg := &GenericPLEG{
-		relistDuration: &RelistDuration{RelistPeriod: time.Hour, RelistThreshold: 3 * time.Minute},
-		runtime:        fakeRuntime,
-		eventChannel:   make(chan *PodLifecycleEvent, eventChannelCap),
-		podRecords:     make(podRecords),
-		clock:          clock,
-	}
+	pleg := NewGenericPLEG(
+		klog.Logger{},
+		fakeRuntime,
+		make(chan *PodLifecycleEvent, eventChannelCap),
+		&RelistDuration{RelistPeriod: time.Hour, RelistThreshold: 3 * time.Minute},
+		fakeCache,
+		clock,
+	).(*GenericPLEG)
 	return &TestGenericPLEG{pleg: pleg, runtime: fakeRuntime, clock: clock}
 }
 
@@ -79,9 +83,10 @@ func getEventsFromChannel(ch <-chan *PodLifecycleEvent) []*PodLifecycleEvent {
 	return events
 }
 
-func createTestContainer(ID string, state kubecontainer.State) *kubecontainer.Container {
+func createTestContainer(id string, state kubecontainer.State) *kubecontainer.Container {
 	return &kubecontainer.Container{
-		ID:    kubecontainer.ContainerID{Type: testContainerRuntimeType, ID: ID},
+		ID:    kubecontainer.ContainerID{Type: testContainerRuntimeType, ID: id},
+		Name:  id,
 		State: state,
 	}
 }
@@ -101,7 +106,7 @@ func verifyEvents(t *testing.T, expected, actual []*PodLifecycleEvent) {
 	sort.Sort(sortableEvents(expected))
 	sort.Sort(sortableEvents(actual))
 	if !reflect.DeepEqual(expected, actual) {
-		t.Errorf("Actual events differ from the expected; diff:\n %v", diff.ObjectDiff(expected, actual))
+		t.Errorf("Actual events differ from the expected; diff:\n %v", cmp.Diff(expected, actual))
 	}
 }
 
@@ -140,7 +145,7 @@ func TestRelisting(t *testing.T) {
 	// changed.
 	pleg.Relist()
 	actual = getEventsFromChannel(ch)
-	assert.True(t, len(actual) == 0, "no container has changed, event length should be 0")
+	assert.Empty(t, actual, "no container has changed, event length should be 0")
 
 	runtime.AllPodList = []*containertest.FakePod{
 		{Pod: &kubecontainer.Pod{
@@ -228,7 +233,7 @@ func TestEventChannelFull(t *testing.T) {
 	}
 	// event channel is full, discard events
 	actual = getEventsFromChannel(ch)
-	assert.True(t, len(actual) == 4, "channel length should be 4")
+	assert.Len(t, actual, 4, "channel length should be 4")
 	assert.Subsetf(t, allEvents, actual, "actual events should in all events")
 }
 
@@ -314,14 +319,14 @@ func testReportMissingPods(t *testing.T, numRelists int) {
 }
 
 func newTestGenericPLEGWithRuntimeMock(runtimeMock kubecontainer.Runtime) *GenericPLEG {
-	pleg := &GenericPLEG{
-		relistDuration: &RelistDuration{RelistPeriod: time.Hour, RelistThreshold: 2 * time.Hour},
-		runtime:        runtimeMock,
-		eventChannel:   make(chan *PodLifecycleEvent, 1000),
-		podRecords:     make(podRecords),
-		cache:          kubecontainer.NewCache(),
-		clock:          clock.RealClock{},
-	}
+	pleg := NewGenericPLEG(
+		klog.Logger{},
+		runtimeMock,
+		make(chan *PodLifecycleEvent, 1000),
+		&RelistDuration{RelistPeriod: time.Hour, RelistThreshold: 2 * time.Hour},
+		kubecontainer.NewCache(),
+		clock.RealClock{},
+	).(*GenericPLEG)
 	return pleg
 }
 
@@ -352,15 +357,13 @@ func createTestPodsStatusesAndEvents(num int) ([]*kubecontainer.Pod, []*kubecont
 
 func TestRelistWithCache(t *testing.T) {
 	ctx := context.Background()
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-	runtimeMock := containertest.NewMockRuntime(mockCtrl)
+	runtimeMock := containertest.NewMockRuntime(t)
 
 	pleg := newTestGenericPLEGWithRuntimeMock(runtimeMock)
 	ch := pleg.Watch()
 
 	pods, statuses, events := createTestPodsStatusesAndEvents(2)
-	runtimeMock.EXPECT().GetPods(ctx, true).Return(pods, nil).AnyTimes()
+	runtimeMock.EXPECT().GetPods(ctx, true).Return(pods, nil).Maybe()
 	runtimeMock.EXPECT().GetPodStatus(ctx, pods[0].ID, "", "").Return(statuses[0], nil).Times(1)
 	// Inject an error when querying runtime for the pod status for pods[1].
 	statusErr := fmt.Errorf("unable to get status")
@@ -409,9 +412,7 @@ func TestRelistWithCache(t *testing.T) {
 
 func TestRemoveCacheEntry(t *testing.T) {
 	ctx := context.Background()
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-	runtimeMock := containertest.NewMockRuntime(mockCtrl)
+	runtimeMock := containertest.NewMockRuntime(t)
 	pleg := newTestGenericPLEGWithRuntimeMock(runtimeMock)
 
 	pods, statuses, _ := createTestPodsStatusesAndEvents(1)
@@ -425,7 +426,7 @@ func TestRemoveCacheEntry(t *testing.T) {
 	pleg.Relist()
 	actualStatus, actualErr := pleg.cache.Get(pods[0].ID)
 	assert.Equal(t, &kubecontainer.PodStatus{ID: pods[0].ID}, actualStatus)
-	assert.Equal(t, nil, actualErr)
+	assert.NoError(t, actualErr)
 }
 
 func TestHealthy(t *testing.T) {
@@ -457,9 +458,7 @@ func TestHealthy(t *testing.T) {
 
 func TestRelistWithReinspection(t *testing.T) {
 	ctx := context.Background()
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-	runtimeMock := containertest.NewMockRuntime(mockCtrl)
+	runtimeMock := containertest.NewMockRuntime(t)
 
 	pleg := newTestGenericPLEGWithRuntimeMock(runtimeMock)
 	ch := pleg.Watch()
@@ -486,7 +485,7 @@ func TestRelistWithReinspection(t *testing.T) {
 	actualEvents := getEventsFromChannel(ch)
 	actualStatus, actualErr := pleg.cache.Get(podID)
 	assert.Equal(t, goodStatus, actualStatus)
-	assert.Equal(t, nil, actualErr)
+	assert.NoError(t, actualErr)
 	assert.Exactly(t, []*PodLifecycleEvent{goodEvent}, actualEvents)
 
 	// listing 2 - pretend runtime was in the middle of creating the non-infra container for the pod
@@ -520,7 +519,7 @@ func TestRelistWithReinspection(t *testing.T) {
 	actualEvents = getEventsFromChannel(ch)
 	actualStatus, actualErr = pleg.cache.Get(podID)
 	assert.Equal(t, goodStatus, actualStatus)
-	assert.Equal(t, nil, actualErr)
+	assert.NoError(t, actualErr)
 	// no events are expected because relist #1 set the old pod record which has the infra container
 	// running. relist #2 had the inspection error and therefore didn't modify either old or new.
 	// relist #3 forced the reinspection of the pod to retrieve its status, but because the list of
@@ -613,11 +612,8 @@ func TestRelistIPChange(t *testing.T) {
 		},
 	}
 
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
 	for _, tc := range testCases {
-		runtimeMock := containertest.NewMockRuntime(mockCtrl)
+		runtimeMock := containertest.NewMockRuntime(t)
 
 		pleg := newTestGenericPLEGWithRuntimeMock(runtimeMock)
 		ch := pleg.Watch()
@@ -643,7 +639,7 @@ func TestRelistIPChange(t *testing.T) {
 		actualEvents := getEventsFromChannel(ch)
 		actualStatus, actualErr := pleg.cache.Get(pod.ID)
 		assert.Equal(t, status, actualStatus, tc.name)
-		assert.Nil(t, actualErr, tc.name)
+		assert.NoError(t, actualErr, tc.name)
 		assert.Exactly(t, []*PodLifecycleEvent{event}, actualEvents)
 
 		// Clear the IP address and mark the container terminated
@@ -668,7 +664,7 @@ func TestRelistIPChange(t *testing.T) {
 		statusCopy := *status
 		statusCopy.IPs = tc.podIPs
 		assert.Equal(t, &statusCopy, actualStatus, tc.name)
-		assert.Nil(t, actualErr, tc.name)
+		require.NoError(t, actualErr, tc.name)
 		assert.Exactly(t, []*PodLifecycleEvent{event}, actualEvents)
 	}
 }
@@ -739,6 +735,263 @@ kubelet_running_pods 2
 			if err := testutil.GatherAndCompare(metrics.GetGather(), strings.NewReader(tc.wants), tc.metricsName); err != nil {
 				t.Fatal(err)
 			}
+		})
+	}
+}
+
+func TestWatchConditions(t *testing.T) {
+	pods := []*kubecontainer.Pod{{
+		Name: "running-pod",
+		ID:   "running",
+		Sandboxes: []*kubecontainer.Container{
+			createTestContainer("s", kubecontainer.ContainerStateRunning),
+		},
+		Containers: []*kubecontainer.Container{
+			createTestContainer("c", kubecontainer.ContainerStateRunning),
+		},
+	}, {
+		Name: "running-pod-2",
+		ID:   "running-2",
+		Sandboxes: []*kubecontainer.Container{
+			createTestContainer("s", kubecontainer.ContainerStateRunning),
+		},
+		Containers: []*kubecontainer.Container{
+			createTestContainer("c-exited", kubecontainer.ContainerStateExited),
+			createTestContainer("c-running", kubecontainer.ContainerStateRunning),
+		},
+	}, {
+		Name: "terminating-pod",
+		ID:   "terminating",
+		Sandboxes: []*kubecontainer.Container{
+			createTestContainer("s", kubecontainer.ContainerStateExited),
+		},
+	}, {
+		Name: "reinspect-pod",
+		ID:   "reinspect",
+		Sandboxes: []*kubecontainer.Container{
+			createTestContainer("s", kubecontainer.ContainerStateRunning),
+		},
+	}}
+	initialPods := pods
+	initialPods = append(initialPods, &kubecontainer.Pod{
+		Name: "terminated-pod",
+		ID:   "terminated",
+		Sandboxes: []*kubecontainer.Container{
+			createTestContainer("s", kubecontainer.ContainerStateExited),
+		},
+	})
+
+	alwaysComplete := func(_ *kubecontainer.PodStatus) bool {
+		return true
+	}
+	neverComplete := func(_ *kubecontainer.PodStatus) bool {
+		return false
+	}
+
+	var pleg *GenericPLEG
+	var updatingCond WatchCondition
+	// updatingCond always completes, but updates the condition first.
+	updatingCond = func(_ *kubecontainer.PodStatus) bool {
+		pleg.SetPodWatchCondition("running", "updating", updatingCond)
+		return true
+	}
+
+	// resettingCond decrements the version before it completes.
+	var resettingCond = func(_ *kubecontainer.PodStatus) bool {
+		versioned := pleg.watchConditions["running"]["resetting"]
+		versioned.version = 0
+		pleg.watchConditions["running"]["resetting"] = versioned
+		return true
+	}
+
+	// makeContainerCond returns a RunningContainerWatchCondition that asserts the expected container status
+	makeContainerCond := func(expectedContainerName string, complete bool) WatchCondition {
+		return RunningContainerWatchCondition(expectedContainerName, func(status *kubecontainer.Status) bool {
+			if status.Name != expectedContainerName {
+				panic(fmt.Sprintf("unexpected container name: got %q, want %q", status.Name, expectedContainerName))
+			}
+			return complete
+		})
+	}
+
+	testCases := []struct {
+		name                    string
+		podUID                  types.UID
+		watchConditions         map[string]WatchCondition
+		incrementInitialVersion bool                               // Whether to call SetPodWatchCondition multiple times to increment the version
+		expectEvaluated         bool                               // Whether the watch conditions should be evaluated
+		expectRemoved           bool                               // Whether podUID should be present in the watch conditions map
+		expectWatchConditions   map[string]versionedWatchCondition // The expected watch conditions for the podUID (only key & version checked)
+	}{{
+		name:   "no watch conditions",
+		podUID: "running",
+	}, {
+		name:   "running pod with conditions",
+		podUID: "running",
+		watchConditions: map[string]WatchCondition{
+			"completing": alwaysComplete,
+			"watching":   neverComplete,
+			"updating":   updatingCond,
+		},
+		expectEvaluated: true,
+		expectWatchConditions: map[string]versionedWatchCondition{
+			"watching": {version: 0},
+			"updating": {version: 1},
+		},
+	}, {
+		name:                    "conditions with incremented versions",
+		podUID:                  "running",
+		incrementInitialVersion: true,
+		watchConditions: map[string]WatchCondition{
+			"completing": alwaysComplete,
+			"watching":   neverComplete,
+			"updating":   updatingCond,
+		},
+		expectEvaluated: true,
+		expectWatchConditions: map[string]versionedWatchCondition{
+			"watching": {version: 1},
+			"updating": {version: 2},
+		},
+	}, {
+		name:                    "completed watch condition with older version",
+		podUID:                  "running",
+		incrementInitialVersion: true,
+		watchConditions: map[string]WatchCondition{
+			"resetting": resettingCond,
+		},
+		expectEvaluated: true,
+		expectWatchConditions: map[string]versionedWatchCondition{
+			"resetting": {version: 0},
+		},
+	}, {
+		name:   "non-existent pod",
+		podUID: "non-existent",
+		watchConditions: map[string]WatchCondition{
+			"watching": neverComplete,
+		},
+		expectEvaluated: false,
+		expectRemoved:   true,
+	}, {
+		name:   "terminated pod",
+		podUID: "terminated",
+		watchConditions: map[string]WatchCondition{
+			"watching": neverComplete,
+		},
+		expectEvaluated: false,
+		expectRemoved:   true,
+	}, {
+		name:   "reinspecting pod",
+		podUID: "reinspect",
+		watchConditions: map[string]WatchCondition{
+			"watching": neverComplete,
+		},
+		expectEvaluated: true,
+		expectWatchConditions: map[string]versionedWatchCondition{
+			"watching": {version: 0},
+		},
+	}, {
+		name:   "single container conditions",
+		podUID: "running",
+		watchConditions: map[string]WatchCondition{
+			"completing": makeContainerCond("c", true),
+			"watching":   makeContainerCond("c", false),
+		},
+		expectEvaluated: true,
+		expectWatchConditions: map[string]versionedWatchCondition{
+			"watching": {version: 0},
+		},
+	}, {
+		name:   "multi-container conditions",
+		podUID: "running-2",
+		watchConditions: map[string]WatchCondition{
+			"completing:exited":  makeContainerCond("c-exited", true),
+			"watching:exited":    makeContainerCond("c-exited", false),
+			"completing:running": makeContainerCond("c-running", true),
+			"watching:running":   makeContainerCond("c-running", false),
+			"completing:dne":     makeContainerCond("c-dne", true),
+			"watching:dne":       makeContainerCond("c-dne", false),
+		},
+		expectEvaluated: true,
+		expectWatchConditions: map[string]versionedWatchCondition{
+			"watching:running": {version: 0},
+		},
+	}}
+
+	for _, test := range testCases {
+		t.Run(test.name, func(t *testing.T) {
+			runtimeMock := containertest.NewMockRuntime(t)
+			pleg = newTestGenericPLEGWithRuntimeMock(runtimeMock)
+
+			// Mock pod statuses
+			for _, pod := range initialPods {
+				podStatus := &kubecontainer.PodStatus{
+					ID:        pod.ID,
+					Name:      pod.Name,
+					Namespace: pod.Namespace,
+				}
+				for _, c := range pod.Containers {
+					podStatus.ContainerStatuses = append(podStatus.ContainerStatuses, &kubecontainer.Status{
+						ID:    c.ID,
+						Name:  c.Name,
+						State: c.State,
+					})
+				}
+				runtimeMock.EXPECT().
+					GetPodStatus(mock.Anything, pod.ID, pod.Name, pod.Namespace).
+					Return(podStatus, nil).Maybe()
+			}
+
+			// Setup initial pod records.
+			runtimeMock.EXPECT().GetPods(mock.Anything, true).Return(initialPods, nil).Once()
+			pleg.Relist()
+			pleg.podsToReinspect["reinspect"] = nil
+
+			// Remove "terminated" pod.
+			runtimeMock.EXPECT().GetPods(mock.Anything, true).Return(pods, nil).Once()
+
+			var evaluatedConditions []string
+			for key, condition := range test.watchConditions {
+				wrappedCondition := func(status *kubecontainer.PodStatus) bool {
+					defer func() {
+						if r := recover(); r != nil {
+							require.Fail(t, "condition error", r)
+						}
+					}()
+					assert.Equal(t, test.podUID, status.ID, "podUID")
+					if !test.expectEvaluated {
+						assert.Fail(t, "conditions should not be evaluated")
+					} else {
+						evaluatedConditions = append(evaluatedConditions, key)
+					}
+					return condition(status)
+				}
+				pleg.SetPodWatchCondition(test.podUID, key, wrappedCondition)
+				if test.incrementInitialVersion {
+					// Set the watch condition a second time to increment the version.
+					pleg.SetPodWatchCondition(test.podUID, key, wrappedCondition)
+				}
+			}
+			pleg.Relist()
+
+			if test.expectEvaluated {
+				assert.Len(t, evaluatedConditions, len(test.watchConditions), "all conditions should be evaluated")
+			}
+
+			if test.expectRemoved {
+				assert.NotContains(t, pleg.watchConditions, test.podUID, "Pod should be removed from watch conditions")
+			} else {
+				actualConditions := pleg.watchConditions[test.podUID]
+				assert.Len(t, actualConditions, len(test.expectWatchConditions), "expected number of conditions")
+				for key, expected := range test.expectWatchConditions {
+					if !assert.Contains(t, actualConditions, key) {
+						continue
+					}
+					actual := actualConditions[key]
+					assert.Equal(t, key, actual.key)
+					assert.Equal(t, expected.version, actual.version)
+				}
+			}
+
 		})
 	}
 }

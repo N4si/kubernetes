@@ -7,9 +7,7 @@ reviewers:
   - aojea
   - dchen1107
   - johnSchnake
-  - lavalamp
   - liggitt
-  - neolit123
   - SataQiu
   - smarterclayton
   - thockin
@@ -26,12 +24,10 @@ approvers:
   - dims
   - enj
   - janetkuo
-  - lavalamp
   - liggitt
   - mikedanese
   - MrHohn
   - msau42
-  - neolit123
   - oomichi
   - pohly
   - pwittrock # for test/e2e/kubectl.go
@@ -39,7 +35,6 @@ approvers:
   - SataQiu
   - smarterclayton
   - soltysh
-  - spiffxp
   - sttts
   - thockin
   - wojtek-t
@@ -51,6 +46,7 @@ emeritus_approvers:
   - krousey
   - krzyzacy
   - kow3ns
+  - lavalamp
   - madhusudancs
   - marun
   - zmerlynn
@@ -59,9 +55,11 @@ emeritus_approvers:
   - ncdc
   - vishh
   - shyamjvs
+  - spiffxp
   - enisoc
   - alejandrox1
   - timothysc
+  - neolit123
 labels:
   - area/test
   - sig/testing

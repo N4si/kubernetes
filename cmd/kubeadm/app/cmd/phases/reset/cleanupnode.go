@@ -23,16 +23,14 @@ import (
 	"path"
 	"path/filepath"
 
-	"github.com/pkg/errors"
-
 	"k8s.io/klog/v2"
-	utilsexec "k8s.io/utils/exec"
 
-	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases/workflow"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/features"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/initsystem"
 	utilruntime "k8s.io/kubernetes/cmd/kubeadm/app/util/runtime"
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/users"
@@ -76,30 +74,37 @@ func runCleanupNode(c workflow.RunData) error {
 				klog.Warningln("[reset] Please ensure kubelet is stopped manually")
 			}
 		} else {
-			fmt.Println("[reset] Would stop the kubelet service")
+			fmt.Println("[dryrun] Would stop the kubelet service")
 		}
 	}
 
 	if !r.DryRun() {
-		// Try to unmount mounted directories under kubeadmconstants.KubeletRunDirectory in order to be able to remove the kubeadmconstants.KubeletRunDirectory directory later
-		fmt.Printf("[reset] Unmounting mounted directories in %q\n", kubeadmconstants.KubeletRunDirectory)
-		// In case KubeletRunDirectory holds a symbolic link, evaluate it
-		kubeletRunDir, err := absoluteKubeletRunDirectory()
-		if err == nil {
-			// Only clean absoluteKubeletRunDirectory if umountDirsCmd passed without error
-			dirsToClean = append(dirsToClean, kubeletRunDir)
+		// In case KubeletRunDirectory holds a symbolic link, evaluate it.
+		// This would also throw an error if the directory does not exist.
+		kubeletRunDirectory, err := filepath.EvalSymlinks(kubeadmconstants.KubeletRunDirectory)
+		if err != nil {
+			klog.Warningf("[reset] Skipping unmount of directories in %q: %v\n",
+				kubeadmconstants.KubeletRunDirectory, err)
+		} else {
+			// Unmount all mount paths under kubeletRunDirectory.
+			fmt.Printf("[reset] Unmounting mounted directories in %q\n", kubeadmconstants.KubeletRunDirectory)
+			if err := unmountKubeletDirectory(kubeletRunDirectory, r.ResetCfg().UnmountFlags); err != nil {
+				return err
+			}
+			// Clean the kubeletRunDirectory.
+			dirsToClean = append(dirsToClean, kubeletRunDirectory)
 		}
 	} else {
-		fmt.Printf("[reset] Would unmount mounted directories in %q\n", kubeadmconstants.KubeletRunDirectory)
+		fmt.Printf("[dryrun] Would unmount mounted directories in %q\n", kubeadmconstants.KubeletRunDirectory)
 	}
 
 	if !r.DryRun() {
 		klog.V(1).Info("[reset] Removing Kubernetes-managed containers")
-		if err := removeContainers(utilsexec.New(), r.CRISocketPath()); err != nil {
+		if err := removeContainers(r.CRISocketPath()); err != nil {
 			klog.Warningf("[reset] Failed to remove containers: %v\n", err)
 		}
 	} else {
-		fmt.Println("[reset] Would remove Kubernetes-managed containers")
+		fmt.Println("[dryrun] Would remove Kubernetes-managed containers")
 	}
 
 	// Remove contents from the config and pki directories
@@ -109,7 +114,7 @@ func runCleanupNode(c workflow.RunData) error {
 
 	dirsToClean = append(dirsToClean, certsDir)
 	if r.CleanupTmpDir() {
-		tempDir := path.Join(kubeadmconstants.KubernetesDir, kubeadmconstants.TempDirForKubeadm)
+		tempDir := path.Join(kubeadmconstants.KubernetesDir, kubeadmconstants.TempDir)
 		dirsToClean = append(dirsToClean, tempDir)
 	}
 	resetConfigDir(kubeadmconstants.KubernetesDir, dirsToClean, r.DryRun())
@@ -121,30 +126,16 @@ func runCleanupNode(c workflow.RunData) error {
 				klog.Warningf("[reset] Failed to remove users and groups: %v\n", err)
 			}
 		} else {
-			fmt.Println("[reset] Would remove users and groups created for rootless control-plane")
+			fmt.Println("[dryrun] Would remove users and groups created for rootless control-plane")
 		}
 	}
 
 	return nil
 }
 
-func absoluteKubeletRunDirectory() (string, error) {
-	absoluteKubeletRunDirectory, err := filepath.EvalSymlinks(kubeadmconstants.KubeletRunDirectory)
-	if err != nil {
-		klog.Warningf("[reset] Failed to evaluate the %q directory. Skipping its unmount and cleanup: %v\n", kubeadmconstants.KubeletRunDirectory, err)
-		return "", err
-	}
-	err = unmountKubeletDirectory(absoluteKubeletRunDirectory)
-	if err != nil {
-		klog.Warningf("[reset] Failed to unmount mounted directories in %s \n", kubeadmconstants.KubeletRunDirectory)
-		return "", err
-	}
-	return absoluteKubeletRunDirectory, nil
-}
-
-func removeContainers(execer utilsexec.Interface, criSocketPath string) error {
-	containerRuntime, err := utilruntime.NewContainerRuntime(execer, criSocketPath)
-	if err != nil {
+func removeContainers(criSocketPath string) error {
+	containerRuntime := utilruntime.NewContainerRuntime(criSocketPath)
+	if err := containerRuntime.Connect(); err != nil {
 		return err
 	}
 	containers, err := containerRuntime.ListKubeContainers()
@@ -164,11 +155,12 @@ func resetConfigDir(configPathDir string, dirsToClean []string, isDryRun bool) {
 			}
 		}
 	} else {
-		fmt.Printf("[reset] Would delete contents of directories: %v\n", dirsToClean)
+		fmt.Printf("[dryrun] Would delete contents of directories: %v\n", dirsToClean)
 	}
 
 	filesToClean := []string{
 		filepath.Join(configPathDir, kubeadmconstants.AdminKubeConfigFileName),
+		filepath.Join(configPathDir, kubeadmconstants.SuperAdminKubeConfigFileName),
 		filepath.Join(configPathDir, kubeadmconstants.KubeletKubeConfigFileName),
 		filepath.Join(configPathDir, kubeadmconstants.KubeletBootstrapKubeConfigFileName),
 		filepath.Join(configPathDir, kubeadmconstants.ControllerManagerKubeConfigFileName),
@@ -183,7 +175,7 @@ func resetConfigDir(configPathDir string, dirsToClean []string, isDryRun bool) {
 			}
 		}
 	} else {
-		fmt.Printf("[reset] Would delete files: %v\n", filesToClean)
+		fmt.Printf("[dryrun] Would delete files: %v\n", filesToClean)
 	}
 }
 
@@ -212,6 +204,7 @@ func CleanDir(filePath string) error {
 	return nil
 }
 
+// IsDirEmpty returns true if a directory is empty
 func IsDirEmpty(dir string) (bool, error) {
 	d, err := os.Open(dir)
 	if err != nil {

@@ -24,6 +24,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
+	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
@@ -49,7 +50,7 @@ func (mp *MultipointExample) Name() string {
 // Reserve is the function invoked by the framework at "reserve" extension
 // point. In this trivial example, the Reserve method allocates an array of
 // strings.
-func (mp *MultipointExample) Reserve(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) *framework.Status {
+func (mp *MultipointExample) Reserve(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeName string) *framework.Status {
 	// Reserve is not called concurrently, and so we don't need to lock.
 	mp.executionPoints = append(mp.executionPoints, "reserve")
 	return nil
@@ -59,7 +60,7 @@ func (mp *MultipointExample) Reserve(ctx context.Context, state *framework.Cycle
 // during "reserve" extension point or later. In this example, the Unreserve
 // method loses its reference to the string slice, allowing it to be garbage
 // collected, and thereby "unallocating" the reserved resources.
-func (mp *MultipointExample) Unreserve(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) {
+func (mp *MultipointExample) Unreserve(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeName string) {
 	// Unlike Reserve, the Unreserve method may be called concurrently since
 	// there is no guarantee that there will only one unreserve operation at any
 	// given point in time (for example, during the binding cycle).
@@ -70,7 +71,7 @@ func (mp *MultipointExample) Unreserve(ctx context.Context, state *framework.Cyc
 
 // PreBind is the function invoked by the framework at "prebind" extension
 // point.
-func (mp *MultipointExample) PreBind(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) *framework.Status {
+func (mp *MultipointExample) PreBind(ctx context.Context, state fwk.CycleState, pod *v1.Pod, nodeName string) *framework.Status {
 	// PreBind could be called concurrently for different pods.
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
@@ -82,9 +83,9 @@ func (mp *MultipointExample) PreBind(ctx context.Context, state *framework.Cycle
 }
 
 // New initializes a new plugin and returns it.
-func New(config *runtime.Unknown, _ framework.Handle) (framework.Plugin, error) {
+func New(ctx context.Context, config *runtime.Unknown, _ framework.Handle) (framework.Plugin, error) {
 	if config == nil {
-		klog.ErrorS(nil, "MultipointExample configuration cannot be empty")
+		klog.FromContext(ctx).Error(nil, "MultipointExample configuration cannot be empty")
 		return nil, fmt.Errorf("MultipointExample configuration cannot be empty")
 	}
 	mp := MultipointExample{}

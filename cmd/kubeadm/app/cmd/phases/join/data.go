@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package phases includes command line phases for kubeadm join
 package phases
 
 import (
@@ -24,6 +25,9 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
+	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases/workflow"
+	"k8s.io/kubernetes/cmd/kubeadm/app/features"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 // JoinData is the interface to use for join phases.
@@ -42,4 +46,18 @@ type JoinData interface {
 	KubeletDir() string
 	ManifestDir() string
 	CertificateWriteDir() string
+}
+
+func checkFeatureState(c workflow.RunData, featureGate string, state bool) (bool, error) {
+	data, ok := c.(JoinData)
+	if !ok {
+		return false, errors.New("control-plane-join phase invoked with an invalid data struct")
+	}
+
+	cfg, err := data.InitCfg()
+	if err != nil {
+		return false, err
+	}
+
+	return state == features.Enabled(cfg.FeatureGates, featureGate), nil
 }

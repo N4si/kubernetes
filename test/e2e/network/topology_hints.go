@@ -40,9 +40,9 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
-var _ = common.SIGDescribe("[Feature:Topology Hints]", func() {
+var _ = common.SIGDescribe("Topology Hints", func() {
 	f := framework.NewDefaultFramework("topology-hints")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	// filled in BeforeEach
 	var c clientset.Interface
@@ -53,7 +53,7 @@ var _ = common.SIGDescribe("[Feature:Topology Hints]", func() {
 	})
 
 	ginkgo.It("should distribute endpoints evenly", func(ctx context.Context) {
-		portNum := 9376
+		portNum := int32(9376)
 		thLabels := map[string]string{labelKey: clientLabelValue}
 		img := imageutils.GetE2EImage(imageutils.Agnhost)
 		ports := []v1.ContainerPort{{ContainerPort: int32(portNum)}}
@@ -65,7 +65,7 @@ var _ = common.SIGDescribe("[Feature:Topology Hints]", func() {
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "topology-hints",
 				Annotations: map[string]string{
-					v1.AnnotationTopologyAwareHints: "Auto",
+					v1.AnnotationTopologyMode: "Auto",
 				},
 			},
 			Spec: v1.ServiceSpec{
@@ -74,13 +74,13 @@ var _ = common.SIGDescribe("[Feature:Topology Hints]", func() {
 				Ports: []v1.ServicePort{{
 					Name:       "example",
 					Port:       80,
-					TargetPort: intstr.FromInt(portNum),
+					TargetPort: intstr.FromInt32(portNum),
 					Protocol:   v1.ProtocolTCP,
 				}},
 			},
 		})
 
-		err = wait.PollWithContext(ctx, 5*time.Second, framework.PodStartTimeout, func(ctx context.Context) (bool, error) {
+		err = wait.PollUntilContextTimeout(ctx, 5*time.Second, framework.PodStartTimeout, false, func(ctx context.Context) (bool, error) {
 			return e2edaemonset.CheckRunningOnAllNodes(ctx, f, ds)
 		})
 		framework.ExpectNoError(err, "timed out waiting for DaemonSets to be ready")
@@ -118,7 +118,7 @@ var _ = common.SIGDescribe("[Feature:Topology Hints]", func() {
 		framework.Logf("Waiting for %d endpoints to be tracked in EndpointSlices", len(schedulableNodes))
 
 		var finalSlices []discoveryv1.EndpointSlice
-		err = wait.PollWithContext(ctx, 5*time.Second, 3*time.Minute, func(ctx context.Context) (bool, error) {
+		err = wait.PollUntilContextTimeout(ctx, 5*time.Second, 3*time.Minute, false, func(ctx context.Context) (bool, error) {
 			slices, listErr := c.DiscoveryV1().EndpointSlices(f.Namespace.Name).List(ctx, metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", discoveryv1.LabelServiceName, svc.Name)})
 			if listErr != nil {
 				return false, listErr
@@ -189,7 +189,7 @@ var _ = common.SIGDescribe("[Feature:Topology Hints]", func() {
 			framework.Logf("Ensuring that requests from %s pod on %s node stay in %s zone", clientPod.Name, nodeName, fromZone)
 
 			var logs string
-			if pollErr := wait.PollWithContext(ctx, 5*time.Second, e2eservice.KubeProxyLagTimeout, func(ctx context.Context) (bool, error) {
+			if pollErr := wait.PollUntilContextTimeout(ctx, 5*time.Second, e2eservice.KubeProxyLagTimeout, false, func(ctx context.Context) (bool, error) {
 				var err error
 				logs, err = e2epod.GetPodLogs(ctx, c, f.Namespace.Name, clientPod.Name, clientPod.Name)
 				framework.ExpectNoError(err)

@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"time"
 
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	errorsutil "k8s.io/apimachinery/pkg/util/errors"
 
@@ -73,9 +74,10 @@ func PrintDryRunFiles(files []FileToPrint, w io.Writer) error {
 		if len(outputFilePath) == 0 {
 			outputFilePath = file.RealPath
 		}
+		outputFilePath = filepath.ToSlash(outputFilePath)
 
 		fmt.Fprintf(w, "[dryrun] Would write file %q with content:\n", outputFilePath)
-		apiclient.PrintBytesWithLinePrefix(w, fileBytes, "\t")
+		fmt.Fprintf(w, "%s", fileBytes)
 	}
 	return errorsutil.NewAggregate(errs)
 }
@@ -86,6 +88,11 @@ type Waiter struct{}
 // NewWaiter returns a new Waiter object that talks to the given Kubernetes cluster
 func NewWaiter() apiclient.Waiter {
 	return &Waiter{}
+}
+
+// WaitForControlPlaneComponents just returns a dummy nil, to indicate that the program should just proceed
+func (w *Waiter) WaitForControlPlaneComponents(podsMap map[string]*v1.Pod, apiServerAddress string) error {
+	return nil
 }
 
 // WaitForAPI just returns a dummy nil, to indicate that the program should just proceed
@@ -100,20 +107,9 @@ func (w *Waiter) WaitForPodsWithLabel(kvLabel string) error {
 	return nil
 }
 
-// WaitForPodToDisappear just returns a dummy nil, to indicate that the program should just proceed
-func (w *Waiter) WaitForPodToDisappear(podName string) error {
-	fmt.Printf("[dryrun] Would wait for the %q Pod in the %s namespace to be deleted\n", podName, metav1.NamespaceSystem)
-	return nil
-}
-
-// WaitForHealthyKubelet blocks until the kubelet /healthz endpoint returns 'ok'
-func (w *Waiter) WaitForHealthyKubelet(_ time.Duration, healthzEndpoint string) error {
-	fmt.Printf("[dryrun] Would make sure the kubelet %q endpoint is healthy\n", healthzEndpoint)
-	return nil
-}
-
-// WaitForKubeletAndFunc is a wrapper for WaitForHealthyKubelet that also blocks for a function
-func (w *Waiter) WaitForKubeletAndFunc(f func() error) error {
+// WaitForKubelet blocks until the kubelet /healthz endpoint returns 'ok'
+func (w *Waiter) WaitForKubelet(healthzAddress string, healthzPort int32) error {
+	fmt.Printf("[dryrun] Would make sure the kubelet returns 'ok' at http://%s:%d/healthz\n", healthzAddress, healthzPort)
 	return nil
 }
 

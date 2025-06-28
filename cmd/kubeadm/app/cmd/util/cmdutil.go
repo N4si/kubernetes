@@ -20,41 +20,33 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 
-	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
-	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
-	"k8s.io/kubernetes/cmd/kubeadm/app/util/apiclient"
-	kubeconfigutil "k8s.io/kubernetes/cmd/kubeadm/app/util/kubeconfig"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
-// SubCmdRun returns a function that handles a case where a subcommand must be specified
-// Without this callback, if a user runs just the command without a subcommand,
-// or with an invalid subcommand, cobra will print usage information, but still exit cleanly.
-func SubCmdRun() func(c *cobra.Command, args []string) {
-	return func(c *cobra.Command, args []string) {
-		if len(args) > 0 {
-			kubeadmutil.CheckErr(usageErrorf(c, "invalid subcommand %q", strings.Join(args, " ")))
-		}
-		c.Help()
-		kubeadmutil.CheckErr(kubeadmutil.ErrExit)
-	}
-}
+// ErrorSubcommandRequired is an error returned when a parent command cannot be executed.
+// It starts with a new line so that it's separated from previous information like a Help() screen.
+var ErrorSubcommandRequired = errors.New("\nerror: subcommand is required")
 
-func usageErrorf(c *cobra.Command, format string, args ...interface{}) error {
-	msg := fmt.Sprintf(format, args...)
-	return errors.Errorf("%s\nSee '%s -h' for help and examples", msg, c.CommandPath())
+// RequireSubcommand can be used to set an empty Run function and NoArgs on a Cobra command.
+// This handles a case where a subcommand must be specified for a parent command 'c'.
+// If no subcommand is specified the CLI exist with an error.
+func RequireSubcommand(c *cobra.Command) {
+	c.RunE = func(c *cobra.Command, args []string) error {
+		_ = c.Help()
+		return ErrorSubcommandRequired
+	}
+	c.Args = cobra.NoArgs
 }
 
 // ValidateExactArgNumber validates that the required top-level arguments are specified
@@ -103,17 +95,6 @@ func AddCRISocketFlag(flagSet *pflag.FlagSet, criSocket *string) {
 	)
 }
 
-// DefaultInitConfiguration return default InitConfiguration. Avoid running the CRI auto-detection
-// code as we don't need it.
-func DefaultInitConfiguration() *kubeadmapiv1.InitConfiguration {
-	initCfg := &kubeadmapiv1.InitConfiguration{
-		NodeRegistration: kubeadmapiv1.NodeRegistrationOptions{
-			CRISocket: kubeadmconstants.UnknownCRISocket, // avoid CRI detection
-		},
-	}
-	return initCfg
-}
-
 // InteractivelyConfirmAction asks the user whether they _really_ want to take the action.
 func InteractivelyConfirmAction(action, question string, r io.Reader) error {
 	fmt.Printf("[%s] %s [y/N]: ", action, question)
@@ -130,14 +111,23 @@ func InteractivelyConfirmAction(action, question string, r io.Reader) error {
 	return errors.New("won't proceed; the user didn't answer (Y|y) in order to continue")
 }
 
-// GetClientSet gets a real or fake client depending on whether the user is dry-running or not
-func GetClientSet(file string, dryRun bool) (clientset.Interface, error) {
-	if dryRun {
-		dryRunGetter, err := apiclient.NewClientBackedDryRunGetterFromKubeconfig(file)
-		if err != nil {
-			return nil, err
-		}
-		return apiclient.NewDryRunClient(dryRunGetter, os.Stdout), nil
+// ValueFromFlagsOrConfig checks if the "name" flag has been set. If yes, it returns the value of the flag, otherwise it returns the value from config.
+func ValueFromFlagsOrConfig(flagSet *pflag.FlagSet, name string, cfgValue interface{}, flagValue interface{}) interface{} {
+	if flagSet.Changed(name) {
+		return flagValue
 	}
-	return kubeconfigutil.ClientSetFromFile(file)
+
+	// covert the nil to false if this is a bool, this will help to get rid of nil dereference error.
+	cfg, ok := cfgValue.(*bool)
+	if ok && cfg == nil {
+		return ptr.To(false)
+	}
+
+	// assume config has all the defaults set correctly.
+	return cfgValue
+}
+
+// TypeMismatchErr return an error which indicates how the type is mismatched.
+func TypeMismatchErr(opt, rType string) error {
+	return errors.Errorf("type mismatch, %s is expected to be a pointer to %s", opt, rType)
 }

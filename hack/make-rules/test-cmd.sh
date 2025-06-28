@@ -56,7 +56,7 @@ function run_kube_apiserver() {
 
   # Admission Controllers to invoke prior to persisting objects in cluster
   ENABLE_ADMISSION_PLUGINS="LimitRanger,ResourceQuota"
-  DISABLE_ADMISSION_PLUGINS="ServiceAccount,PersistentVolumeLabel,DefaultStorageClass,DefaultTolerationSeconds,MutatingAdmissionWebhook,ValidatingAdmissionWebhook,StorageObjectInUseProtection"
+  DISABLE_ADMISSION_PLUGINS="ServiceAccount,DefaultStorageClass,DefaultTolerationSeconds,MutatingAdmissionWebhook,ValidatingAdmissionWebhook,StorageObjectInUseProtection"
 
   # Include RBAC (to exercise bootstrapping), and AlwaysAllow to allow all actions
   AUTHORIZATION_MODE="RBAC,AlwaysAllow"
@@ -64,7 +64,13 @@ function run_kube_apiserver() {
   # Enable features
   ENABLE_FEATURE_GATES=""
 
-  "${KUBE_OUTPUT_HOSTBIN}/kube-apiserver" \
+  VERSION_OVERRIDE=""
+  if [[ "${CUSTOM_VERSION_SUFFIX:-}" != "" ]]; then
+    VERSION_OVERRIDE="--version=$("${THIS_PLATFORM_BIN}/kube-apiserver" --version | awk '{print $2}')${CUSTOM_VERSION_SUFFIX:-}"
+  fi
+
+  "${THIS_PLATFORM_BIN}/kube-apiserver" \
+    ${VERSION_OVERRIDE:+"${VERSION_OVERRIDE}"} \
     --bind-address="127.0.0.1" \
     --authorization-mode="${AUTHORIZATION_MODE}" \
     --secure-port="${SECURE_API_PORT}" \
@@ -119,7 +125,7 @@ current-context: local-context
 EOF
 
   kube::log::status "Starting controller-manager"
-  "${KUBE_OUTPUT_HOSTBIN}/kube-controller-manager" \
+  "${THIS_PLATFORM_BIN}/kube-controller-manager" \
     --kube-api-content-type="${KUBE_TEST_API_TYPE-}" \
     --cluster-signing-cert-file=hack/testdata/ca/ca.crt \
     --cluster-signing-key-file=hack/testdata/ca/ca.key \
@@ -168,7 +174,7 @@ if [[ ${WHAT} == "" || ${WHAT} =~ .*kubeadm.* ]] ; then
   # build kubeadm
   make all -C "${KUBE_ROOT}" WHAT=cmd/kubeadm
   # unless the user sets KUBEADM_PATH, assume that "make all..." just built it
-  export KUBEADM_PATH="${KUBEADM_PATH:=$(kube::realpath "${KUBE_ROOT}")/_output/local/go/bin/kubeadm}"
+  export KUBEADM_PATH="${KUBEADM_PATH:="$(kube::util::find-binary kubeadm)"}"
   # invoke the tests
   make -C "${KUBE_ROOT}" test \
     WHAT=k8s.io/kubernetes/cmd/kubeadm/test/cmd \
@@ -185,6 +191,14 @@ fi
 kube::log::status "Running kubectl tests for kube-apiserver"
 
 setup
+
+# Test custom version invocation
+CUSTOM_VERSION_SUFFIX=-custom run_kube_apiserver
+kube::test::if_has_string "$(kubectl get --raw /version)" "gitVersion.*-custom"
+kill "${APISERVER_PID}" 1>&2 2>/dev/null
+wait "${APISERVER_PID}" || true
+unset APISERVER_PID
+
 run_kube_apiserver
 run_kube_controller_manager
 create_node

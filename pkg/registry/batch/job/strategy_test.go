@@ -18,29 +18,31 @@ package job
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	utilversion "k8s.io/apimachinery/pkg/util/version"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	podtest "k8s.io/kubernetes/pkg/api/pod/testing"
 	apitesting "k8s.io/kubernetes/pkg/api/testing"
 	"k8s.io/kubernetes/pkg/apis/batch"
 	_ "k8s.io/kubernetes/pkg/apis/batch/install"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/features"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 var ignoreErrValueDetail = cmpopts.IgnoreFields(field.Error{}, "BadValue", "Detail")
 
-// TestJobStrategy_PrepareForUpdate tests various scenearios for PrepareForUpdate
+// TestJobStrategy_PrepareForUpdate tests various scenarios for PrepareForUpdate
 func TestJobStrategy_PrepareForUpdate(t *testing.T) {
 	validSelector := getValidLabelSelector()
 	validPodTemplateSpec := getValidPodTemplateSpecForSelector(validSelector)
@@ -50,7 +52,7 @@ func TestJobStrategy_PrepareForUpdate(t *testing.T) {
 			{
 				Action: batch.PodFailurePolicyActionFailJob,
 				OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
-					ContainerName: pointer.String("container-name"),
+					ContainerName: ptr.To("container-name"),
 					Operator:      batch.PodFailurePolicyOnExitCodesOpIn,
 					Values:        []int32{1},
 				},
@@ -62,22 +64,207 @@ func TestJobStrategy_PrepareForUpdate(t *testing.T) {
 			{
 				Action: batch.PodFailurePolicyActionIgnore,
 				OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
-					ContainerName: pointer.String("updated-container-name"),
+					ContainerName: ptr.To("updated-container-name"),
 					Operator:      batch.PodFailurePolicyOnExitCodesOpIn,
 					Values:        []int32{2},
 				},
 			},
 		},
 	}
+	successPolicy := &batch.SuccessPolicy{
+		Rules: []batch.SuccessPolicyRule{
+			{
+				SucceededIndexes: ptr.To("1,3-7"),
+				SucceededCount:   ptr.To[int32](4),
+			},
+		},
+	}
+	updatedSuccessPolicy := &batch.SuccessPolicy{
+		Rules: []batch.SuccessPolicyRule{
+			{
+				SucceededIndexes: ptr.To("1,3-7"),
+				SucceededCount:   ptr.To[int32](5),
+			},
+		},
+	}
 
 	cases := map[string]struct {
-		enableJobPodFailurePolicy bool
-		job                       batch.Job
-		updatedJob                batch.Job
-		wantJob                   batch.Job
+		enableJobBackoffLimitPerIndex bool
+		enableJobPodReplacementPolicy bool
+		enableJobSuccessPolicy        bool
+		job                           batch.Job
+		updatedJob                    batch.Job
+		wantJob                       batch.Job
 	}{
-		"update job with a new field; updated when JobPodFailurePolicy enabled": {
-			enableJobPodFailurePolicy: true,
+		"update job with a new field; updated when JobSuccessPolicy enabled": {
+			enableJobSuccessPolicy: true,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:      validSelector,
+					Template:      validPodTemplateSpec,
+					SuccessPolicy: nil,
+				},
+			},
+			updatedJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:      validSelector,
+					Template:      validPodTemplateSpec,
+					SuccessPolicy: updatedSuccessPolicy,
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(1),
+				Spec: batch.JobSpec{
+					Selector:      validSelector,
+					Template:      validPodTemplateSpec,
+					SuccessPolicy: updatedSuccessPolicy,
+				},
+			},
+		},
+		"update pre-existing field; updated when JobSuccessPolicy enabled": {
+			enableJobSuccessPolicy: true,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:      validSelector,
+					Template:      validPodTemplateSpec,
+					SuccessPolicy: successPolicy,
+				},
+			},
+			updatedJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:      validSelector,
+					Template:      validPodTemplateSpec,
+					SuccessPolicy: updatedSuccessPolicy,
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(1),
+				Spec: batch.JobSpec{
+					Selector:      validSelector,
+					Template:      validPodTemplateSpec,
+					SuccessPolicy: updatedSuccessPolicy,
+				},
+			},
+		},
+		"update job with a new field: not update when JobSuccessPolicy disabled": {
+			enableJobSuccessPolicy: false,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:      validSelector,
+					Template:      validPodTemplateSpec,
+					SuccessPolicy: nil,
+				},
+			},
+			updatedJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:      validSelector,
+					Template:      validPodTemplateSpec,
+					SuccessPolicy: updatedSuccessPolicy,
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:      validSelector,
+					Template:      validPodTemplateSpec,
+					SuccessPolicy: nil,
+				},
+			},
+		},
+		"update pre-existing field; updated when JobSuccessPolicy disabled": {
+			enableJobSuccessPolicy: false,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:      validSelector,
+					Template:      validPodTemplateSpec,
+					SuccessPolicy: successPolicy,
+				},
+			},
+			updatedJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:      validSelector,
+					Template:      validPodTemplateSpec,
+					SuccessPolicy: updatedSuccessPolicy,
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(1),
+				Spec: batch.JobSpec{
+					Selector:      validSelector,
+					Template:      validPodTemplateSpec,
+					SuccessPolicy: updatedSuccessPolicy,
+				},
+			},
+		},
+		"update job with a new field; updated when JobBackoffLimitPerIndex enabled": {
+			enableJobBackoffLimitPerIndex: true,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					Template:             validPodTemplateSpec,
+					BackoffLimitPerIndex: nil,
+					MaxFailedIndexes:     nil,
+				},
+			},
+			updatedJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					Template:             validPodTemplateSpec,
+					BackoffLimitPerIndex: ptr.To[int32](1),
+					MaxFailedIndexes:     ptr.To[int32](1),
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(1),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					Template:             validPodTemplateSpec,
+					BackoffLimitPerIndex: ptr.To[int32](1),
+					MaxFailedIndexes:     ptr.To[int32](1),
+				},
+			},
+		},
+		"update job with a new field; not updated when JobBackoffLimitPerIndex disabled": {
+			enableJobBackoffLimitPerIndex: false,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					Template:             validPodTemplateSpec,
+					BackoffLimitPerIndex: nil,
+					MaxFailedIndexes:     nil,
+				},
+			},
+			updatedJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					Template:             validPodTemplateSpec,
+					BackoffLimitPerIndex: ptr.To[int32](1),
+					MaxFailedIndexes:     ptr.To[int32](1),
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					Template:             validPodTemplateSpec,
+					BackoffLimitPerIndex: nil,
+					MaxFailedIndexes:     nil,
+				},
+			},
+		},
+		"update job with a new field; updated": {
 			job: batch.Job{
 				ObjectMeta: getValidObjectMeta(0),
 				Spec: batch.JobSpec{
@@ -103,62 +290,61 @@ func TestJobStrategy_PrepareForUpdate(t *testing.T) {
 				},
 			},
 		},
-		"update job with a new field; not updated when JobPodFailurePolicy disabled": {
-			enableJobPodFailurePolicy: false,
+		"update job with a new field; updated when JobPodReplacementPolicy enabled": {
+			enableJobPodReplacementPolicy: true,
 			job: batch.Job{
 				ObjectMeta: getValidObjectMeta(0),
 				Spec: batch.JobSpec{
-					Selector:         validSelector,
-					Template:         validPodTemplateSpec,
-					PodFailurePolicy: nil,
+					Selector:             validSelector,
+					Template:             validPodTemplateSpec,
+					PodReplacementPolicy: nil,
 				},
 			},
 			updatedJob: batch.Job{
 				ObjectMeta: getValidObjectMeta(0),
 				Spec: batch.JobSpec{
-					Selector:         validSelector,
-					Template:         validPodTemplateSpec,
-					PodFailurePolicy: updatedPodFailurePolicy,
-				},
-			},
-			wantJob: batch.Job{
-				ObjectMeta: getValidObjectMeta(0),
-				Spec: batch.JobSpec{
-					Selector:         validSelector,
-					Template:         validPodTemplateSpec,
-					PodFailurePolicy: nil,
-				},
-			},
-		},
-		"update pre-existing field; updated when JobPodFailurePolicy enabled": {
-			enableJobPodFailurePolicy: true,
-			job: batch.Job{
-				ObjectMeta: getValidObjectMeta(0),
-				Spec: batch.JobSpec{
-					Selector:         validSelector,
-					Template:         validPodTemplateSpec,
-					PodFailurePolicy: podFailurePolicy,
-				},
-			},
-			updatedJob: batch.Job{
-				ObjectMeta: getValidObjectMeta(0),
-				Spec: batch.JobSpec{
-					Selector:         validSelector,
-					Template:         validPodTemplateSpec,
-					PodFailurePolicy: updatedPodFailurePolicy,
+					Selector:             validSelector,
+					Template:             validPodTemplateSpec,
+					PodReplacementPolicy: podReplacementPolicy(batch.Failed),
 				},
 			},
 			wantJob: batch.Job{
 				ObjectMeta: getValidObjectMeta(1),
 				Spec: batch.JobSpec{
-					Selector:         validSelector,
-					Template:         validPodTemplateSpec,
-					PodFailurePolicy: updatedPodFailurePolicy,
+					Selector:             validSelector,
+					Template:             validPodTemplateSpec,
+					PodReplacementPolicy: podReplacementPolicy(batch.Failed),
 				},
 			},
 		},
-		"update pre-existing field; updated when JobPodFailurePolicy disabled": {
-			enableJobPodFailurePolicy: false,
+		"update job with a new field; not updated when JobPodReplacementPolicy disabled": {
+			enableJobPodReplacementPolicy: false,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					Template:             validPodTemplateSpec,
+					PodReplacementPolicy: nil,
+				},
+			},
+			updatedJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					Template:             validPodTemplateSpec,
+					PodReplacementPolicy: podReplacementPolicy(batch.Failed),
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					Template:             validPodTemplateSpec,
+					PodReplacementPolicy: nil,
+				},
+			},
+		},
+		"update pre-existing field; updated": {
 			job: batch.Job{
 				ObjectMeta: getValidObjectMeta(0),
 				Spec: batch.JobSpec{
@@ -186,7 +372,7 @@ func TestJobStrategy_PrepareForUpdate(t *testing.T) {
 		},
 		"add tracking annotation back": {
 			job: batch.Job{
-				ObjectMeta: getValidObjectMetaWithAnnotations(0, map[string]string{batchv1.JobTrackingFinalizer: ""}),
+				ObjectMeta: getValidObjectMeta(0),
 				Spec: batch.JobSpec{
 					Selector:         validSelector,
 					Template:         validPodTemplateSpec,
@@ -201,7 +387,7 @@ func TestJobStrategy_PrepareForUpdate(t *testing.T) {
 				},
 			},
 			wantJob: batch.Job{
-				ObjectMeta: getValidObjectMetaWithAnnotations(1, map[string]string{batchv1.JobTrackingFinalizer: ""}),
+				ObjectMeta: getValidObjectMeta(1),
 				Spec: batch.JobSpec{
 					Selector: validSelector,
 					Template: validPodTemplateSpec,
@@ -278,7 +464,7 @@ func TestJobStrategy_PrepareForUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector: validSelector,
 					Template: validPodTemplateSpec,
-					Suspend:  pointer.Bool(false),
+					Suspend:  ptr.To(false),
 				},
 			},
 			updatedJob: batch.Job{
@@ -286,7 +472,7 @@ func TestJobStrategy_PrepareForUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector: validSelector,
 					Template: validPodTemplateSpec,
-					Suspend:  pointer.Bool(true),
+					Suspend:  ptr.To(true),
 				},
 			},
 			wantJob: batch.Job{
@@ -294,7 +480,7 @@ func TestJobStrategy_PrepareForUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector: validSelector,
 					Template: validPodTemplateSpec,
-					Suspend:  pointer.Bool(true),
+					Suspend:  ptr.To(true),
 				},
 			},
 		},
@@ -311,7 +497,7 @@ func TestJobStrategy_PrepareForUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector: validSelector,
 					Template: validPodTemplateSpec,
-					Suspend:  pointer.Bool(true),
+					Suspend:  ptr.To(true),
 				},
 			},
 			wantJob: batch.Job{
@@ -319,7 +505,7 @@ func TestJobStrategy_PrepareForUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector: validSelector,
 					Template: validPodTemplateSpec,
-					Suspend:  pointer.Bool(true),
+					Suspend:  ptr.To(true),
 				},
 			},
 		},
@@ -327,7 +513,16 @@ func TestJobStrategy_PrepareForUpdate(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.JobPodFailurePolicy, tc.enableJobPodFailurePolicy)()
+			if !tc.enableJobBackoffLimitPerIndex || !tc.enableJobSuccessPolicy {
+				// TODO: this will be removed in 1.36
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, utilversion.MustParse("1.32"))
+			} else if !tc.enableJobPodReplacementPolicy {
+				// TODO: this will be removed in 1.37.
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, utilversion.MustParse("1.33"))
+			}
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.JobBackoffLimitPerIndex, tc.enableJobBackoffLimitPerIndex)
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.JobPodReplacementPolicy, tc.enableJobPodReplacementPolicy)
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.JobSuccessPolicy, tc.enableJobSuccessPolicy)
 			ctx := genericapirequest.NewDefaultContext()
 
 			Strategy.PrepareForUpdate(ctx, &tc.updatedJob, &tc.job)
@@ -343,60 +538,203 @@ func TestJobStrategy_PrepareForUpdate(t *testing.T) {
 func TestJobStrategy_PrepareForCreate(t *testing.T) {
 	validSelector := getValidLabelSelector()
 	validPodTemplateSpec := getValidPodTemplateSpecForSelector(validSelector)
+	validSelectorWithBatchLabels := &metav1.LabelSelector{MatchLabels: getValidBatchLabelsWithNonBatch()}
+	expectedPodTemplateSpec := getValidPodTemplateSpecForSelector(validSelectorWithBatchLabels)
 
 	podFailurePolicy := &batch.PodFailurePolicy{
 		Rules: []batch.PodFailurePolicyRule{
 			{
 				Action: batch.PodFailurePolicyActionFailJob,
 				OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
-					ContainerName: pointer.String("container-name"),
+					ContainerName: ptr.To("container-name"),
 					Operator:      batch.PodFailurePolicyOnExitCodesOpIn,
 					Values:        []int32{1},
 				},
 			},
 		},
 	}
+	successPolicy := &batch.SuccessPolicy{
+		Rules: []batch.SuccessPolicyRule{
+			{
+				SucceededIndexes: ptr.To("1,3-7"),
+				SucceededCount:   ptr.To[int32](4),
+			},
+		},
+	}
 
 	cases := map[string]struct {
-		enableJobPodFailurePolicy bool
-		job                       batch.Job
-		wantJob                   batch.Job
+		enableJobBackoffLimitPerIndex bool
+		enableJobPodReplacementPolicy bool
+		enableJobManageBy             bool
+		enableJobSuccessPolicy        bool
+		job                           batch.Job
+		wantJob                       batch.Job
 	}{
-		"create job with a new field; JobPodFailurePolicy enabled": {
-			enableJobPodFailurePolicy: true,
+		"generate selectors": {
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(false),
+					Template:       validPodTemplateSpec,
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(1),
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(false),
+					Template:       expectedPodTemplateSpec,
+				},
+			},
+		},
+		"create job with a new field; JobSuccessPolicy enabled": {
+			enableJobSuccessPolicy: true,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(false),
+					Template:       validPodTemplateSpec,
+					SuccessPolicy:  successPolicy,
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(1),
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(false),
+					Template:       expectedPodTemplateSpec,
+					SuccessPolicy:  successPolicy,
+				},
+			},
+		},
+		"create job with a new field; JobSuccessPolicy disabled": {
+			enableJobSuccessPolicy: false,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(false),
+					Template:       validPodTemplateSpec,
+					SuccessPolicy:  successPolicy,
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(1),
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(false),
+					Template:       validPodTemplateSpec,
+					SuccessPolicy:  nil,
+				},
+			},
+		},
+		"create job with a new fields; JobBackoffLimitPerIndex enabled": {
+			enableJobBackoffLimitPerIndex: true,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					ManualSelector:       ptr.To(false),
+					Template:             validPodTemplateSpec,
+					BackoffLimitPerIndex: ptr.To[int32](1),
+					MaxFailedIndexes:     ptr.To[int32](1),
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(1),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					ManualSelector:       ptr.To(false),
+					Template:             expectedPodTemplateSpec,
+					BackoffLimitPerIndex: ptr.To[int32](1),
+					MaxFailedIndexes:     ptr.To[int32](1),
+				},
+			},
+		},
+		"create job with a new fields; JobBackoffLimitPerIndex disabled": {
+			enableJobBackoffLimitPerIndex: false,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					ManualSelector:       ptr.To(false),
+					Template:             validPodTemplateSpec,
+					BackoffLimitPerIndex: ptr.To[int32](1),
+					MaxFailedIndexes:     ptr.To[int32](1),
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(1),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					ManualSelector:       ptr.To(false),
+					Template:             expectedPodTemplateSpec,
+					BackoffLimitPerIndex: nil,
+					MaxFailedIndexes:     nil,
+				},
+			},
+		},
+		"create job with a new field": {
 			job: batch.Job{
 				ObjectMeta: getValidObjectMeta(0),
 				Spec: batch.JobSpec{
 					Selector:         validSelector,
+					ManualSelector:   ptr.To(false),
 					Template:         validPodTemplateSpec,
 					PodFailurePolicy: podFailurePolicy,
 				},
 			},
 			wantJob: batch.Job{
-				ObjectMeta: getValidObjectMetaWithAnnotations(1, map[string]string{batchv1.JobTrackingFinalizer: ""}),
+				ObjectMeta: getValidObjectMeta(1),
 				Spec: batch.JobSpec{
 					Selector:         validSelector,
-					Template:         validPodTemplateSpec,
+					ManualSelector:   ptr.To(false),
+					Template:         expectedPodTemplateSpec,
 					PodFailurePolicy: podFailurePolicy,
 				},
 			},
 		},
-		"create job with a new field; JobPodFailurePolicy disabled": {
-			enableJobPodFailurePolicy: false,
+		"create job with a new field; JobPodReplacementPolicy enabled": {
+			enableJobPodReplacementPolicy: true,
 			job: batch.Job{
 				ObjectMeta: getValidObjectMeta(0),
 				Spec: batch.JobSpec{
-					Selector:         validSelector,
-					Template:         validPodTemplateSpec,
-					PodFailurePolicy: podFailurePolicy,
+					Selector:             validSelector,
+					ManualSelector:       ptr.To(false),
+					Template:             validPodTemplateSpec,
+					PodReplacementPolicy: podReplacementPolicy(batch.Failed),
 				},
 			},
 			wantJob: batch.Job{
-				ObjectMeta: getValidObjectMetaWithAnnotations(1, map[string]string{batchv1.JobTrackingFinalizer: ""}),
+				ObjectMeta: getValidObjectMeta(1),
 				Spec: batch.JobSpec{
-					Selector:         validSelector,
-					Template:         validPodTemplateSpec,
-					PodFailurePolicy: nil,
+					Selector:             validSelector,
+					ManualSelector:       ptr.To(false),
+					Template:             expectedPodTemplateSpec,
+					PodReplacementPolicy: podReplacementPolicy(batch.Failed),
+				},
+			},
+		},
+		"create job with a new field; JobPodReplacementPolicy disabled": {
+			enableJobPodReplacementPolicy: false,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					ManualSelector:       ptr.To(false),
+					Template:             validPodTemplateSpec,
+					PodReplacementPolicy: podReplacementPolicy(batch.Failed),
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(1),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					ManualSelector:       ptr.To(false),
+					Template:             expectedPodTemplateSpec,
+					PodReplacementPolicy: nil,
 				},
 			},
 		},
@@ -404,18 +742,158 @@ func TestJobStrategy_PrepareForCreate(t *testing.T) {
 			job: batch.Job{
 				ObjectMeta: getValidObjectMeta(0),
 				Spec: batch.JobSpec{
-					Selector: validSelector,
-					Template: validPodTemplateSpec,
+					Selector:       validSelector,
+					ManualSelector: ptr.To(false),
+					Template:       validPodTemplateSpec,
 				},
 				Status: batch.JobStatus{
 					Active: 1,
 				},
 			},
 			wantJob: batch.Job{
-				ObjectMeta: getValidObjectMetaWithAnnotations(1, map[string]string{batchv1.JobTrackingFinalizer: ""}),
+				ObjectMeta: getValidObjectMeta(1),
 				Spec: batch.JobSpec{
-					Selector: validSelector,
-					Template: validPodTemplateSpec,
+					Selector:       validSelector,
+					ManualSelector: ptr.To(false),
+					Template:       expectedPodTemplateSpec,
+				},
+			},
+		},
+		"create job with pod failure policy using FailIndex action; JobBackoffLimitPerIndex disabled": {
+			enableJobBackoffLimitPerIndex: false,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					ManualSelector:       ptr.To(false),
+					Template:             validPodTemplateSpec,
+					BackoffLimitPerIndex: ptr.To[int32](1),
+					PodFailurePolicy: &batch.PodFailurePolicy{
+						Rules: []batch.PodFailurePolicyRule{
+							{
+								Action: batch.PodFailurePolicyActionFailIndex,
+								OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
+									Operator: batch.PodFailurePolicyOnExitCodesOpIn,
+									Values:   []int32{1},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(1),
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(false),
+					Template:       expectedPodTemplateSpec,
+					PodFailurePolicy: &batch.PodFailurePolicy{
+						Rules: []batch.PodFailurePolicyRule{},
+					},
+				},
+			},
+		},
+		"create job with multiple pod failure policy rules, some using FailIndex action; JobBackoffLimitPerIndex disabled": {
+			enableJobBackoffLimitPerIndex: false,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:             validSelector,
+					ManualSelector:       ptr.To(false),
+					Template:             validPodTemplateSpec,
+					BackoffLimitPerIndex: ptr.To[int32](1),
+					PodFailurePolicy: &batch.PodFailurePolicy{
+						Rules: []batch.PodFailurePolicyRule{
+							{
+								Action: batch.PodFailurePolicyActionFailJob,
+								OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
+									Operator: batch.PodFailurePolicyOnExitCodesOpIn,
+									Values:   []int32{2},
+								},
+							},
+							{
+								Action: batch.PodFailurePolicyActionFailIndex,
+								OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
+									Operator: batch.PodFailurePolicyOnExitCodesOpIn,
+									Values:   []int32{1},
+								},
+							},
+							{
+								Action: batch.PodFailurePolicyActionIgnore,
+								OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
+									Operator: batch.PodFailurePolicyOnExitCodesOpIn,
+									Values:   []int32{13},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(1),
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(false),
+					Template:       expectedPodTemplateSpec,
+					PodFailurePolicy: &batch.PodFailurePolicy{
+						Rules: []batch.PodFailurePolicyRule{
+							{
+								Action: batch.PodFailurePolicyActionFailJob,
+								OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
+									Operator: batch.PodFailurePolicyOnExitCodesOpIn,
+									Values:   []int32{2},
+								},
+							},
+							{
+								Action: batch.PodFailurePolicyActionIgnore,
+								OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
+									Operator: batch.PodFailurePolicyOnExitCodesOpIn,
+									Values:   []int32{13},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		"managedBy field is dropped when the feature gate is disabled": {
+			enableJobManageBy: false,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(false),
+					Template:       validPodTemplateSpec,
+					ManagedBy:      ptr.To("custom-controller-name"),
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(1),
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(false),
+					Template:       expectedPodTemplateSpec,
+				},
+			},
+		},
+		"managedBy field is set when the feature gate is enabled": {
+			enableJobManageBy: true,
+			job: batch.Job{
+				ObjectMeta: getValidObjectMeta(0),
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(false),
+					Template:       validPodTemplateSpec,
+					ManagedBy:      ptr.To("custom-controller-name"),
+				},
+			},
+			wantJob: batch.Job{
+				ObjectMeta: getValidObjectMeta(1),
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(false),
+					Template:       expectedPodTemplateSpec,
+					ManagedBy:      ptr.To("custom-controller-name"),
 				},
 			},
 		},
@@ -423,7 +901,14 @@ func TestJobStrategy_PrepareForCreate(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.JobPodFailurePolicy, tc.enableJobPodFailurePolicy)()
+			if !tc.enableJobBackoffLimitPerIndex || !tc.enableJobSuccessPolicy {
+				// TODO: this will be removed in 1.36
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, utilversion.MustParse("1.32"))
+			}
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.JobBackoffLimitPerIndex, tc.enableJobBackoffLimitPerIndex)
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.JobPodReplacementPolicy, tc.enableJobPodReplacementPolicy)
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.JobManagedBy, tc.enableJobManageBy)
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.JobSuccessPolicy, tc.enableJobSuccessPolicy)
 			ctx := genericapirequest.NewDefaultContext()
 
 			Strategy.PrepareForCreate(ctx, &tc.job)
@@ -464,17 +949,16 @@ func TestJobStrategy_ValidateUpdate(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: validSelector.MatchLabels,
 		},
-		Spec: api.PodSpec{
-			RestartPolicy: api.RestartPolicyOnFailure,
-			DNSPolicy:     api.DNSClusterFirst,
-			Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-		},
+		Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure)),
 	}
+	validPodTemplateSpecNever := *validPodTemplateSpec.DeepCopy()
+	validPodTemplateSpecNever.Spec.RestartPolicy = api.RestartPolicyNever
 	now := metav1.Now()
 	cases := map[string]struct {
-		job      *batch.Job
-		update   func(*batch.Job)
-		wantErrs field.ErrorList
+		enableJobBackoffLimitPerIndex bool
+		job                           *batch.Job
+		update                        func(*batch.Job)
+		wantErrs                      field.ErrorList
 	}{
 		"update parallelism": {
 			job: &batch.Job{
@@ -486,12 +970,12 @@ func TestJobStrategy_ValidateUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:       validSelector,
 					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
+					ManualSelector: ptr.To(true),
+					Parallelism:    ptr.To[int32](1),
 				},
 			},
 			update: func(job *batch.Job) {
-				job.Spec.Parallelism = pointer.Int32Ptr(2)
+				job.Spec.Parallelism = ptr.To[int32](2)
 			},
 		},
 		"update completions disallowed": {
@@ -504,81 +988,16 @@ func TestJobStrategy_ValidateUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:       validSelector,
 					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
-					Completions:    pointer.Int32Ptr(1),
+					ManualSelector: ptr.To(true),
+					Parallelism:    ptr.To[int32](1),
+					Completions:    ptr.To[int32](1),
 				},
 			},
 			update: func(job *batch.Job) {
-				job.Spec.Completions = pointer.Int32Ptr(2)
+				job.Spec.Completions = ptr.To[int32](2)
 			},
 			wantErrs: field.ErrorList{
 				{Type: field.ErrorTypeInvalid, Field: "spec.completions"},
-			},
-		},
-		"adding tracking annotation disallowed": {
-			job: &batch.Job{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "myjob",
-					Namespace:       metav1.NamespaceDefault,
-					ResourceVersion: "0",
-					Annotations:     map[string]string{"foo": "bar"},
-				},
-				Spec: batch.JobSpec{
-					Selector:       validSelector,
-					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
-				},
-			},
-			update: func(job *batch.Job) {
-				job.Annotations[batch.JobTrackingFinalizer] = ""
-			},
-			wantErrs: field.ErrorList{
-				{Type: field.ErrorTypeForbidden, Field: "metadata.annotations[batch.kubernetes.io/job-tracking]"},
-			},
-		},
-		"preserving tracking annotation": {
-			job: &batch.Job{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "myjob",
-					Namespace:       metav1.NamespaceDefault,
-					ResourceVersion: "0",
-					Annotations: map[string]string{
-						batch.JobTrackingFinalizer: "",
-					},
-				},
-				Spec: batch.JobSpec{
-					Selector:       validSelector,
-					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
-				},
-			},
-			update: func(job *batch.Job) {
-				job.Annotations["foo"] = "bar"
-			},
-		},
-		"deleting user annotation": {
-			job: &batch.Job{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "myjob",
-					Namespace:       metav1.NamespaceDefault,
-					ResourceVersion: "0",
-					Annotations: map[string]string{
-						batch.JobTrackingFinalizer: "",
-						"foo":                      "bar",
-					},
-				},
-				Spec: batch.JobSpec{
-					Selector:       validSelector,
-					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
-				},
-			},
-			update: func(job *batch.Job) {
-				delete(job.Annotations, "foo")
 			},
 		},
 		"updating node selector for unsuspended job disallowed": {
@@ -592,8 +1011,8 @@ func TestJobStrategy_ValidateUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:       validSelector,
 					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
+					ManualSelector: ptr.To(true),
+					Parallelism:    ptr.To[int32](1),
 				},
 			},
 			update: func(job *batch.Job) {
@@ -614,9 +1033,9 @@ func TestJobStrategy_ValidateUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:       validSelector,
 					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
-					Suspend:        pointer.BoolPtr(true),
+					ManualSelector: ptr.To(true),
+					Parallelism:    ptr.To[int32](1),
+					Suspend:        ptr.To(true),
 				},
 				Status: batch.JobStatus{
 					StartTime: &now,
@@ -640,9 +1059,9 @@ func TestJobStrategy_ValidateUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:       validSelector,
 					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
-					Suspend:        pointer.BoolPtr(true),
+					ManualSelector: ptr.To(true),
+					Parallelism:    ptr.To[int32](1),
+					Suspend:        ptr.To(true),
 				},
 			},
 			update: func(job *batch.Job) {
@@ -662,8 +1081,93 @@ func TestJobStrategy_ValidateUpdate(t *testing.T) {
 						MatchLabels:      map[string]string{"a": "b"},
 						MatchExpressions: []metav1.LabelSelectorRequirement{{Key: "key", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"bad value"}}},
 					},
-					ManualSelector: pointer.BoolPtr(true),
+					ManualSelector: ptr.To(true),
 					Template:       validPodTemplateSpec,
+				},
+			},
+			update: func(job *batch.Job) {
+				job.Annotations["hello"] = "world"
+			},
+		},
+		"old job has no batch.kubernetes.io labels": {
+			job: &batch.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "myjob",
+					UID:             "test",
+					Namespace:       metav1.NamespaceDefault,
+					ResourceVersion: "10",
+					Annotations:     map[string]string{"hello": "world"},
+				},
+				Spec: batch.JobSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batch.LegacyControllerUidLabel: "test"},
+					},
+					Parallelism: ptr.To[int32](4),
+					Template: api.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{batch.LegacyJobNameLabel: "myjob", batch.LegacyControllerUidLabel: "test"},
+						},
+						Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure)),
+					},
+				},
+			},
+			update: func(job *batch.Job) {
+				job.Annotations["hello"] = "world"
+			},
+		},
+		"old job has all labels": {
+			job: &batch.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "myjob",
+					UID:             "test",
+					Namespace:       metav1.NamespaceDefault,
+					ResourceVersion: "10",
+					Annotations:     map[string]string{"foo": "bar"},
+				},
+				Spec: batch.JobSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batch.ControllerUidLabel: "test"},
+					},
+					Parallelism: ptr.To[int32](4),
+					Template: api.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{batch.LegacyJobNameLabel: "myjob", batch.JobNameLabel: "myjob", batch.LegacyControllerUidLabel: "test", batch.ControllerUidLabel: "test"},
+						},
+						Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure)),
+					},
+				},
+			},
+			update: func(job *batch.Job) {
+				job.Annotations["hello"] = "world"
+			},
+		},
+		"old job is using FailIndex JobBackoffLimitPerIndex is disabled, but FailIndex was already used": {
+			enableJobBackoffLimitPerIndex: false,
+			job: &batch.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "myjob",
+					Namespace:       metav1.NamespaceDefault,
+					ResourceVersion: "0",
+					Annotations:     map[string]string{"foo": "bar"},
+				},
+				Spec: batch.JobSpec{
+					CompletionMode:       completionModePtr(batch.IndexedCompletion),
+					Completions:          ptr.To[int32](2),
+					BackoffLimitPerIndex: ptr.To[int32](1),
+					Selector:             validSelector,
+					ManualSelector:       ptr.To(true),
+					Template:             validPodTemplateSpecNever,
+					PodFailurePolicy: &batch.PodFailurePolicy{
+						Rules: []batch.PodFailurePolicyRule{
+							{
+								Action: batch.PodFailurePolicyActionFailIndex,
+								OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
+									Operator: batch.PodFailurePolicyOnExitCodesOpIn,
+									Values:   []int32{1},
+								},
+							},
+						},
+					},
 				},
 			},
 			update: func(job *batch.Job) {
@@ -673,6 +1177,11 @@ func TestJobStrategy_ValidateUpdate(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
+			if !tc.enableJobBackoffLimitPerIndex {
+				// TODO: this will be removed in 1.36
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, utilversion.MustParse("1.32"))
+			}
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.JobBackoffLimitPerIndex, tc.enableJobBackoffLimitPerIndex)
 			newJob := tc.job.DeepCopy()
 			tc.update(newJob)
 			errs := Strategy.ValidateUpdate(ctx, newJob, tc.job)
@@ -692,11 +1201,7 @@ func TestJobStrategy_WarningsOnUpdate(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: validSelector.MatchLabels,
 		},
-		Spec: api.PodSpec{
-			RestartPolicy: api.RestartPolicyOnFailure,
-			DNSPolicy:     api.DNSClusterFirst,
-			Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-		},
+		Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure)),
 	}
 	cases := map[string]struct {
 		oldJob            *batch.Job
@@ -714,8 +1219,8 @@ func TestJobStrategy_WarningsOnUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:       validSelector,
 					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
+					ManualSelector: ptr.To(true),
+					Parallelism:    ptr.To[int32](1),
 				},
 			},
 
@@ -729,8 +1234,8 @@ func TestJobStrategy_WarningsOnUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:       validSelector,
 					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
+					ManualSelector: ptr.To(true),
+					Parallelism:    ptr.To[int32](1),
 				},
 			},
 		},
@@ -745,8 +1250,8 @@ func TestJobStrategy_WarningsOnUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:       validSelector,
 					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
+					ManualSelector: ptr.To(true),
+					Parallelism:    ptr.To[int32](1),
 				},
 			},
 
@@ -760,8 +1265,8 @@ func TestJobStrategy_WarningsOnUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:       validSelector,
 					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
+					ManualSelector: ptr.To(true),
+					Parallelism:    ptr.To[int32](1),
 				},
 			},
 		},
@@ -776,10 +1281,10 @@ func TestJobStrategy_WarningsOnUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector: validSelector,
 					Template: api.PodTemplateSpec{
-						Spec: api.PodSpec{Volumes: []api.Volume{{Name: "volume-name"}, {Name: "volume-name"}}},
+						Spec: api.PodSpec{ImagePullSecrets: []api.LocalObjectReference{{Name: ""}}},
 					},
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
+					ManualSelector: ptr.To(true),
+					Parallelism:    ptr.To[int32](1),
 				},
 			},
 
@@ -793,11 +1298,42 @@ func TestJobStrategy_WarningsOnUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:       validSelector,
 					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
+					ManualSelector: ptr.To(true),
+					Parallelism:    ptr.To[int32](1),
 				},
 			},
 			wantWarningsCount: 1,
+		},
+		"Invalid transition to high parallelism": {
+			wantWarningsCount: 1,
+			job: &batch.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "myjob2",
+					Namespace:       metav1.NamespaceDefault,
+					Generation:      1,
+					ResourceVersion: "0",
+				},
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](100_001),
+					Parallelism:    ptr.To[int32](10_001),
+					Template:       validPodTemplateSpec,
+				},
+			},
+			oldJob: &batch.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "myjob2",
+					Namespace:       metav1.NamespaceDefault,
+					Generation:      0,
+					ResourceVersion: "0",
+				},
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](100_001),
+					Parallelism:    ptr.To[int32](10_000),
+					Template:       validPodTemplateSpec,
+				},
+			},
 		},
 	}
 	for val, tc := range cases {
@@ -816,18 +1352,16 @@ func TestJobStrategy_WarningsOnCreate(t *testing.T) {
 	validSelector := &metav1.LabelSelector{
 		MatchLabels: map[string]string{"a": "b"},
 	}
-	validSpec := batch.JobSpec{
-		Selector: nil,
-		Template: api.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{
-				Labels: validSelector.MatchLabels,
-			},
-			Spec: api.PodSpec{
-				RestartPolicy: api.RestartPolicyOnFailure,
-				DNSPolicy:     api.DNSClusterFirst,
-				Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-			},
+	validPodTemplate := api.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: validSelector.MatchLabels,
 		},
+		Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure)),
+	}
+	validSpec := batch.JobSpec{
+		CompletionMode: completionModePtr(batch.NonIndexedCompletion),
+		Selector:       nil,
+		Template:       validPodTemplate,
 	}
 
 	testcases := map[string]struct {
@@ -855,6 +1389,22 @@ func TestJobStrategy_WarningsOnCreate(t *testing.T) {
 				Spec: validSpec,
 			},
 		},
+		"high completions and parallelism": {
+			wantWarningsCount: 1,
+			job: &batch.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "myjob2",
+					Namespace: metav1.NamespaceDefault,
+					UID:       theUID,
+				},
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Parallelism:    ptr.To[int32](100_001),
+					Completions:    ptr.To[int32](100_001),
+					Template:       validPodTemplate,
+				},
+			},
+		},
 	}
 	for name, tc := range testcases {
 		t.Run(name, func(t *testing.T) {
@@ -868,34 +1418,29 @@ func TestJobStrategy_WarningsOnCreate(t *testing.T) {
 func TestJobStrategy_Validate(t *testing.T) {
 	ctx := genericapirequest.NewDefaultContext()
 
-	theUID := types.UID("1a2b3c4d5e6f7g8h9i0k")
-	validSelector := &metav1.LabelSelector{
-		MatchLabels: map[string]string{"a": "b"},
-	}
-
-	validPodSpec := api.PodSpec{
-		RestartPolicy: api.RestartPolicyOnFailure,
-		DNSPolicy:     api.DNSClusterFirst,
-		Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-	}
-	validObjectMeta := metav1.ObjectMeta{
-		Name:      "myjob2",
-		Namespace: metav1.NamespaceDefault,
-		UID:       theUID,
-	}
+	theUID := getValidUID()
+	validSelector := getValidLabelSelector()
+	batchLabels := getValidBatchLabels()
+	labelsWithNonBatch := getValidBatchLabelsWithNonBatch()
+	defaultSelector := &metav1.LabelSelector{MatchLabels: map[string]string{batch.ControllerUidLabel: string(theUID)}}
+	validPodSpec := podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure))
+	validPodSpecNever := podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyNever))
+	validObjectMeta := getValidObjectMeta(0)
 	testcases := map[string]struct {
-		job              *batch.Job
-		wantJob          *batch.Job
-		wantWarningCount int32
+		enableJobBackoffLimitPerIndex bool
+		job                           *batch.Job
+		wantJob                       *batch.Job
+		wantWarningCount              int32
 	}{
-		"valid job with labels in pod template": {
+		"valid job with batch labels in pod template": {
 			job: &batch.Job{
 				ObjectMeta: validObjectMeta,
 				Spec: batch.JobSpec{
-					Selector: nil,
+					Selector:       defaultSelector,
+					ManualSelector: ptr.To(false),
 					Template: api.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Labels: validSelector.MatchLabels,
+							Labels: batchLabels,
 						},
 						Spec: validPodSpec,
 					}},
@@ -903,20 +1448,74 @@ func TestJobStrategy_Validate(t *testing.T) {
 			wantJob: &batch.Job{
 				ObjectMeta: validObjectMeta,
 				Spec: batch.JobSpec{
-					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"controller-uid": string(theUID)}},
+					Selector:       defaultSelector,
+					ManualSelector: ptr.To(false),
 					Template: api.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Labels: validSelector.MatchLabels,
+							Labels: batchLabels,
 						},
 						Spec: validPodSpec,
 					}},
 			},
+		},
+		"valid job with batch and non-batch labels in pod template": {
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       defaultSelector,
+					ManualSelector: ptr.To(false),
+					Template: api.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: labelsWithNonBatch,
+						},
+						Spec: validPodSpec,
+					}},
+			},
+			wantJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       defaultSelector,
+					ManualSelector: ptr.To(false),
+					Template: api.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: labelsWithNonBatch,
+						},
+						Spec: validPodSpec,
+					}},
+			},
+		},
+		"job with non-batch labels and without batch labels in pod template": {
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       defaultSelector,
+					ManualSelector: ptr.To(false),
+					Template: api.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{},
+						},
+						Spec: validPodSpec,
+					}},
+			},
+			wantJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       defaultSelector,
+					ManualSelector: ptr.To(false),
+					Template: api.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{},
+						},
+						Spec: validPodSpec,
+					}},
+			},
+			wantWarningCount: 5,
 		},
 		"no labels in job": {
 			job: &batch.Job{
 				ObjectMeta: validObjectMeta,
 				Spec: batch.JobSpec{
-					Selector: nil,
+					Selector: defaultSelector,
 					Template: api.PodTemplateSpec{
 						Spec: validPodSpec,
 					}},
@@ -924,38 +1523,12 @@ func TestJobStrategy_Validate(t *testing.T) {
 			wantJob: &batch.Job{
 				ObjectMeta: validObjectMeta,
 				Spec: batch.JobSpec{
-					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"controller-uid": string(theUID)}},
+					Selector: defaultSelector,
 					Template: api.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{"job-name": "myjob2", "controller-uid": string(theUID)},
-						},
 						Spec: validPodSpec,
 					}},
 			},
-		},
-		"labels exist": {
-			job: &batch.Job{
-				ObjectMeta: validObjectMeta,
-				Spec: batch.JobSpec{
-					Selector: nil,
-					Template: api.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{"a": "b", "job-name": "myjob2", "controller-uid": string(theUID)},
-						},
-						Spec: validPodSpec,
-					}},
-			},
-			wantJob: &batch.Job{
-				ObjectMeta: validObjectMeta,
-				Spec: batch.JobSpec{
-					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"controller-uid": string(theUID)}},
-					Template: api.PodTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{"a": "b", "job-name": "myjob2", "controller-uid": string(theUID)},
-						},
-						Spec: validPodSpec,
-					}},
-			},
+			wantWarningCount: 5,
 		},
 		"manual selector; do not generate labels": {
 			job: &batch.Job{
@@ -968,8 +1541,8 @@ func TestJobStrategy_Validate(t *testing.T) {
 						},
 						Spec: validPodSpec,
 					},
-					Completions:    pointer.Int32Ptr(2),
-					ManualSelector: pointer.BoolPtr(true),
+					Completions:    ptr.To[int32](2),
+					ManualSelector: ptr.To(true),
 				},
 			},
 			wantJob: &batch.Job{
@@ -982,8 +1555,8 @@ func TestJobStrategy_Validate(t *testing.T) {
 						},
 						Spec: validPodSpec,
 					},
-					Completions:    pointer.Int32Ptr(2),
-					ManualSelector: pointer.BoolPtr(true),
+					Completions:    ptr.To[int32](2),
+					ManualSelector: ptr.To(true),
 				},
 			},
 		},
@@ -991,32 +1564,34 @@ func TestJobStrategy_Validate(t *testing.T) {
 			job: &batch.Job{
 				ObjectMeta: validObjectMeta,
 				Spec: batch.JobSpec{
-					Selector: nil,
+					Selector:       defaultSelector,
+					ManualSelector: ptr.To(false),
 					Template: api.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Labels: validSelector.MatchLabels,
+							Labels: labelsWithNonBatch,
 						},
 						Spec: validPodSpec,
 					},
-					Completions:             pointer.Int32Ptr(2),
-					Suspend:                 pointer.BoolPtr(true),
-					TTLSecondsAfterFinished: pointer.Int32Ptr(0),
+					Completions:             ptr.To[int32](2),
+					Suspend:                 ptr.To(true),
+					TTLSecondsAfterFinished: ptr.To[int32](0),
 					CompletionMode:          completionModePtr(batch.IndexedCompletion),
 				},
 			},
 			wantJob: &batch.Job{
 				ObjectMeta: validObjectMeta,
 				Spec: batch.JobSpec{
-					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"controller-uid": string(theUID)}},
+					Selector:       defaultSelector,
+					ManualSelector: ptr.To(false),
 					Template: api.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{"a": "b", "job-name": "myjob2", "controller-uid": string(theUID)},
+							Labels: labelsWithNonBatch,
 						},
 						Spec: validPodSpec,
 					},
-					Completions:             pointer.Int32Ptr(2),
-					Suspend:                 pointer.BoolPtr(true),
-					TTLSecondsAfterFinished: pointer.Int32Ptr(0),
+					Completions:             ptr.To[int32](2),
+					Suspend:                 ptr.To(true),
+					TTLSecondsAfterFinished: ptr.To[int32](0),
 					CompletionMode:          completionModePtr(batch.IndexedCompletion),
 				},
 			},
@@ -1025,16 +1600,55 @@ func TestJobStrategy_Validate(t *testing.T) {
 			job: &batch.Job{
 				ObjectMeta: validObjectMeta,
 				Spec: batch.JobSpec{
-					Selector: nil,
+					Selector:       defaultSelector,
+					ManualSelector: ptr.To(false),
+					Template: api.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: labelsWithNonBatch,
+						},
+						Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure),
+							podtest.SetVolumes(api.Volume{Name: "volume-name"})),
+					},
+				},
+			},
+			wantJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       defaultSelector,
+					ManualSelector: ptr.To(false),
+					Template: api.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: labelsWithNonBatch,
+						},
+						Spec: podtest.MakePodSpec(podtest.SetRestartPolicy(api.RestartPolicyOnFailure),
+							podtest.SetVolumes(api.Volume{Name: "volume-name"})),
+					},
+				},
+			},
+			wantWarningCount: 1,
+		},
+		"FailIndex action; when JobBackoffLimitPerIndex is disabled - validation error": {
+			enableJobBackoffLimitPerIndex: false,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(true),
 					Template: api.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: validSelector.MatchLabels,
 						},
-						Spec: api.PodSpec{
-							RestartPolicy: api.RestartPolicyOnFailure,
-							DNSPolicy:     api.DNSClusterFirst,
-							Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-							Volumes:       []api.Volume{{Name: "volume-name"}},
+						Spec: validPodSpecNever,
+					},
+					PodFailurePolicy: &batch.PodFailurePolicy{
+						Rules: []batch.PodFailurePolicyRule{
+							{
+								Action: batch.PodFailurePolicyActionFailIndex,
+								OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
+									Operator: batch.PodFailurePolicyOnExitCodesOpIn,
+									Values:   []int32{1},
+								},
+							},
 						},
 					},
 				},
@@ -1042,28 +1656,149 @@ func TestJobStrategy_Validate(t *testing.T) {
 			wantJob: &batch.Job{
 				ObjectMeta: validObjectMeta,
 				Spec: batch.JobSpec{
-					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"controller-uid": string(theUID)}},
+					Selector:       validSelector,
+					ManualSelector: ptr.To(true),
 					Template: api.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{"a": "b", "job-name": "myjob2", "controller-uid": string(theUID)},
+							Labels: validSelector.MatchLabels,
 						},
-						Spec: api.PodSpec{
-							RestartPolicy: api.RestartPolicyOnFailure,
-							DNSPolicy:     api.DNSClusterFirst,
-							Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
-							Volumes:       []api.Volume{{Name: "volume-name"}},
+						Spec: validPodSpecNever,
+					},
+					PodFailurePolicy: &batch.PodFailurePolicy{
+						Rules: []batch.PodFailurePolicyRule{
+							{
+								Action: batch.PodFailurePolicyActionFailIndex,
+								OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
+									Operator: batch.PodFailurePolicyOnExitCodesOpIn,
+									Values:   []int32{1},
+								},
+							},
 						},
 					},
 				},
 			},
 			wantWarningCount: 1,
 		},
+		"FailIndex action; when JobBackoffLimitPerIndex is enabled, but not used - validation error": {
+			enableJobBackoffLimitPerIndex: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(true),
+					Template: api.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: validSelector.MatchLabels,
+						},
+						Spec: validPodSpecNever,
+					},
+					PodFailurePolicy: &batch.PodFailurePolicy{
+						Rules: []batch.PodFailurePolicyRule{
+							{
+								Action: batch.PodFailurePolicyActionFailIndex,
+								OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
+									Operator: batch.PodFailurePolicyOnExitCodesOpIn,
+									Values:   []int32{1},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Selector:       validSelector,
+					ManualSelector: ptr.To(true),
+					Template: api.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: validSelector.MatchLabels,
+						},
+						Spec: validPodSpecNever,
+					},
+					PodFailurePolicy: &batch.PodFailurePolicy{
+						Rules: []batch.PodFailurePolicyRule{
+							{
+								Action: batch.PodFailurePolicyActionFailIndex,
+								OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
+									Operator: batch.PodFailurePolicyOnExitCodesOpIn,
+									Values:   []int32{1},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantWarningCount: 1,
+		},
+		"FailIndex action; when JobBackoffLimitPerIndex is enabled and used - no error": {
+			enableJobBackoffLimitPerIndex: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode:       completionModePtr(batch.IndexedCompletion),
+					Completions:          ptr.To[int32](2),
+					BackoffLimitPerIndex: ptr.To[int32](1),
+					Selector:             validSelector,
+					ManualSelector:       ptr.To(true),
+					Template: api.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: validSelector.MatchLabels,
+						},
+						Spec: validPodSpecNever,
+					},
+					PodFailurePolicy: &batch.PodFailurePolicy{
+						Rules: []batch.PodFailurePolicyRule{
+							{
+								Action: batch.PodFailurePolicyActionFailIndex,
+								OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
+									Operator: batch.PodFailurePolicyOnExitCodesOpIn,
+									Values:   []int32{1},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode:       completionModePtr(batch.IndexedCompletion),
+					Completions:          ptr.To[int32](2),
+					BackoffLimitPerIndex: ptr.To[int32](1),
+					Selector:             validSelector,
+					ManualSelector:       ptr.To(true),
+					Template: api.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: validSelector.MatchLabels,
+						},
+						Spec: validPodSpecNever,
+					},
+					PodFailurePolicy: &batch.PodFailurePolicy{
+						Rules: []batch.PodFailurePolicyRule{
+							{
+								Action: batch.PodFailurePolicyActionFailIndex,
+								OnExitCodes: &batch.PodFailurePolicyOnExitCodesRequirement{
+									Operator: batch.PodFailurePolicyOnExitCodesOpIn,
+									Values:   []int32{1},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 	for name, tc := range testcases {
 		t.Run(name, func(t *testing.T) {
+			if !tc.enableJobBackoffLimitPerIndex {
+				// TODO: this will be removed in 1.36
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, utilversion.MustParse("1.32"))
+			}
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.JobBackoffLimitPerIndex, tc.enableJobBackoffLimitPerIndex)
 			errs := Strategy.Validate(ctx, tc.job)
 			if len(errs) != int(tc.wantWarningCount) {
-				t.Errorf("want warnings %d but got %d", tc.wantWarningCount, len(errs))
+				t.Errorf("want warnings %d but got %d, errors: %v", tc.wantWarningCount, len(errs), errs)
 			}
 			if diff := cmp.Diff(tc.wantJob, tc.job); diff != "" {
 				t.Errorf("Unexpected job (-want,+got):\n%s", diff)
@@ -1075,14 +1810,14 @@ func TestJobStrategy_Validate(t *testing.T) {
 func TestStrategy_ResetFields(t *testing.T) {
 	resetFields := Strategy.GetResetFields()
 	if len(resetFields) != 1 {
-		t.Error("ResetFields should have 1 element")
+		t.Errorf("ResetFields should have 1 element, but have %d", len(resetFields))
 	}
 }
 
 func TestJobStatusStrategy_ResetFields(t *testing.T) {
 	resetFields := StatusStrategy.GetResetFields()
 	if len(resetFields) != 1 {
-		t.Error("ResetFields should have 1 element")
+		t.Errorf("ResetFields should have 1 element, but have %d", len(resetFields))
 	}
 }
 
@@ -1118,7 +1853,7 @@ func TestStatusStrategy_PrepareForUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:    validSelector,
 					Template:    validPodTemplateSpec,
-					Parallelism: pointer.Int32(4),
+					Parallelism: ptr.To[int32](4),
 				},
 				Status: batch.JobStatus{
 					Active: 11,
@@ -1129,7 +1864,7 @@ func TestStatusStrategy_PrepareForUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:    validSelector,
 					Template:    validPodTemplateSpec,
-					Parallelism: pointer.Int32(4),
+					Parallelism: ptr.To[int32](4),
 				},
 				Status: batch.JobStatus{
 					Active: 12,
@@ -1140,7 +1875,7 @@ func TestStatusStrategy_PrepareForUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:    validSelector,
 					Template:    validPodTemplateSpec,
-					Parallelism: pointer.Int32(4),
+					Parallelism: ptr.To[int32](4),
 				},
 				Status: batch.JobStatus{
 					Active: 12,
@@ -1153,7 +1888,7 @@ func TestStatusStrategy_PrepareForUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:    validSelector,
 					Template:    validPodTemplateSpec,
-					Parallelism: pointer.Int32(3),
+					Parallelism: ptr.To[int32](3),
 				},
 			},
 			newJob: &batch.Job{
@@ -1161,7 +1896,7 @@ func TestStatusStrategy_PrepareForUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:    validSelector,
 					Template:    validPodTemplateSpec,
-					Parallelism: pointer.Int32(4),
+					Parallelism: ptr.To[int32](4),
 				},
 			},
 			wantJob: &batch.Job{
@@ -1169,7 +1904,7 @@ func TestStatusStrategy_PrepareForUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:    validSelector,
 					Template:    validPodTemplateSpec,
-					Parallelism: pointer.Int32(3),
+					Parallelism: ptr.To[int32](3),
 				},
 			},
 		},
@@ -1199,11 +1934,28 @@ func TestStatusStrategy_ValidateUpdate(t *testing.T) {
 			Containers:    []api.Container{{Name: "abc", Image: "image", ImagePullPolicy: "IfNotPresent", TerminationMessagePolicy: api.TerminationMessageReadFile}},
 		},
 	}
+	validObjectMeta := metav1.ObjectMeta{
+		Name:            "myjob",
+		Namespace:       metav1.NamespaceDefault,
+		ResourceVersion: "10",
+	}
+	validSuccessPolicy := &batch.SuccessPolicy{
+		Rules: []batch.SuccessPolicyRule{{
+			SucceededIndexes: ptr.To("0-2"),
+		}},
+	}
+	now := metav1.Now()
+	nowPlusMinute := metav1.Time{Time: now.Add(time.Minute)}
 
 	cases := map[string]struct {
-		job     *batch.Job
-		newJob  *batch.Job
-		wantJob *batch.Job
+		enableJobManagedBy            bool
+		enableJobSuccessPolicy        bool
+		enableJobPodReplacementPolicy bool
+
+		job      *batch.Job
+		newJob   *batch.Job
+		wantJob  *batch.Job
+		wantErrs field.ErrorList
 	}{
 		"incoming resource version on update should not be mutated": {
 			job: &batch.Job{
@@ -1215,7 +1967,7 @@ func TestStatusStrategy_ValidateUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:    validSelector,
 					Template:    validPodTemplateSpec,
-					Parallelism: pointer.Int32(4),
+					Parallelism: ptr.To[int32](4),
 				},
 			},
 			newJob: &batch.Job{
@@ -1227,7 +1979,7 @@ func TestStatusStrategy_ValidateUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:    validSelector,
 					Template:    validPodTemplateSpec,
-					Parallelism: pointer.Int32(4),
+					Parallelism: ptr.To[int32](4),
 				},
 			},
 			wantJob: &batch.Job{
@@ -1239,19 +1991,1575 @@ func TestStatusStrategy_ValidateUpdate(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:    validSelector,
 					Template:    validPodTemplateSpec,
-					Parallelism: pointer.Int32(4),
+					Parallelism: ptr.To[int32](4),
 				},
+			},
+		},
+		"invalid addition of both Failed=True and Complete=True; allowed because feature gate disabled": {
+			enableJobManagedBy: false,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime:      &now,
+					CompletionTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobFailed,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+		},
+		"invalid addition of both Failed=True and Complete=True": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime:      &now,
+					CompletionTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobFailed,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"invalid addition of Complete=True without SuccessCriteriaMet=True": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime:      &now,
+					CompletionTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"invalid addition of Failed=True without FailureTarget=True": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailed,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"completionTime can be removed to fix still running job": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime:      &now,
+					CompletionTime: &now,
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &now,
+				},
+			},
+		},
+		"invalid attempt to transition to Failed=True without startTime": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailureTarget,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailureTarget,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobFailed,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeRequired, Field: "status.startTime"},
+			},
+		},
+		"invalid attempt to transition to Complete=True without startTime": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					CompletionTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeRequired, Field: "status.startTime"},
+			},
+		},
+		"invalid attempt to transition to Complete=True with active > 0": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &now,
+					Active:    1,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime:      &now,
+					CompletionTime: &now,
+					Active:         1,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.active"},
+			},
+		},
+		"invalid attempt to transition to Failed=True with terminating > 0": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailureTarget,
+							Status: api.ConditionTrue,
+						},
+					},
+					Terminating: ptr.To[int32](1),
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailureTarget,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobFailed,
+							Status: api.ConditionTrue,
+						},
+					},
+					Terminating: ptr.To[int32](1),
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.terminating"},
+			},
+		},
+		"invalid attempt to transition to Failed=True with active > 0": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailureTarget,
+							Status: api.ConditionTrue,
+						},
+					},
+					Active: 1,
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailureTarget,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobFailed,
+							Status: api.ConditionTrue,
+						},
+					},
+					Active: 1,
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.active"},
+			},
+		},
+		"invalid attempt to transition to Failed=True with uncountedTerminatedPods.Failed>0": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &now,
+					UncountedTerminatedPods: &batch.UncountedTerminatedPods{
+						Failed: []types.UID{"a"},
+					},
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailureTarget,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &now,
+					UncountedTerminatedPods: &batch.UncountedTerminatedPods{
+						Failed: []types.UID{"a"},
+					},
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailureTarget,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobFailed,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.uncountedTerminatedPods"},
+			},
+		},
+		"invalid attempt to update uncountedTerminatedPods.Succeeded for Complete job": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime:      &now,
+					CompletionTime: &now,
+					UncountedTerminatedPods: &batch.UncountedTerminatedPods{
+						Failed: []types.UID{"a"},
+					},
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime:      &now,
+					CompletionTime: &now,
+					UncountedTerminatedPods: &batch.UncountedTerminatedPods{
+						Failed: []types.UID{"b"},
+					},
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.uncountedTerminatedPods"},
+			},
+		},
+		"non-empty uncountedTerminatedPods for complete job, unrelated update": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime:      &now,
+					CompletionTime: &now,
+					UncountedTerminatedPods: &batch.UncountedTerminatedPods{
+						Failed: []types.UID{"a"},
+					},
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime:      &now,
+					CompletionTime: &now,
+					UncountedTerminatedPods: &batch.UncountedTerminatedPods{
+						Failed: []types.UID{"a"},
+					},
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobConditionType("CustomJobCondition"),
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+		},
+		"invalid attempt to transition to Complete=True with uncountedTerminatedPods.Succeeded>0": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &now,
+					UncountedTerminatedPods: &batch.UncountedTerminatedPods{
+						Succeeded: []types.UID{"a"},
+					},
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime:      &now,
+					CompletionTime: &now,
+					UncountedTerminatedPods: &batch.UncountedTerminatedPods{
+						Succeeded: []types.UID{"a"},
+					},
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.uncountedTerminatedPods"},
+			},
+		},
+		"invalid addition Complete=True without setting CompletionTime": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeRequired, Field: "status.completionTime"},
+			},
+		},
+		"invalid attempt to remove completionTime": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					CompletionTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					CompletionTime: nil,
+					StartTime:      &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeRequired, Field: "status.completionTime"},
+			},
+		},
+		"verify startTime can be cleared for suspended job": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Suspend: ptr.To(true),
+				},
+				Status: batch.JobStatus{
+					StartTime: &now,
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Suspend: ptr.To(true),
+				},
+				Status: batch.JobStatus{
+					StartTime: nil,
+				},
+			},
+		},
+		"verify startTime cannot be removed for unsuspended job": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &now,
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: nil,
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeRequired, Field: "status.startTime"},
+			},
+		},
+		"verify startTime cannot be updated for unsuspended job": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &now,
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &nowPlusMinute,
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeRequired, Field: "status.startTime"},
+			},
+		},
+		"invalid attempt to set completionTime before startTime": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime: &nowPlusMinute,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime:      &nowPlusMinute,
+					CompletionTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.completionTime"},
+			},
+		},
+		"invalid attempt to modify completionTime": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					CompletionTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					CompletionTime: &nowPlusMinute,
+					StartTime:      &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.completionTime"},
+			},
+		},
+		"invalid removal of terminal condition Failed=True": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailed,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"invalid removal of terminal condition Complete=True": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"invalid removal of terminal condition FailureTarget=True": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailureTarget,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"invalid addition of FailureTarget=True when Complete=True": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime:      &now,
+					CompletionTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime:      &now,
+					CompletionTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobFailureTarget,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"invalid attempt setting of CompletionTime when there is no Complete condition": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					CompletionTime: &now,
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.completionTime"},
+			},
+		},
+		"invalid CompletionTime when there is no Complete condition, but allowed": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					CompletionTime: &now,
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					CompletionTime: &now,
+					Active:         1,
+				},
+			},
+		},
+		"invalid attempt setting CompletedIndexes when non-indexed completion mode is used": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:    ptr.To[int32](5),
+					CompletionMode: completionModePtr(batch.NonIndexedCompletion),
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:    ptr.To[int32](5),
+					CompletionMode: completionModePtr(batch.NonIndexedCompletion),
+				},
+				Status: batch.JobStatus{
+					StartTime:        &now,
+					CompletedIndexes: "0",
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.completedIndexes"},
+			},
+		},
+		"invalid because CompletedIndexes set when non-indexed completion mode is used; but allowed": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:    ptr.To[int32](5),
+					CompletionMode: completionModePtr(batch.NonIndexedCompletion),
+				},
+				Status: batch.JobStatus{
+					CompletedIndexes: "0",
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:    ptr.To[int32](5),
+					CompletionMode: completionModePtr(batch.NonIndexedCompletion),
+				},
+				Status: batch.JobStatus{
+					CompletedIndexes: "0",
+					Active:           1,
+				},
+			},
+		},
+		"invalid attempt setting FailedIndexes when not backoffLimitPerIndex": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:    ptr.To[int32](5),
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:    ptr.To[int32](5),
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+				},
+				Status: batch.JobStatus{
+					FailedIndexes: ptr.To("0"),
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.failedIndexes"},
+			},
+		},
+		"invalid attempt to decrease the failed counter": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions: ptr.To[int32](5),
+				},
+				Status: batch.JobStatus{
+					Failed: 3,
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions: ptr.To[int32](5),
+				},
+				Status: batch.JobStatus{
+					Failed: 1,
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.failed"},
+			},
+		},
+		"invalid attempt to decrease the succeeded counter": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions: ptr.To[int32](5),
+				},
+				Status: batch.JobStatus{
+					Succeeded: 3,
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions: ptr.To[int32](5),
+				},
+				Status: batch.JobStatus{
+					Succeeded: 1,
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.succeeded"},
+			},
+		},
+		"invalid attempt to set bad format for CompletedIndexes": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:    ptr.To[int32](5),
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:    ptr.To[int32](5),
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+				},
+				Status: batch.JobStatus{
+					CompletedIndexes: "invalid format",
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.completedIndexes"},
+			},
+		},
+		"invalid format for CompletedIndexes, but allowed": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:    ptr.To[int32](5),
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+				},
+				Status: batch.JobStatus{
+					CompletedIndexes: "invalid format",
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:    ptr.To[int32](5),
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+				},
+				Status: batch.JobStatus{
+					CompletedIndexes: "invalid format",
+					Active:           1,
+				},
+			},
+		},
+		"invalid attempt to set bad format for FailedIndexes": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:          ptr.To[int32](5),
+					CompletionMode:       completionModePtr(batch.IndexedCompletion),
+					BackoffLimitPerIndex: ptr.To[int32](1),
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:          ptr.To[int32](5),
+					CompletionMode:       completionModePtr(batch.IndexedCompletion),
+					BackoffLimitPerIndex: ptr.To[int32](1),
+				},
+				Status: batch.JobStatus{
+					FailedIndexes: ptr.To("invalid format"),
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.failedIndexes"},
+			},
+		},
+		"invalid format for FailedIndexes, but allowed": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:          ptr.To[int32](5),
+					CompletionMode:       completionModePtr(batch.IndexedCompletion),
+					BackoffLimitPerIndex: ptr.To[int32](1),
+				},
+				Status: batch.JobStatus{
+					FailedIndexes: ptr.To("invalid format"),
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:          ptr.To[int32](5),
+					CompletionMode:       completionModePtr(batch.IndexedCompletion),
+					BackoffLimitPerIndex: ptr.To[int32](1),
+				},
+				Status: batch.JobStatus{
+					FailedIndexes: ptr.To("invalid format"),
+					Active:        1,
+				},
+			},
+		},
+		"more ready pods than active, but allowed": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions: ptr.To[int32](5),
+				},
+				Status: batch.JobStatus{
+					Active: 1,
+					Ready:  ptr.To[int32](2),
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions: ptr.To[int32](5),
+				},
+				Status: batch.JobStatus{
+					Active:    1,
+					Ready:     ptr.To[int32](2),
+					Succeeded: 1,
+				},
+			},
+		},
+		"invalid addition of both FailureTarget=True and Complete=True": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					StartTime:      &now,
+					CompletionTime: &now,
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobFailureTarget,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"invalid failedIndexes, which overlap with completedIndexes": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:    ptr.To[int32](5),
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+				},
+				Status: batch.JobStatus{
+					FailedIndexes:    ptr.To("0,2"),
+					CompletedIndexes: "3-4",
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:    ptr.To[int32](5),
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+				},
+				Status: batch.JobStatus{
+					FailedIndexes:    ptr.To("0,2"),
+					CompletedIndexes: "2-4",
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.failedIndexes"},
+			},
+		},
+		"failedIndexes overlap with completedIndexes, unrelated field change": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:    ptr.To[int32](5),
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+				},
+				Status: batch.JobStatus{
+					FailedIndexes:    ptr.To("0,2"),
+					CompletedIndexes: "2-4",
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions:    ptr.To[int32](5),
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+				},
+				Status: batch.JobStatus{
+					FailedIndexes:    ptr.To("0,2"),
+					CompletedIndexes: "2-4",
+					Active:           1,
+				},
+			},
+		},
+		"invalid addition of SuccessCriteriaMet for NonIndexed Job": {
+			enableJobSuccessPolicy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					SuccessPolicy: validSuccessPolicy,
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					SuccessPolicy: validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{{
+						Type:   batch.JobSuccessCriteriaMet,
+						Status: api.ConditionTrue,
+					}},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"valid update of Job if SuccessCriteriaMet already present for NonIndexed Jobs; JobSuccessPolicy enabled, while JobManagedBy and JobPodReplacementPolicy disabled": {
+			enableJobSuccessPolicy:        true,
+			enableJobManagedBy:            false,
+			enableJobPodReplacementPolicy: false,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec:       batch.JobSpec{},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{{
+						Type:   batch.JobSuccessCriteriaMet,
+						Status: api.ConditionTrue,
+					}},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec:       batch.JobSpec{},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+		},
+		"invalid addition of SuccessCriteriaMet for Job with Failed": {
+			enableJobSuccessPolicy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{{
+						Type:   batch.JobFailed,
+						Status: api.ConditionTrue,
+					}},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailed,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"invalid addition of Failed for Job with SuccessCriteriaMet": {
+			enableJobSuccessPolicy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{{
+						Type:   batch.JobSuccessCriteriaMet,
+						Status: api.ConditionTrue,
+					}},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobFailed,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"invalid addition of SuccessCriteriaMet for Job with FailureTarget": {
+			enableJobSuccessPolicy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{{
+						Type:   batch.JobFailureTarget,
+						Status: api.ConditionTrue,
+					}},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobFailureTarget,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"invalid addition of FailureTarget for Job with SuccessCriteriaMet": {
+			enableJobSuccessPolicy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{{
+						Type:   batch.JobSuccessCriteriaMet,
+						Status: api.ConditionTrue,
+					}},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobFailureTarget,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"invalid addition of SuccessCriteriaMet for Job with Complete": {
+			enableJobSuccessPolicy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{{
+						Type:   batch.JobComplete,
+						Status: api.ConditionTrue,
+					}},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"valid addition of Complete for Job with SuccessCriteriaMet": {
+			enableJobSuccessPolicy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{{
+						Type:   batch.JobSuccessCriteriaMet,
+						Status: api.ConditionTrue,
+					}},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+		},
+		"invalid addition of SuccessCriteriaMet for Job without SuccessPolicy": {
+			enableJobSuccessPolicy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobSuccessCriteriaMet,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"invalid addition of Complete for Job with SuccessPolicy unless SuccessCriteriaMet": {
+			enableJobSuccessPolicy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{
+						{
+							Type:   batch.JobComplete,
+							Status: api.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"invalid disabling of SuccessCriteriaMet for Job": {
+			enableJobSuccessPolicy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{{
+						Type:   batch.JobSuccessCriteriaMet,
+						Status: api.ConditionTrue,
+					}},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{{
+						Type:   batch.JobComplete,
+						Status: api.ConditionFalse,
+					}},
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"invalid removing of SuccessCriteriaMet for Job": {
+			enableJobSuccessPolicy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{{
+						Type:   batch.JobSuccessCriteriaMet,
+						Status: api.ConditionTrue,
+					}},
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					CompletionMode: completionModePtr(batch.IndexedCompletion),
+					Completions:    ptr.To[int32](10),
+					SuccessPolicy:  validSuccessPolicy,
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.conditions"},
+			},
+		},
+		"valid addition of SuccessCriteriaMet when JobManagedBy is enabled": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{{
+						Type:   batch.JobSuccessCriteriaMet,
+						Status: api.ConditionTrue,
+					}},
+				},
+			},
+		},
+		"valid addition of SuccessCriteriaMet when JobPodReplacementPolicy is enabled": {
+			enableJobPodReplacementPolicy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Status: batch.JobStatus{
+					Conditions: []batch.JobCondition{{
+						Type:   batch.JobSuccessCriteriaMet,
+						Status: api.ConditionTrue,
+					}},
+				},
+			},
+		},
+		"invalid attempt to set more ready pods than active": {
+			enableJobManagedBy: true,
+			job: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions: ptr.To[int32](5),
+				},
+			},
+			newJob: &batch.Job{
+				ObjectMeta: validObjectMeta,
+				Spec: batch.JobSpec{
+					Completions: ptr.To[int32](5),
+				},
+				Status: batch.JobStatus{
+					Active: 1,
+					Ready:  ptr.To[int32](2),
+				},
+			},
+			wantErrs: field.ErrorList{
+				{Type: field.ErrorTypeInvalid, Field: "status.ready"},
 			},
 		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			errs := StatusStrategy.ValidateUpdate(ctx, tc.newJob, tc.job)
-			if len(errs) != 0 {
-				t.Errorf("Unexpected error %v", errs)
+			if !tc.enableJobSuccessPolicy {
+				// TODO: this will be removed in 1.36.
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, utilversion.MustParse("1.32"))
+			} else if !tc.enableJobPodReplacementPolicy {
+				// TODO: this will be removed in 1.37.
+				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, utilversion.MustParse("1.33"))
 			}
-			if diff := cmp.Diff(tc.wantJob, tc.newJob); diff != "" {
-				t.Errorf("Unexpected job (-want,+got):\n%s", diff)
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.JobManagedBy, tc.enableJobManagedBy)
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.JobSuccessPolicy, tc.enableJobSuccessPolicy)
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.JobPodReplacementPolicy, tc.enableJobPodReplacementPolicy)
+
+			errs := StatusStrategy.ValidateUpdate(ctx, tc.newJob, tc.job)
+			if diff := cmp.Diff(tc.wantErrs, errs, ignoreErrValueDetail); diff != "" {
+				t.Errorf("Unexpected errors (-want,+got):\n%s", diff)
+			}
+			if tc.wantJob != nil {
+				if diff := cmp.Diff(tc.wantJob, tc.newJob); diff != "" {
+					t.Errorf("Unexpected job (-want,+got):\n%s", diff)
+				}
 			}
 		})
 	}
@@ -1287,8 +3595,8 @@ func TestJobStrategy_GetAttrs(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:       validSelector,
 					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
+					ManualSelector: ptr.To(true),
+					Parallelism:    ptr.To[int32](1),
 				},
 			},
 		},
@@ -1303,8 +3611,8 @@ func TestJobStrategy_GetAttrs(t *testing.T) {
 				Spec: batch.JobSpec{
 					Selector:       validSelector,
 					Template:       validPodTemplateSpec,
-					ManualSelector: pointer.BoolPtr(true),
-					Parallelism:    pointer.Int32Ptr(1),
+					ManualSelector: ptr.To(true),
+					Parallelism:    ptr.To[int32](1),
 				},
 			},
 		},
@@ -1347,13 +3655,22 @@ func completionModePtr(m batch.CompletionMode) *batch.CompletionMode {
 	return &m
 }
 
+func podReplacementPolicy(m batch.PodReplacementPolicy) *batch.PodReplacementPolicy {
+	return &m
+}
+
 func getValidObjectMeta(generation int64) metav1.ObjectMeta {
 	return getValidObjectMetaWithAnnotations(generation, nil)
+}
+
+func getValidUID() types.UID {
+	return "1a2b3c4d5e6f7g8h9i0k"
 }
 
 func getValidObjectMetaWithAnnotations(generation int64, annotations map[string]string) metav1.ObjectMeta {
 	return metav1.ObjectMeta{
 		Name:        "myjob",
+		UID:         getValidUID(),
 		Namespace:   metav1.NamespaceDefault,
 		Generation:  generation,
 		Annotations: annotations,
@@ -1364,6 +3681,16 @@ func getValidLabelSelector() *metav1.LabelSelector {
 	return &metav1.LabelSelector{
 		MatchLabels: map[string]string{"a": "b"},
 	}
+}
+
+func getValidBatchLabels() map[string]string {
+	theUID := getValidUID()
+	return map[string]string{batch.LegacyJobNameLabel: "myjob", batch.JobNameLabel: "myjob", batch.LegacyControllerUidLabel: string(theUID), batch.ControllerUidLabel: string(theUID)}
+}
+
+func getValidBatchLabelsWithNonBatch() map[string]string {
+	theUID := getValidUID()
+	return map[string]string{"a": "b", batch.LegacyJobNameLabel: "myjob", batch.JobNameLabel: "myjob", batch.LegacyControllerUidLabel: string(theUID), batch.ControllerUidLabel: string(theUID)}
 }
 
 func getValidPodTemplateSpecForSelector(validSelector *metav1.LabelSelector) api.PodTemplateSpec {

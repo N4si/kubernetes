@@ -17,6 +17,7 @@ limitations under the License.
 package validation
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -322,108 +323,6 @@ func TestIsValidLabelValue(t *testing.T) {
 	}
 }
 
-func TestIsValidIP(t *testing.T) {
-	goodValues := []string{
-		"::1",
-		"2a00:79e0:2:0:f1c3:e797:93c1:df80",
-		"::",
-		"2001:4860:4860::8888",
-		"::fff:1.1.1.1",
-		"1.1.1.1",
-		"1.1.1.01",
-		"255.0.0.1",
-		"1.0.0.0",
-		"0.0.0.0",
-	}
-	for _, val := range goodValues {
-		if msgs := IsValidIP(val); len(msgs) != 0 {
-			t.Errorf("expected true for %q: %v", val, msgs)
-		}
-	}
-
-	badValues := []string{
-		"[2001:db8:0:1]:80",
-		"myhost.mydomain",
-		"-1.0.0.0",
-		"[2001:db8:0:1]",
-		"a",
-	}
-	for _, val := range badValues {
-		if msgs := IsValidIP(val); len(msgs) == 0 {
-			t.Errorf("expected false for %q", val)
-		}
-	}
-}
-
-func TestIsValidIPv4Address(t *testing.T) {
-	goodValues := []string{
-		"1.1.1.1",
-		"1.1.1.01",
-		"255.0.0.1",
-		"1.0.0.0",
-		"0.0.0.0",
-	}
-	for _, val := range goodValues {
-		if msgs := IsValidIPv4Address(field.NewPath(""), val); len(msgs) != 0 {
-			t.Errorf("expected %q to be valid IPv4 address: %v", val, msgs)
-		}
-	}
-
-	badValues := []string{
-		"[2001:db8:0:1]:80",
-		"myhost.mydomain",
-		"-1.0.0.0",
-		"[2001:db8:0:1]",
-		"a",
-		"2001:4860:4860::8888",
-		"::fff:1.1.1.1",
-		"::1",
-		"2a00:79e0:2:0:f1c3:e797:93c1:df80",
-		"::",
-	}
-	for _, val := range badValues {
-		if msgs := IsValidIPv4Address(field.NewPath(""), val); len(msgs) == 0 {
-			t.Errorf("expected %q to be invalid IPv4 address", val)
-		}
-	}
-}
-
-func TestIsValidIPv6Address(t *testing.T) {
-	goodValues := []string{
-		"2001:4860:4860::8888",
-		"2a00:79e0:2:0:f1c3:e797:93c1:df80",
-		"2001:0db8:85a3:0000:0000:8a2e:0370:7334",
-		"::fff:1.1.1.1",
-		"::1",
-		"::",
-	}
-
-	for _, val := range goodValues {
-		if msgs := IsValidIPv6Address(field.NewPath(""), val); len(msgs) != 0 {
-			t.Errorf("expected %q to be valid IPv6 address: %v", val, msgs)
-		}
-	}
-
-	badValues := []string{
-		"1.1.1.1",
-		"1.1.1.01",
-		"255.0.0.1",
-		"1.0.0.0",
-		"0.0.0.0",
-		"[2001:db8:0:1]:80",
-		"myhost.mydomain",
-		"2001:0db8:85a3:0000:0000:8a2e:0370:7334:2001:0db8:85a3:0000:0000:8a2e:0370:7334",
-		"-1.0.0.0",
-		"[2001:db8:0:1]",
-		"a",
-	}
-	for _, val := range badValues {
-		if msgs := IsValidIPv6Address(field.NewPath(""), val); len(msgs) == 0 {
-			t.Errorf("expected %q to be invalid IPv6 address", val)
-		}
-	}
-}
-
 func TestIsHTTPHeaderName(t *testing.T) {
 	goodValues := []string{
 		// Common ones
@@ -630,33 +529,27 @@ func TestIsFullyQualifiedName(t *testing.T) {
 		name       string
 		targetName string
 		err        string
-	}{
-		{
-			name:       "name needs to be fully qualified, i.e., contains at least 2 dots",
-			targetName: "k8s.io",
-			err:        "should be a domain with at least three segments separated by dots",
-		},
-		{
-			name:       "name should not include scheme",
-			targetName: "http://foo.k8s.io",
-			err:        "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters",
-		},
-		{
-			name:       "email should be invalid",
-			targetName: "example@foo.k8s.io",
-			err:        "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters",
-		},
-		{
-			name:       "name cannot be empty",
-			targetName: "",
-			err:        "Required value",
-		},
-		{
-			name:       "name must conform to RFC 1123",
-			targetName: "A.B.C",
-			err:        "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters",
-		},
-	}
+	}{{
+		name:       "name needs to be fully qualified, i.e., contains at least 2 dots",
+		targetName: "k8s.io",
+		err:        "should be a domain with at least three segments separated by dots",
+	}, {
+		name:       "name should not include scheme",
+		targetName: "http://foo.k8s.io",
+		err:        "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters",
+	}, {
+		name:       "email should be invalid",
+		targetName: "example@foo.k8s.io",
+		err:        "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters",
+	}, {
+		name:       "name cannot be empty",
+		targetName: "",
+		err:        "Required value",
+	}, {
+		name:       "name must conform to RFC 1123",
+		targetName: "A.B.C",
+		err:        "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters",
+	}}
 	for _, tc := range messageTests {
 		err := IsFullyQualifiedName(field.NewPath(""), tc.targetName).ToAggregate()
 		switch {
@@ -717,30 +610,112 @@ func TestIsDomainPrefixedPath(t *testing.T) {
 	}
 }
 
-func TestIsValidSocketAddr(t *testing.T) {
+func TestIsRelaxedEnvVarName(t *testing.T) {
 	goodValues := []string{
-		"0.0.0.0:10254",
-		"127.0.0.1:8888",
-		"[2001:db8:1f70::999:de8:7648:6e8]:10254",
-		"[::]:10254",
+		"-", ":", "_", "+a", ">a", "<a",
+		"a.", "a..", "*a", "%a", "?a",
+		"a:a", "a_a", "aAz", "~a", "|a",
+		"a0a", "a9", "/a", "a ", "#a",
+		"0a", "0 a", "'a", "(a", "@a",
 	}
 	for _, val := range goodValues {
-		if errs := IsValidSocketAddr(val); len(errs) != 0 {
-			t.Errorf("expected no errors for %q: %v", val, errs)
+		if msgs := IsRelaxedEnvVarName(val); len(msgs) != 0 {
+			t.Errorf("expected true for '%s': %v", val, msgs)
 		}
 	}
 
 	badValues := []string{
-		"0.0.0.0.0:2020",
-		"0.0.0.0",
-		"6.6.6.6:909090",
-		"2001:db8:1f70::999:de8:7648:6e8:87567:102545",
-		"",
-		"*",
+		"", "=", "a=", "1=a", "a=b", "#%=&&",
+		string(rune(1)) + "abc", string(rune(130)) + "abc",
+		"Ç ç", "Ä ä", "Ñ ñ", "Ø ø",
 	}
+
 	for _, val := range badValues {
-		if errs := IsValidSocketAddr(val); len(errs) == 0 {
-			t.Errorf("expected errors for %q", val)
+		if msgs := IsRelaxedEnvVarName(val); len(msgs) == 0 {
+			t.Errorf("expected false for '%s'", val)
 		}
+	}
+}
+
+func TestIsDNS1123SubdomainWithUnderscore(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    string
+		expected []string
+	}{
+		{
+			name:     "valid subdomain",
+			value:    "example.com",
+			expected: nil,
+		},
+		{
+			name:     "valid subdomain with underscore",
+			value:    "_example.com",
+			expected: nil,
+		},
+		{
+			name:     "valid subdomain with multiple segments",
+			value:    "sub._example.com",
+			expected: nil,
+		},
+		{
+			name:     "valid subdomain with hyphen",
+			value:    "sub-domain.example.com",
+			expected: nil,
+		},
+		{
+			name:     "valid subdomain with underscore in middle",
+			value:    "sub_domain.example.com",
+			expected: nil,
+		},
+		{
+			name:     "empty string",
+			value:    "",
+			expected: []string{RegexError(dns1123SubdomainErrorMsgFG, dns1123SubdomainFmtWithUnderscore, "example.com")},
+		},
+		{
+			name:     "invalid uppercase characters",
+			value:    "Example.com",
+			expected: []string{RegexError(dns1123SubdomainErrorMsgFG, dns1123SubdomainFmtWithUnderscore, "example.com")},
+		},
+		{
+			name:     "invalid starting character",
+			value:    "-example.com",
+			expected: []string{RegexError(dns1123SubdomainErrorMsgFG, dns1123SubdomainFmtWithUnderscore, "example.com")},
+		},
+		{
+			name:     "invalid ending character",
+			value:    "example.com-",
+			expected: []string{RegexError(dns1123SubdomainErrorMsgFG, dns1123SubdomainFmtWithUnderscore, "example.com")},
+		},
+		{
+			name:     "invalid characters",
+			value:    "example@.com",
+			expected: []string{RegexError(dns1123SubdomainErrorMsgFG, dns1123SubdomainFmtWithUnderscore, "example.com")},
+		},
+		{
+			name:     "too long subdomain",
+			value:    "a." + string(make([]byte, 251)) + ".com",
+			expected: []string{MaxLenError(DNS1123SubdomainMaxLength), RegexError(dns1123SubdomainErrorMsgFG, dns1123SubdomainFmtWithUnderscore, "example.com")},
+		},
+		{
+			name:     "multiple dots",
+			value:    "example..com",
+			expected: []string{RegexError(dns1123SubdomainErrorMsgFG, dns1123SubdomainFmtWithUnderscore, "example.com")},
+		},
+		{
+			name:     "underscore only",
+			value:    "_",
+			expected: []string{RegexError(dns1123SubdomainErrorMsgFG, dns1123SubdomainFmtWithUnderscore, "example.com")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := IsDNS1123SubdomainWithUnderscore(tt.value)
+			if !reflect.DeepEqual(result, tt.expected) {
+				t.Errorf("IsDNS1123SubdomainWithUnderscore(%q) = %v; want %v", tt.value, result, tt.expected)
+			}
+		})
 	}
 }

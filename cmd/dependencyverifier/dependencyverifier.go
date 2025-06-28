@@ -25,6 +25,8 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+
+	"github.com/google/go-cmp/cmp" //nolint:depguard
 )
 
 type Unwanted struct {
@@ -37,18 +39,33 @@ type Unwanted struct {
 type UnwantedSpec struct {
 	// module names we don't want to depend on, mapped to an optional message about why
 	UnwantedModules map[string]string `json:"unwantedModules"`
+	// module names that should never be updated from their current version, mapped to a struct with version and reason
+	PinnedModules map[string]PinnedModule `json:"pinnedModules"`
+}
+
+type PinnedModule struct {
+	Version string `json:"Version"`
+	Reason  string `json:"Reason"`
 }
 
 type UnwantedStatus struct {
 	// references to modules in the spec.unwantedModules list, based on `go mod graph` content.
 	// eliminating things from this list is good, and sometimes requires working with upstreams to do so.
 	UnwantedReferences map[string][]string `json:"unwantedReferences"`
+	// list of modules in the spec.unwantedModules list which are vendored
+	UnwantedVendored []string `json:"unwantedVendored"`
 }
 
 // runCommand runs the cmd and returns the combined stdout and stderr, or an
 // error if the command failed.
 func runCommand(cmd ...string) (string, error) {
-	output, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput()
+	return runCommandInDir("", cmd)
+}
+
+func runCommandInDir(dir string, cmd []string) (string, error) {
+	c := exec.Command(cmd[0], cmd[1:]...)
+	c.Dir = dir
+	output, err := c.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("failed to run %q: %s (%s)", strings.Join(cmd, " "), err, output)
 	}
@@ -153,8 +170,6 @@ func parseModule(s string) module {
 
 // option1: dependencyverifier dependencies.json
 // it will run `go mod graph` and check it.
-// option2: dependencyverifier dependencies.json mod.graph
-// it will check the specified mod graph result file.
 func main() {
 	var modeGraphStr string
 	var err error
@@ -164,15 +179,8 @@ func main() {
 		if err != nil {
 			log.Fatalf("Error running 'go mod graph': %s", err)
 		}
-	} else if len(os.Args) == 3 {
-		modGraphFile := string(os.Args[2])
-		modeGraphStr, err = readFile(modGraphFile)
-		// read file, such as `mod.graph`
-		if err != nil {
-			log.Fatalf("Error reading mod file %s: %s", modGraphFile, err)
-		}
 	} else {
-		log.Fatalf("Usage: %s dependencies.json {mod.graph}", os.Args[0])
+		log.Fatalf("Usage: %s dependencies.json", os.Args[0])
 	}
 
 	dependenciesJSONPath := string(os.Args[1])
@@ -192,12 +200,47 @@ func main() {
 	// convert from `go mod graph` to main module and map of from->[]to references
 	mainModules, moduleGraph := convertToMap(modeGraphStr)
 
+	directDependencies := map[string]map[string]bool{}
+	for _, mainModule := range mainModules {
+		dir := ""
+		if mainModule.name != "k8s.io/kubernetes" {
+			dir = "staging/src/" + mainModule.name
+		}
+		listOutput, err := runCommandInDir(dir, []string{"go", "list", "-m", "-f", "{{if not .Indirect}}{{if not .Main}}{{.Path}}{{end}}{{end}}", "all"})
+		if err != nil {
+			log.Fatalf("Error running 'go list' for %s: %s", mainModule.name, err)
+		}
+		directDependencies[mainModule.name] = map[string]bool{}
+		for _, directDependency := range strings.Split(listOutput, "\n") {
+			directDependencies[mainModule.name][directDependency] = true
+		}
+	}
+
 	// gather the effective versions by looking at the versions required by the main modules
 	effectiveVersions := map[string]module{}
 	for _, mainModule := range mainModules {
 		for _, override := range moduleGraph[mainModule] {
 			if _, ok := effectiveVersions[override.name]; !ok {
 				effectiveVersions[override.name] = override
+			}
+		}
+	}
+
+	// Check for pinned modules that have been updated
+	pinnedModuleViolations := map[string][]string{}
+	if len(configFromFile.Spec.PinnedModules) > 0 {
+		// Get the current versions of pinned modules
+		for pinnedModule, pinnedInfo := range configFromFile.Spec.PinnedModules {
+			// Check if the module is in effectiveVersions
+			if effectiveModule, ok := effectiveVersions[pinnedModule]; ok {
+				// Compare with the pinned version from the JSON file
+				if effectiveModule.version != pinnedInfo.Version {
+					pinnedModuleViolations[pinnedModule] = []string{
+						fmt.Sprintf("Pinned version: %s", pinnedInfo.Version),
+						fmt.Sprintf("Attempted update to: %s", effectiveModule.version),
+						fmt.Sprintf("Reason for pinning: %s", pinnedInfo.Reason),
+					}
+				}
 			}
 		}
 	}
@@ -251,9 +294,30 @@ func main() {
 			// record specific names of versioned referents
 			if referencer.version != "" && referencer.version != "v0.0.0" {
 				config.Status.UnwantedReferences[unwanted] = append(config.Status.UnwantedReferences[unwanted], referencer.name)
+			} else if directDependencies[referencer.name][unwanted] {
+				config.Status.UnwantedReferences[unwanted] = append(config.Status.UnwantedReferences[unwanted], referencer.name)
 			}
 		}
 	}
+
+	vendorModulesTxt, err := os.ReadFile("vendor/modules.txt")
+	if err != nil {
+		log.Fatal(err)
+	}
+	vendoredModules := map[string]bool{}
+	for _, l := range strings.Split(string(vendorModulesTxt), "\n") {
+		parts := strings.Split(l, " ")
+		if len(parts) == 3 && parts[0] == "#" && strings.HasPrefix(parts[2], "v") {
+			vendoredModules[parts[1]] = true
+		}
+	}
+	config.Status.UnwantedVendored = []string{}
+	for unwanted := range configFromFile.Spec.UnwantedModules {
+		if vendoredModules[unwanted] {
+			config.Status.UnwantedVendored = append(config.Status.UnwantedVendored, unwanted)
+		}
+	}
+	sort.Strings(config.Status.UnwantedVendored)
 
 	needUpdate := false
 
@@ -269,6 +333,8 @@ func main() {
 	if !bytes.Equal(expected, actual) {
 		log.Printf("Expected status of\n%s", string(expected))
 		log.Printf("Got status of\n%s", string(actual))
+		needUpdate = true
+		log.Print("Status diff:\n", cmp.Diff(expected, actual))
 	}
 	for expectedRef, expectedFrom := range configFromFile.Status.UnwantedReferences {
 		actualFrom, ok := config.Status.UnwantedReferences[expectedRef]
@@ -309,7 +375,32 @@ func main() {
 		needUpdate = true
 	}
 
+	removedVendored, addedVendored := difference(configFromFile.Status.UnwantedVendored, config.Status.UnwantedVendored)
+	if len(removedVendored) > 0 {
+		log.Printf("Good news! Unwanted modules are no longer vendered: %q", removedVendored)
+		log.Printf("!!! Remove those from status.unwantedVendored in %s to ensure they don't get reintroduced.", dependenciesJSONPath)
+		needUpdate = true
+	}
+	if len(addedVendored) > 0 {
+		log.Printf("Unwanted modules are newly vendored: %q", addedVendored)
+		log.Printf("!!! Avoid updates that increase vendoring of unwanted dependencies\n")
+		needUpdate = true
+	}
+
 	if needUpdate {
+		os.Exit(1)
+	}
+
+	// Check if there are any pinned module violations
+	if len(pinnedModuleViolations) > 0 {
+		log.Printf("ERROR: The following pinned modules have been updated:")
+		for module, details := range pinnedModuleViolations {
+			log.Printf("Module: %s", module)
+			for _, detail := range details {
+				log.Printf("  %s", detail)
+			}
+		}
+		log.Printf("Pinned modules must not be updated. Please revert these changes.")
 		os.Exit(1)
 	}
 }

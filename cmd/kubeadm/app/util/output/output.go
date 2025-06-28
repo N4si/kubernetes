@@ -104,7 +104,7 @@ func (pf *PrintFlags) ToPrinter() (Printer, error) {
 func (pf *PrintFlags) AddFlags(cmd *cobra.Command) {
 	pf.JSONYamlPrintFlags.AddFlags(cmd)
 	pf.KubeTemplatePrintFlags.AddFlags(cmd)
-	cmd.Flags().StringVarP(pf.OutputFormat, "experimental-output", "o", *pf.OutputFormat, fmt.Sprintf("Output format. One of: %s.", strings.Join(pf.AllowedFormats(), "|")))
+	cmd.Flags().StringVarP(pf.OutputFormat, "output", "o", *pf.OutputFormat, fmt.Sprintf("Output format. One of: %s.", strings.Join(pf.AllowedFormats(), "|")))
 }
 
 // WithDefaultOutput sets a default output format if one is not provided through a flag value
@@ -144,9 +144,6 @@ type Printer interface {
 	Fprintln(writer io.Writer, args ...interface{}) (n int, err error)
 	Printf(format string, args ...interface{}) (n int, err error)
 	Println(args ...interface{}) (n int, err error)
-
-	Flush(writer io.Writer, last bool)
-	Close(writer io.Writer)
 }
 
 // TextPrinter implements Printer interface for generic text output
@@ -179,14 +176,6 @@ func (tp *TextPrinter) Println(args ...interface{}) (n int, err error) {
 	return fmt.Println(args...)
 }
 
-// Flush writes any buffered data
-func (tp *TextPrinter) Flush(writer io.Writer, last bool) {
-}
-
-// Close flushes any buffered data and closes the printer
-func (tp *TextPrinter) Close(writer io.Writer) {
-}
-
 // ResourcePrinterWrapper wraps ResourcePrinter and implements Printer interface
 type ResourcePrinterWrapper struct {
 	Printer printers.ResourcePrinter
@@ -198,14 +187,6 @@ func NewResourcePrinterWrapper(resourcePrinter printers.ResourcePrinter, err err
 		return nil, err
 	}
 	return &ResourcePrinterWrapper{Printer: resourcePrinter}, nil
-}
-
-// Flush writes any buffered data
-func (rpw *ResourcePrinterWrapper) Flush(writer io.Writer, last bool) {
-}
-
-// Close flushes any buffered data and closes the printer
-func (rpw *ResourcePrinterWrapper) Close(writer io.Writer) {
 }
 
 // PrintObj is an implementation of ResourcePrinter.PrintObj that calls underlying printer API

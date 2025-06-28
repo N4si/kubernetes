@@ -26,7 +26,14 @@ run_wait_tests() {
 
     create_and_use_new_namespace
 
-    ### Wait for deletion using --all flag
+    # wait --for=create should time out
+    set +o errexit
+    # Command: Wait with jsonpath support fields not exist in the first place
+    output_message=$(kubectl wait --for=create deploy/test-1 --timeout=1s 2>&1)
+    set -o errexit
+
+    # Post-Condition: Wait failed
+    kube::test::if_has_string "${output_message}" 'timed out waiting for the condition'
 
     # create test data
     kubectl create deployment test-1 --image=busybox
@@ -44,6 +51,12 @@ run_wait_tests() {
     # Post-Condition: Wait failed
     kube::test::if_has_string "${output_message}" 'timed out'
 
+    # wait with mixed case jsonpath
+    output_message=$(kubectl wait --for=jsonpath=.status.unavailableReplicas=1 deploy/test-1 2>&1)
+
+    # Post-Condition: Wait failed
+    kube::test::if_has_string "${output_message}" 'test-1 condition met'
+
     # Delete all deployments async to kubectl wait
     ( sleep 2 && kubectl delete deployment --all ) &
 
@@ -53,6 +66,49 @@ run_wait_tests() {
     # Post-Condition: Wait was successful
     kube::test::if_has_string "${output_message}" 'test-1 condition met'
     kube::test::if_has_string "${output_message}" 'test-2 condition met'
+
+    set +o errexit
+    # Command: Wait with label selector before resource exists 
+    output_message=$(kubectl wait --for=create deploy -l app=test-label --timeout=1s 2>&1)
+    set -o errexit
+
+    # Post-Condition: Should get timeout, not "no resources found"
+    kube::test::if_has_string "${output_message}" 'timed out waiting for the condition'
+
+    # Create deployment with label selector in the background
+
+    ( sleep 2 && cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-label
+  labels:
+    app: test-label
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-label
+  template:
+    metadata:
+      labels:
+        app: test-label
+    spec:
+      containers:
+      - name: bb
+        image: busybox
+        command: ["/bin/sh", "-c", "sleep infinity"]
+EOF
+    ) &
+
+    # Command: Wait for labeled deployment to be created
+    output_message=$(kubectl wait --for=create deploy -l app=test-label --timeout=40s)
+
+     # Post-Condition: Wait was successful
+    kube::test::if_has_string "${output_message}" 'test-label condition met'
+
+    # Clean up
+    kubectl delete deployment test-label
 
     # create test data to test timeout error is occurred in correct time
     kubectl apply -f - <<EOF
@@ -94,6 +150,30 @@ EOF
     # Clean deployment
     kubectl delete deployment dtest
 
+    # create test data
+    kubectl create deployment test-3 --image=busybox
+
+    # wait with jsonpath without value to succeed
+    set +o errexit
+    # Command: Wait with jsonpath without value
+    output_message_0=$(kubectl wait --for=jsonpath='{.status.replicas}' deploy/test-3 2>&1)
+    # Command: Wait with relaxed jsonpath and filter expression
+    output_message_1=$(kubectl wait \
+        --for='jsonpath=spec.template.spec.containers[?(@.name=="busybox")].image=busybox' \
+        deploy/test-3)
+    # Command: Wait with jsonpath without value with check-once behavior
+    output_message_2=$(kubectl wait --for=jsonpath='{.status.replicas}' deploy/test-3 --timeout=0 2>&1)
+    set -o errexit
+
+    # Post-Condition: Wait succeed
+    kube::test::if_has_string "${output_message_0}" 'deployment.apps/test-3 condition met'
+    kube::test::if_has_string "${output_message_1}" 'deployment.apps/test-3 condition met'
+    kube::test::if_has_string "${output_message_2}" 'deployment.apps/test-3 condition met'
+
+    # Clean deployment
+    kubectl delete deployment test-3
+
     set +o nounset
     set +o errexit
 }
+

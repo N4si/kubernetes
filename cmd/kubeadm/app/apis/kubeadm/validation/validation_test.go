@@ -21,14 +21,18 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/pflag"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
+	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
 )
 
 func TestValidateToken(t *testing.T) {
@@ -254,24 +258,24 @@ func TestValidatePodSubnetNodeMask(t *testing.T) {
 	var tests = []struct {
 		name        string
 		subnet      string
-		cmExtraArgs map[string]string
+		cmExtraArgs []kubeadmapi.Arg
 		expected    bool
 	}{
 		// dual-stack:
 		{"dual IPv4 only, but mask too small. Default node-mask", "10.0.0.16/29", nil, false},
-		{"dual IPv4 only, but mask too small. Configured node-mask", "10.0.0.16/24", map[string]string{"node-cidr-mask-size-ipv4": "23"}, false},
+		{"dual IPv4 only, but mask too small. Configured node-mask", "10.0.0.16/24", []kubeadmapi.Arg{{Name: "node-cidr-mask-size-ipv4", Value: "23"}}, false},
 		{"dual IPv6 only, but mask too small. Default node-mask", "2001:db8::1/112", nil, false},
-		{"dual IPv6 only, but mask too small. Configured node-mask", "2001:db8::1/64", map[string]string{"node-cidr-mask-size-ipv6": "24"}, false},
+		{"dual IPv6 only, but mask too small. Configured node-mask", "2001:db8::1/64", []kubeadmapi.Arg{{Name: "node-cidr-mask-size-ipv6", Value: "24"}}, false},
 		{"dual IPv6 only, but mask difference greater than 16. Default node-mask", "2001:db8::1/12", nil, false},
-		{"dual IPv6 only, but mask difference greater than 16. Configured node-mask", "2001:db8::1/64", map[string]string{"node-cidr-mask-size-ipv6": "120"}, false},
+		{"dual IPv6 only, but mask difference greater than 16. Configured node-mask", "2001:db8::1/64", []kubeadmapi.Arg{{Name: "node-cidr-mask-size-ipv6", Value: "120"}}, false},
 		{"dual IPv4 only CIDR", "10.0.0.16/12", nil, true},
 		{"dual IPv6 only CIDR", "2001:db8::/48", nil, true},
 		{"dual, but IPv4 mask too small. Default node-mask", "10.0.0.16/29,2001:db8::/48", nil, false},
-		{"dual, but IPv4 mask too small. Configured node-mask", "10.0.0.16/24,2001:db8::/48", map[string]string{"node-cidr-mask-size-ipv4": "23"}, false},
+		{"dual, but IPv4 mask too small. Configured node-mask", "10.0.0.16/24,2001:db8::/48", []kubeadmapi.Arg{{Name: "node-cidr-mask-size-ipv4", Value: "23"}}, false},
 		{"dual, but IPv6 mask too small. Default node-mask", "2001:db8::1/112,10.0.0.16/16", nil, false},
-		{"dual, but IPv6 mask too small. Configured node-mask", "10.0.0.16/16,2001:db8::1/64", map[string]string{"node-cidr-mask-size-ipv6": "24"}, false},
+		{"dual, but IPv6 mask too small. Configured node-mask", "10.0.0.16/16,2001:db8::1/64", []kubeadmapi.Arg{{Name: "node-cidr-mask-size-ipv6", Value: "24"}}, false},
 		{"dual, but mask difference greater than 16. Default node-mask", "2001:db8::1/12,10.0.0.16/16", nil, false},
-		{"dual, but mask difference greater than 16. Configured node-mask", "10.0.0.16/16,2001:db8::1/64", map[string]string{"node-cidr-mask-size-ipv6": "120"}, false},
+		{"dual, but mask difference greater than 16. Configured node-mask", "10.0.0.16/16,2001:db8::1/64", []kubeadmapi.Arg{{Name: "node-cidr-mask-size-ipv6", Value: "120"}}, false},
 		{"dual IPv4 IPv6", "2001:db8::/48,10.0.0.16/12", nil, true},
 		{"dual IPv6 IPv4", "2001:db8::/48,10.0.0.16/12", nil, true},
 	}
@@ -455,6 +459,42 @@ func TestValidateAPIEndpoint(t *testing.T) {
 	}
 }
 
+func TestValidateCertificateKey(t *testing.T) {
+	var tests = []struct {
+		name           string
+		certificateKey string
+		expected       bool
+	}{
+		{
+			name:           "Valid certificate key",
+			certificateKey: "e6a2eb8581237ab72a4f494f30285ec12a9694d750b9785706a83bfcbbbd2204",
+			expected:       true,
+		},
+		{
+			name:           "Invalid hex encoded string",
+			certificateKey: "z6a2eb8581237ab72a4f494f30285ec12a9694d750b9785706a83bfcbbbd2204",
+			expected:       false,
+		},
+		{
+			name:           "Invalid AES key size",
+			certificateKey: "e6a2",
+			expected:       false,
+		},
+	}
+	for _, rt := range tests {
+		actual := ValidateCertificateKey(rt.certificateKey, nil)
+		t.Log(actual)
+		if (len(actual) == 0) != rt.expected {
+			t.Errorf(
+				"%s test case failed:\n\texpected: %t\n\t  actual: %t",
+				rt.name,
+				rt.expected,
+				(len(actual) == 0),
+			)
+		}
+	}
+}
+
 // TODO: Create a separated test for ValidateClusterConfiguration
 func TestValidateInitConfiguration(t *testing.T) {
 	nodename := "valid-nodename"
@@ -477,7 +517,8 @@ func TestValidateInitConfiguration(t *testing.T) {
 						ServiceSubnet: "10.96.0.1/12",
 						DNSDomain:     "cluster.local",
 					},
-					CertificatesDir: "/some/cert/dir",
+					CertificatesDir:     "/some/cert/dir",
+					EncryptionAlgorithm: kubeadmapi.EncryptionAlgorithmRSA2048,
 				},
 				NodeRegistration: kubeadmapi.NodeRegistrationOptions{Name: nodename, CRISocket: criPath},
 			}, false},
@@ -492,7 +533,8 @@ func TestValidateInitConfiguration(t *testing.T) {
 						ServiceSubnet: "2001:db8::1/98",
 						DNSDomain:     "cluster.local",
 					},
-					CertificatesDir: "/some/cert/dir",
+					CertificatesDir:     "/some/cert/dir",
+					EncryptionAlgorithm: kubeadmapi.EncryptionAlgorithmRSA2048,
 				},
 				NodeRegistration: kubeadmapi.NodeRegistrationOptions{Name: nodename, CRISocket: criPath},
 			}, false},
@@ -507,7 +549,8 @@ func TestValidateInitConfiguration(t *testing.T) {
 						ServiceSubnet: "10.96.0.1/12",
 						DNSDomain:     "cluster.local",
 					},
-					CertificatesDir: "/some/other/cert/dir",
+					CertificatesDir:     "/some/other/cert/dir",
+					EncryptionAlgorithm: kubeadmapi.EncryptionAlgorithmRSA2048,
 				},
 			}, false},
 		{"valid InitConfiguration with incorrect IPv4 pod subnet",
@@ -522,7 +565,8 @@ func TestValidateInitConfiguration(t *testing.T) {
 						DNSDomain:     "cluster.local",
 						PodSubnet:     "10.0.1.15",
 					},
-					CertificatesDir: "/some/other/cert/dir",
+					CertificatesDir:     "/some/other/cert/dir",
+					EncryptionAlgorithm: kubeadmapi.EncryptionAlgorithmRSA2048,
 				},
 				NodeRegistration: kubeadmapi.NodeRegistrationOptions{Name: nodename, CRISocket: criPath},
 			}, false},
@@ -544,7 +588,8 @@ func TestValidateInitConfiguration(t *testing.T) {
 						DNSDomain:     "cluster.local",
 						PodSubnet:     "10.0.1.15/16",
 					},
-					CertificatesDir: "/some/other/cert/dir",
+					CertificatesDir:     "/some/other/cert/dir",
+					EncryptionAlgorithm: kubeadmapi.EncryptionAlgorithmRSA2048,
 				},
 				NodeRegistration: kubeadmapi.NodeRegistrationOptions{Name: nodename, CRISocket: criPath},
 			}, true},
@@ -565,7 +610,31 @@ func TestValidateInitConfiguration(t *testing.T) {
 						ServiceSubnet: "2001:db8::1/112",
 						DNSDomain:     "cluster.local",
 					},
-					CertificatesDir: "/some/other/cert/dir",
+					CertificatesDir:     "/some/other/cert/dir",
+					EncryptionAlgorithm: kubeadmapi.EncryptionAlgorithmECDSAP256,
+				},
+				NodeRegistration: kubeadmapi.NodeRegistrationOptions{Name: nodename, CRISocket: criPath},
+			}, true},
+		{"valid InitConfiguration using ECDSA P384 algorithm",
+			&kubeadmapi.InitConfiguration{
+				LocalAPIEndpoint: kubeadmapi.APIEndpoint{
+					AdvertiseAddress: "1.2.3.4",
+					BindPort:         3446,
+				},
+				ClusterConfiguration: kubeadmapi.ClusterConfiguration{
+					ImageRepository: "registry.k8s.io",
+					Etcd: kubeadmapi.Etcd{
+						Local: &kubeadmapi.LocalEtcd{
+							DataDir: "/some/path",
+						},
+					},
+					Networking: kubeadmapi.Networking{
+						ServiceSubnet: "10.96.0.1/12",
+						DNSDomain:     "cluster.local",
+						PodSubnet:     "10.0.1.15/16",
+					},
+					CertificatesDir:     "/some/other/cert/dir",
+					EncryptionAlgorithm: kubeadmapi.EncryptionAlgorithmECDSAP384,
 				},
 				NodeRegistration: kubeadmapi.NodeRegistrationOptions{Name: nodename, CRISocket: criPath},
 			}, true},
@@ -701,11 +770,17 @@ func TestValidateMixedArguments(t *testing.T) {
 		{[]string{"--foo=bar"}, true},
 		{[]string{"--config=hello"}, true},
 		{[]string{"--config=hello", "--ignore-preflight-errors=all"}, true},
+		// Expected to succeed, --config is mixed with skip-* flags only or no other flags
 		{[]string{"--config=hello", "--skip-token-print=true"}, true},
 		{[]string{"--config=hello", "--ignore-preflight-errors=baz", "--skip-token-print"}, true},
+		{[]string{"--config=hello", "--yes=true"}, true},
+		{[]string{"--config=hello", "--print-manifest"}, true},
 		// Expected to fail, --config is mixed with the --foo flag
 		{[]string{"--config=hello", "--ignore-preflight-errors=baz", "--foo=bar"}, false},
 		{[]string{"--config=hello", "--foo=bar"}, false},
+		{[]string{"--config=hello", "--yes=true", "--foo=bar"}, false},
+		// Expected to fail, --config is mixed with the upgrade related flag
+		{[]string{"--config=hello", "--allow-experimental-upgrades"}, false},
 	}
 
 	var cfgPath string
@@ -717,7 +792,10 @@ func TestValidateMixedArguments(t *testing.T) {
 		}
 		f.String("foo", "", "flag bound to config object")
 		f.StringSliceVar(&ignorePreflightErrors, "ignore-preflight-errors", ignorePreflightErrors, "flag not bound to config object")
+		f.Bool("allow-experimental-upgrades", true, "upgrade flags for plan and apply command")
 		f.Bool("skip-token-print", false, "flag not bound to config object")
+		f.Bool("yes", false, "flag not bound to config object")
+		f.Bool("print-manifest", false, "flag not bound to config object")
 		f.StringVar(&cfgPath, "config", cfgPath, "Path to kubeadm config file")
 		if err := f.Parse(rt.args); err != nil {
 			t.Fatal(err)
@@ -794,19 +872,37 @@ func TestValidateIgnorePreflightErrors(t *testing.T) {
 			sets.New("a", "b", "c"),
 			false,
 		},
+		{ // empty list in CLI, but 'all' present in config file
+			[]string{},
+			[]string{"all"},
+			sets.New("all"),
+			false,
+		},
+		{ // empty list in config file, but 'all' present in CLI
+			[]string{"all"},
+			[]string{},
+			sets.New("all"),
+			false,
+		},
+		{ // some duplicates, only 'all' present in CLI and config file
+			[]string{"all"},
+			[]string{"all"},
+			sets.New("all"),
+			false,
+		},
 		{ // non-duplicate, but 'all' present together with individual checks in CLI
 			[]string{"a", "b", "all"},
 			[]string{},
 			sets.New[string](),
 			true,
 		},
-		{ // empty list in CLI, but 'all' present in config file, which is forbidden
+		{ // non-duplicate, but 'all' present together with individual checks in config file
 			[]string{},
-			[]string{"all"},
+			[]string{"a", "b", "all"},
 			sets.New[string](),
 			true,
 		},
-		{ // non-duplicate, but 'all' present in config file, which is forbidden
+		{ // non-duplicate, but 'all' present in config file, while values are in CLI, which is forbidden
 			[]string{"a", "b"},
 			[]string{"all"},
 			sets.New[string](),
@@ -817,12 +913,6 @@ func TestValidateIgnorePreflightErrors(t *testing.T) {
 			[]string{"a", "b"},
 			sets.New[string](),
 			true,
-		},
-		{ // skip all checks
-			[]string{"all"},
-			[]string{},
-			sets.New("all"),
-			false,
 		},
 	}
 	for _, rt := range tests {
@@ -1000,7 +1090,7 @@ func TestValidateSocketPath(t *testing.T) {
 		{name: "valid socket URL", criSocket: kubeadmapiv1.DefaultContainerRuntimeURLScheme + "://" + "/some/path", expectedErrors: false},
 		{name: "unsupported URL scheme", criSocket: "bla:///some/path", expectedErrors: true},
 		{name: "missing URL scheme", criSocket: "/some/path", expectedErrors: true},
-		{name: "unparseable URL", criSocket: ":::", expectedErrors: true},
+		{name: "unparsable URL", criSocket: ":::", expectedErrors: true},
 		{name: "empty CRISocket", criSocket: "", expectedErrors: true},
 	}
 	for _, tc := range tests {
@@ -1139,6 +1229,28 @@ func TestValidateEtcd(t *testing.T) {
 	}
 }
 
+func TestValidateEncryptionAlgorithm(t *testing.T) {
+	var tests = []struct {
+		name           string
+		algo           kubeadmapi.EncryptionAlgorithmType
+		expectedErrors bool
+	}{
+		{name: "valid RSA-2048", algo: kubeadmapi.EncryptionAlgorithmRSA2048, expectedErrors: false},
+		{name: "valid RSA-3072", algo: kubeadmapi.EncryptionAlgorithmRSA3072, expectedErrors: false},
+		{name: "valid RSA-4096", algo: kubeadmapi.EncryptionAlgorithmRSA4096, expectedErrors: false},
+		{name: "valid ECDSA-P256", algo: kubeadmapi.EncryptionAlgorithmECDSAP256, expectedErrors: false},
+		{name: "invalid algorithm", algo: "foo", expectedErrors: true},
+		{name: "empty algorithm returns an error", algo: "", expectedErrors: true},
+	}
+	for _, tc := range tests {
+		actual := ValidateEncryptionAlgorithm(tc.algo, field.NewPath("encryptionAlgorithm"))
+		actualErrors := len(actual) > 0
+		if actualErrors != tc.expectedErrors {
+			t.Errorf("error: validate public key algorithm: %q\n\texpected: %t\n\t  actual: %t", tc.algo, tc.expectedErrors, actualErrors)
+		}
+	}
+}
+
 func TestGetClusterNodeMask(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -1157,7 +1269,10 @@ func TestGetClusterNodeMask(t *testing.T) {
 			name: "dual ipv4 custom mask",
 			cfg: &kubeadmapi.ClusterConfiguration{
 				ControllerManager: kubeadmapi.ControlPlaneComponent{
-					ExtraArgs: map[string]string{"node-cidr-mask-size": "21", "node-cidr-mask-size-ipv4": "23"},
+					ExtraArgs: []kubeadmapi.Arg{
+						{Name: "node-cidr-mask-size", Value: "21"},
+						{Name: "node-cidr-mask-size-ipv4", Value: "23"},
+					},
 				},
 			},
 			isIPv6:       false,
@@ -1173,7 +1288,9 @@ func TestGetClusterNodeMask(t *testing.T) {
 			name: "dual ipv6 custom mask",
 			cfg: &kubeadmapi.ClusterConfiguration{
 				ControllerManager: kubeadmapi.ControlPlaneComponent{
-					ExtraArgs: map[string]string{"node-cidr-mask-size-ipv6": "83"},
+					ExtraArgs: []kubeadmapi.Arg{
+						{Name: "node-cidr-mask-size-ipv6", Value: "83"},
+					},
 				},
 			},
 			isIPv6:       true,
@@ -1183,7 +1300,9 @@ func TestGetClusterNodeMask(t *testing.T) {
 			name: "dual ipv4 custom mask",
 			cfg: &kubeadmapi.ClusterConfiguration{
 				ControllerManager: kubeadmapi.ControlPlaneComponent{
-					ExtraArgs: map[string]string{"node-cidr-mask-size-ipv4": "23"},
+					ExtraArgs: []kubeadmapi.Arg{
+						{Name: "node-cidr-mask-size-ipv4", Value: "23"},
+					},
 				},
 			},
 			isIPv6:       false,
@@ -1193,7 +1312,9 @@ func TestGetClusterNodeMask(t *testing.T) {
 			name: "dual ipv4 wrong mask",
 			cfg: &kubeadmapi.ClusterConfiguration{
 				ControllerManager: kubeadmapi.ControlPlaneComponent{
-					ExtraArgs: map[string]string{"node-cidr-mask-size-ipv4": "aa"},
+					ExtraArgs: []kubeadmapi.Arg{
+						{Name: "node-cidr-mask-size-ipv4", Value: "aa"},
+					},
 				},
 			},
 			isIPv6:        false,
@@ -1203,7 +1324,9 @@ func TestGetClusterNodeMask(t *testing.T) {
 			name: "dual ipv6 default mask and legacy flag",
 			cfg: &kubeadmapi.ClusterConfiguration{
 				ControllerManager: kubeadmapi.ControlPlaneComponent{
-					ExtraArgs: map[string]string{"node-cidr-mask-size": "23"},
+					ExtraArgs: []kubeadmapi.Arg{
+						{Name: "node-cidr-mask-size", Value: "23"},
+					},
 				},
 			},
 			isIPv6:       true,
@@ -1213,7 +1336,10 @@ func TestGetClusterNodeMask(t *testing.T) {
 			name: "dual ipv6 custom mask and legacy flag",
 			cfg: &kubeadmapi.ClusterConfiguration{
 				ControllerManager: kubeadmapi.ControlPlaneComponent{
-					ExtraArgs: map[string]string{"node-cidr-mask-size": "23", "node-cidr-mask-size-ipv6": "83"},
+					ExtraArgs: []kubeadmapi.Arg{
+						{Name: "node-cidr-mask-size", Value: "23"},
+						{Name: "node-cidr-mask-size-ipv6", Value: "83"},
+					},
 				},
 			},
 			isIPv6:       true,
@@ -1223,7 +1349,10 @@ func TestGetClusterNodeMask(t *testing.T) {
 			name: "dual ipv6 custom mask and wrong flag",
 			cfg: &kubeadmapi.ClusterConfiguration{
 				ControllerManager: kubeadmapi.ControlPlaneComponent{
-					ExtraArgs: map[string]string{"node-cidr-mask-size": "23", "node-cidr-mask-size-ipv6": "a83"},
+					ExtraArgs: []kubeadmapi.Arg{
+						{Name: "node-cidr-mask-size", Value: "23"},
+						{Name: "node-cidr-mask-size-ipv6", Value: "a83"},
+					},
 				},
 			},
 			isIPv6:        true,
@@ -1321,5 +1450,273 @@ func TestValidateImageRepository(t *testing.T) {
 		if actualErrors != tc.expectedErrors {
 			t.Errorf("case %q error:\n\t expected: %t\n\t actual: %t", tc.imageRepository, tc.expectedErrors, actualErrors)
 		}
+	}
+}
+
+func TestValidateAbsolutePath(t *testing.T) {
+	var tests = []struct {
+		name           string
+		path           string
+		expectedErrors bool
+	}{
+		{name: "valid absolute path", path: "/etc/cert/dir", expectedErrors: false},
+		{name: "relative path", path: "./tmp", expectedErrors: true},
+		{name: "invalid path", path: "foo..", expectedErrors: true},
+	}
+	for _, tc := range tests {
+		actual := ValidateAbsolutePath(tc.path, field.NewPath("certificatesDir"))
+		actualErrors := len(actual) > 0
+		if actualErrors != tc.expectedErrors {
+			t.Errorf("error: validate absolute path: %q\n\texpected: %t\n\t  actual: %t", tc.path, tc.expectedErrors, actualErrors)
+		}
+	}
+}
+
+func TestValidateExtraArgs(t *testing.T) {
+	var tests = []struct {
+		name           string
+		args           []kubeadmapi.Arg
+		expectedErrors int
+	}{
+		{
+			name:           "valid argument",
+			args:           []kubeadmapi.Arg{{Name: "foo", Value: "bar"}},
+			expectedErrors: 0,
+		},
+		{
+			name:           "invalid one argument",
+			args:           []kubeadmapi.Arg{{Name: "", Value: "bar"}},
+			expectedErrors: 1,
+		},
+		{
+			name:           "invalid two arguments",
+			args:           []kubeadmapi.Arg{{Name: "", Value: "foo"}, {Name: "", Value: "bar"}},
+			expectedErrors: 2,
+		},
+	}
+
+	for _, tc := range tests {
+		actual := ValidateExtraArgs(tc.args, nil)
+		if len(actual) != tc.expectedErrors {
+			t.Errorf("case %q:\n\t expected errors: %v\n\t got: %v\n\t errors: %v", tc.name, tc.expectedErrors, len(actual), actual)
+		}
+	}
+}
+
+func TestValidateUnmountFlags(t *testing.T) {
+	var tests = []struct {
+		name           string
+		flags          []string
+		expectedErrors int
+	}{
+		{
+			name:           "nil input",
+			flags:          nil,
+			expectedErrors: 0,
+		},
+		{
+			name: "all valid flags",
+			flags: []string{
+				kubeadmapi.UnmountFlagMNTForce,
+				kubeadmapi.UnmountFlagMNTDetach,
+				kubeadmapi.UnmountFlagMNTExpire,
+				kubeadmapi.UnmountFlagUmountNoFollow,
+			},
+			expectedErrors: 0,
+		},
+		{
+			name: "invalid two flags",
+			flags: []string{
+				"foo",
+				"bar",
+			},
+			expectedErrors: 2,
+		},
+	}
+
+	for _, tc := range tests {
+		actual := ValidateUnmountFlags(tc.flags, nil)
+		if len(actual) != tc.expectedErrors {
+			t.Errorf("case %q:\n\t expected errors: %v\n\t got: %v\n\t errors: %v", tc.name, tc.expectedErrors, len(actual), actual)
+		}
+	}
+}
+
+func TestPullPolicy(t *testing.T) {
+	var tests = []struct {
+		name           string
+		policy         string
+		expectedErrors int
+	}{
+		{
+			name:           "empty policy causes no errors", // gets defaulted
+			policy:         "",
+			expectedErrors: 0,
+		},
+		{
+			name:           "invalid policy",
+			policy:         "foo",
+			expectedErrors: 1,
+		},
+		{
+			name:           "valid policy",
+			policy:         "IfNotPresent",
+			expectedErrors: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		actual := ValidateImagePullPolicy(corev1.PullPolicy(tc.policy), nil)
+		if len(actual) != tc.expectedErrors {
+			t.Errorf("case %q:\n\t expected errors: %v\n\t got: %v\n\t errors: %v", tc.name, tc.expectedErrors, len(actual), actual)
+		}
+	}
+}
+
+func TestValidateCertValidity(t *testing.T) {
+	var tests = []struct {
+		name           string
+		cfg            *kubeadmapi.ClusterConfiguration
+		expectedErrors int
+	}{
+		{
+			name: "no errors from nil values",
+			cfg: &kubeadmapi.ClusterConfiguration{
+				CertificateValidityPeriod:   nil,
+				CACertificateValidityPeriod: nil,
+			},
+			expectedErrors: 0,
+		},
+		{
+			name: "no errors from defaults",
+			cfg: &kubeadmapi.ClusterConfiguration{
+				CertificateValidityPeriod: &metav1.Duration{
+					Duration: constants.CertificateValidityPeriod,
+				},
+				CACertificateValidityPeriod: &metav1.Duration{
+					Duration: constants.CACertificateValidityPeriod,
+				},
+			},
+			expectedErrors: 0,
+		},
+		{
+			name: "two errors from long durations",
+			cfg: &kubeadmapi.ClusterConfiguration{
+				CertificateValidityPeriod: &metav1.Duration{
+					Duration: constants.CertificateValidityPeriod * 2,
+				},
+				CACertificateValidityPeriod: &metav1.Duration{
+					Duration: constants.CACertificateValidityPeriod * 2,
+				},
+			},
+			expectedErrors: 2,
+		},
+		{
+			name: "one error from mismatched durations (CertificateValidityPeriod > CACertificateValidityPeriod) ",
+			cfg: &kubeadmapi.ClusterConfiguration{
+				CertificateValidityPeriod: &metav1.Duration{
+					Duration: time.Hour * 2,
+				},
+				CACertificateValidityPeriod: &metav1.Duration{
+					Duration: time.Hour,
+				},
+			},
+			expectedErrors: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		actual := ValidateCertValidity(tc.cfg)
+		if len(actual) != tc.expectedErrors {
+			t.Errorf("case %q:\n\t expected errors: %v\n\t got: %v\n\t errors: %v", tc.name, tc.expectedErrors, len(actual), actual)
+		}
+	}
+}
+
+func TestValidateResetConfiguration(t *testing.T) {
+	var tests = []struct {
+		name           string
+		cfg            *kubeadmapi.ResetConfiguration
+		expectedErrors int
+	}{
+		{
+			name: "expect 3 errors",
+			cfg: &kubeadmapi.ResetConfiguration{
+				CRISocket:       "foo",
+				CertificatesDir: "bar",
+				UnmountFlags:    []string{"baz"},
+			},
+			expectedErrors: 3,
+		},
+		{
+			name: "expect 0 errors",
+			cfg: &kubeadmapi.ResetConfiguration{
+				CRISocket:       fmt.Sprintf("%s:///var/run/containerd/containerd.sock", kubeadmapiv1.DefaultContainerRuntimeURLScheme),
+				CertificatesDir: "/foo/bar", // this is work on Windows too because of the local isAbs()
+				UnmountFlags:    []string{kubeadmapi.UnmountFlagMNTForce},
+			},
+			expectedErrors: 0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := ValidateResetConfiguration(tc.cfg)
+			if len(actual) != tc.expectedErrors {
+				t.Errorf("expected errors: %d, got: %+v", tc.expectedErrors, actual)
+			}
+		})
+	}
+}
+
+func TestValidateUpgradeConfiguration(t *testing.T) {
+	var tests = []struct {
+		name           string
+		cfg            *kubeadmapi.UpgradeConfiguration
+		expectedErrors int
+	}{
+		{
+			name: "expect 4 errors",
+			cfg: &kubeadmapi.UpgradeConfiguration{
+				Apply: kubeadmapi.UpgradeApplyConfiguration{
+					Patches: &kubeadmapi.Patches{
+						Directory: "foo",
+					},
+					ImagePullPolicy: "bar",
+				},
+				Node: kubeadmapi.UpgradeNodeConfiguration{
+					Patches: &kubeadmapi.Patches{
+						Directory: "foo",
+					},
+					ImagePullPolicy: "bar",
+				},
+			},
+			expectedErrors: 4,
+		},
+		{
+			name: "expect 0 errors",
+			cfg: &kubeadmapi.UpgradeConfiguration{
+				Apply: kubeadmapi.UpgradeApplyConfiguration{
+					Patches: &kubeadmapi.Patches{
+						Directory: "/foo/bar",
+					},
+					ImagePullPolicy: corev1.PullAlways,
+				},
+				Node: kubeadmapi.UpgradeNodeConfiguration{
+					Patches: &kubeadmapi.Patches{
+						Directory: "/foo/bar",
+					},
+					ImagePullPolicy: corev1.PullAlways,
+				},
+			},
+			expectedErrors: 0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := ValidateUpgradeConfiguration(tc.cfg)
+			if len(actual) != tc.expectedErrors {
+				t.Errorf("expected errors: %d, got: %+v", tc.expectedErrors, actual)
+			}
+		})
 	}
 }

@@ -25,9 +25,10 @@ set -o pipefail
 KUBE_ROOT=$(dirname "${BASH_SOURCE[0]}")/..
 source "${KUBE_ROOT}/hack/lib/init.sh"
 
+kube::golang::setup_env
+
 # create a nice clean place to put our new vendor tree
-mkdir -p "${KUBE_ROOT}/_tmp"
-_tmpdir="$(mktemp -d "${KUBE_ROOT}/_tmp/kube-vendor.XXXXXX")"
+_tmpdir="$(kube::realpath "$(mktemp -d -t "$(basename "$0").XXXXXX")")"
 
 if [[ -z ${KEEP_TMP:-} ]]; then
     KEEP_TMP=false
@@ -50,9 +51,6 @@ _kubetmp="${_tmpdir}/kubernetes"
 mkdir -p "${_kubetmp}"
 tar --exclude=.git --exclude="./_*" -c . | (cd "${_kubetmp}" && tar xf -)
 
-# Do all our work in module mode
-export GO111MODULE=on
-
 pushd "${_kubetmp}" > /dev/null 2>&1
   # Destroy deps in the copy of the kube tree
   rm -rf ./vendor ./LICENSES
@@ -64,15 +62,17 @@ popd > /dev/null 2>&1
 ret=0
 
 pushd "${KUBE_ROOT}" > /dev/null 2>&1
-  # Test for diffs
-  if ! _out="$(diff -Naupr --ignore-matching-lines='^\s*\"GoVersion\":' go.mod "${_kubetmp}/go.mod")"; then
-    echo "Your go.mod file is different:" >&2
-    echo "${_out}" >&2
-    echo "Vendor Verify failed." >&2
-    echo "If you're seeing this locally, run the below command to fix your go.mod:" >&2
-    echo "hack/update-vendor.sh" >&2
-    ret=1
-  fi
+  # Test for diffs in go.mod / go.sum / go.work / go.work.sum
+  for file in $(git ls-files -cmo --exclude-standard -- ':!:vendor/*' ':(glob)**/go.mod' ':(glob)**/go.sum' ':(glob)**/go.work' ':(glob)**/go.work.sum'); do
+    if ! _out="$(diff -Naupr "${file}" "${_kubetmp}/${file}")"; then
+      echo "Your ${file} file is different:" >&2
+      echo "${_out}" >&2
+      echo "Vendor Verify failed." >&2
+      echo "If you're seeing this locally, run the below command to fix this:" >&2
+      echo "hack/update-vendor.sh" >&2
+      ret=1
+    fi
+  done
 
   if ! _out="$(diff -Naupr -x "AUTHORS*" -x "CONTRIBUTORS*" vendor "${_kubetmp}/vendor")"; then
     echo "Your vendored results are different:" >&2

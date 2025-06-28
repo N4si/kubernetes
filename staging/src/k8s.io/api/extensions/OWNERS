@@ -2,7 +2,6 @@
 
 reviewers:
   - thockin
-  - lavalamp
   - smarterclayton
   - wojtek-t
   - deads2k
@@ -14,8 +13,9 @@ reviewers:
   - saad-ali
   - janetkuo
   - justinsb
-  - ncdc
   - tallclair
   - mwielgus
   - soltysh
   - dims
+emeritus_reviewers:
+  - ncdc

@@ -303,3 +303,177 @@ run_swagger_tests() {
   set +o nounset
   set +o errexit
 }
+
+run_ambiguous_shortname_tests() {
+  set -o nounset
+  set -o errexit
+
+  create_and_use_new_namespace
+  kube::log::status "Testing ambiguous short name"
+
+  kubectl create -f - << __EOF__
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: foos.bar.com
+spec:
+  group: bar.com
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                test:
+                  type: string
+  names:
+    plural: foos
+    singular: foo
+    shortNames:
+      - exmp
+    kind: Foo
+    categories:
+      - all
+__EOF__
+
+  # Test that we can list this new custom resource
+  kube::test::wait_object_assert customresourcedefinitions "{{range.items}}{{if eq ${id_field:?} \"foos.bar.com\"}}{{$id_field}}:{{end}}{{end}}" 'foos.bar.com:'
+
+  kubectl create -f - << __EOF__
+apiVersion: bar.com/v1
+kind: Foo
+metadata:
+  name: test-crd-foo
+spec:
+  test: test
+__EOF__
+
+  # Test that we can list this new custom resource
+  kube::test::wait_object_assert foos "{{range.items}}{{$id_field}}:{{end}}" 'test-crd-foo:'
+
+  output_message=$(kubectl get exmp)
+  kube::test::if_has_string "${output_message}" "test-crd-foo"
+
+  kubectl create -f - << __EOF__
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: examples.test.com
+spec:
+  group: test.com
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                test:
+                  type: string
+  names:
+    plural: examples
+    singular: example
+    shortNames:
+      - exmp
+    kind: Example
+__EOF__
+
+  # Test that we can list this new custom resource
+  kube::test::wait_object_assert customresourcedefinitions "{{range.items}}{{if eq ${id_field:?} \"examples.test.com\"}}{{$id_field}}:{{end}}{{end}}" 'examples.test.com:'
+
+  output_message=$(kubectl  get examples 2>&1 "${kube_flags[@]}")
+  kube::test::if_has_string "${output_message}" 'No resources found'
+
+  output_message=$(kubectl get exmp 2>&1)
+  kube::test::if_has_string "${output_message}" "test-crd-foo"
+  kube::test::if_has_string "${output_message}" "short name \"exmp\" could also match lower priority resource examples.test.com"
+
+  # Cleanup
+  kubectl delete foos/test-crd-foo
+  kubectl delete customresourcedefinition foos.bar.com
+  kubectl delete customresourcedefinition examples.test.com
+
+  set +o nounset
+  set +o errexit
+}
+
+run_explain_crd_with_additional_properties_tests() {
+  set -o nounset
+  set -o errexit
+
+  create_and_use_new_namespace
+  kube::log::status "Testing explain with custom CRD that uses additionalProperties as non boolean field"
+
+  kubectl create -f - << __EOF__
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mock-resources.test.com
+spec:
+  group: test.com
+  scope: Namespaced
+  names:
+    plural: mock-resources
+    singular: mock-resource
+    kind: MockResource
+    listKind: MockResources
+  versions:
+    - name: v1
+      storage: true
+      served: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                test:
+                  type: object
+                  additionalProperties:
+                    type: array
+                    items:
+                      type: string
+              additionalProperties: true
+__EOF__
+
+  kube::test::wait_object_assert customresourcedefinitions "{{range.items}}{{if eq ${id_field:?} \"mock-resources.test.com\"}}{{$id_field}}:{{end}}{{end}}" 'mock-resources.test.com:'
+
+  retries=0
+  max_retries=5
+
+  # First try would get non zero exit code so we disable immediate exit here
+  set +o errexit
+
+  # Loop until `kubectl explain` returns a zero exit code or maximum retries reached
+  until output_message=$(kubectl explain mock-resource) > /dev/null || [ $retries -eq $max_retries ]; do
+    kube::log::status "Retrying kubectl explain..."
+    ((retries++))
+    sleep 1
+  done
+
+  set -o errexit
+
+  output_message=$(kubectl explain mock-resource)
+  kube::test::if_has_string "${output_message}" 'FIELDS:'
+
+  output_message=$(kubectl explain mock-resource --recursive)
+  kube::test::if_has_string "${output_message}" 'FIELDS:'
+
+  # Cleanup
+  kubectl delete crd mock-resources.test.com
+
+  set +o nounset
+  set +o errexit
+}

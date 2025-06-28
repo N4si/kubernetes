@@ -17,14 +17,16 @@ limitations under the License.
 package discovery
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -54,7 +56,7 @@ func init() {
 func decodeResponse(t *testing.T, resp *http.Response, obj interface{}) error {
 	defer resp.Body.Close()
 
-	data, err := ioutil.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	t.Log(string(data))
 	if err != nil {
 		return err
@@ -66,7 +68,10 @@ func decodeResponse(t *testing.T, resp *http.Response, obj interface{}) error {
 }
 
 func getGroupList(t *testing.T, server *httptest.Server) (*metav1.APIGroupList, error) {
-	resp, err := http.Get(server.URL)
+	ctx := t.Context()
+	req, err := http.NewRequestWithContext(ctx, request.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +110,7 @@ func TestDiscoveryAtAPIS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assert.Equal(t, 0, len(groupList.Groups))
+	assert.Empty(t, groupList.Groups)
 
 	// Add a Group.
 	extensionsGroupName := "extensions"
@@ -130,7 +135,7 @@ func TestDiscoveryAtAPIS(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	assert.Equal(t, 1, len(groupList.Groups))
+	assert.Len(t, groupList.Groups, 1)
 	groupListGroup := groupList.Groups[0]
 	assert.Equal(t, extensionsGroupName, groupListGroup.Name)
 	assert.Equal(t, extensionsVersions, groupListGroup.Versions)
@@ -144,7 +149,7 @@ func TestDiscoveryAtAPIS(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	assert.Equal(t, 0, len(groupList.Groups))
+	assert.Empty(t, groupList.Groups)
 }
 
 func TestDiscoveryOrdering(t *testing.T) {
@@ -155,7 +160,7 @@ func TestDiscoveryOrdering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assert.Equal(t, 0, len(groupList.Groups))
+	assert.Empty(t, groupList.Groups)
 
 	// Register three groups
 	handler.AddGroup(metav1.APIGroup{Name: "x"})
@@ -173,7 +178,14 @@ func TestDiscoveryOrdering(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	assert.Equal(t, 6, len(groupList.Groups))
+	// Check if internal groups listers returns the same group.
+	groups, err := handler.Groups(context.TODO(), &http.Request{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assert.Len(t, groups, 6)
+
+	assert.Len(t, groupList.Groups, 6)
 	assert.Equal(t, "x", groupList.Groups[0].Name)
 	assert.Equal(t, "y", groupList.Groups[1].Name)
 	assert.Equal(t, "z", groupList.Groups[2].Name)
@@ -187,7 +199,7 @@ func TestDiscoveryOrdering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assert.Equal(t, 5, len(groupList.Groups))
+	assert.Len(t, groupList.Groups, 5)
 
 	// Re-adding should move to the end.
 	handler.AddGroup(metav1.APIGroup{Name: "a"})
@@ -195,7 +207,7 @@ func TestDiscoveryOrdering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assert.Equal(t, 6, len(groupList.Groups))
+	assert.Len(t, groupList.Groups, 6)
 	assert.Equal(t, "x", groupList.Groups[0].Name)
 	assert.Equal(t, "y", groupList.Groups[1].Name)
 	assert.Equal(t, "z", groupList.Groups[2].Name)

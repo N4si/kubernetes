@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/lithammer/dedent"
 
 	v1 "k8s.io/api/core/v1"
@@ -34,8 +35,8 @@ import (
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmscheme "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/scheme"
-	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta3"
-	outputapiv1alpha2 "k8s.io/kubernetes/cmd/kubeadm/app/apis/output/v1alpha2"
+	kubeadmapiv1 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta4"
+	outputapiv1alpha3 "k8s.io/kubernetes/cmd/kubeadm/app/apis/output/v1alpha3"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
 )
@@ -186,22 +187,6 @@ var (
 		clusterName: foo
 	`, kubeadmapiv1.GroupName, oldClusterConfigVersion)
 
-	// currentBarClusterConfig is a minimal currently supported ClusterConfiguration
-	// with a well known value of clusterName (in this case `bar`)
-	currentBarClusterConfig = fmt.Sprintf(`
-		apiVersion: %s
-		kind: ClusterConfiguration
-		clusterName: bar
-	`, kubeadmapiv1.SchemeGroupVersion)
-
-	// oldBarClusterConfig is a minimal unsupported ClusterConfiguration
-	// with a well known value of clusterName (in this case `bar`)
-	oldBarClusterConfig = fmt.Sprintf(`
-		apiVersion: %s/%s
-		kind: ClusterConfiguration
-		clusterName: bar
-	`, kubeadmapiv1.GroupName, oldClusterConfigVersion)
-
 	// This is the "minimal" valid config that can be unmarshalled to and from YAML.
 	// Due to same static defaulting it's not exactly small in size.
 	validUnmarshallableClusterConfig = struct {
@@ -209,11 +194,12 @@ var (
 		obj  kubeadmapiv1.ClusterConfiguration
 	}{
 		yaml: dedent.Dedent(fmt.Sprintf(`
-			apiServer:
-			  timeoutForControlPlane: 4m
 			apiVersion: %s
 			certificatesDir: /etc/kubernetes/pki
 			clusterName: LeCluster
+			encryptionAlgorithm: "RSA-2048"
+			certificateValidityPeriod: "8760h0m0s"
+			caCertificateValidityPeriod: "87600h0m0s"
 			controllerManager: {}
 			etcd:
 			  local:
@@ -224,6 +210,7 @@ var (
 			networking:
 			  dnsDomain: cluster.local
 			  serviceSubnet: 10.96.0.0/12
+			proxy: {}
 			scheduler: {}
 		`, kubeadmapiv1.SchemeGroupVersion.String())),
 		obj: kubeadmapiv1.ClusterConfiguration{
@@ -244,10 +231,12 @@ var (
 					DataDir: "/var/lib/etcd",
 				},
 			},
-			APIServer: kubeadmapiv1.APIServer{
-				TimeoutForControlPlane: &metav1.Duration{
-					Duration: 4 * time.Minute,
-				},
+			EncryptionAlgorithm: kubeadmapiv1.EncryptionAlgorithmRSA2048,
+			CertificateValidityPeriod: &metav1.Duration{
+				Duration: time.Hour * 8760,
+			},
+			CACertificateValidityPeriod: &metav1.Duration{
+				Duration: time.Hour * 87600,
 			},
 		},
 	}
@@ -285,11 +274,12 @@ func TestConfigBaseMarshal(t *testing.T) {
 			kind: ClusterConfiguration
 			kubernetesVersion: 1.2.3
 			networking: {}
+			proxy: {}
 			scheduler: {}
 		`, kubeadmapiv1.SchemeGroupVersion.String())))
 
 		if expected != got {
-			t.Fatalf("Missmatch between expected and got:\nExpected:\n%s\n---\nGot:\n%s", expected, got)
+			t.Fatalf("Mismatch between expected and got:\nExpected:\n%s\n---\nGot:\n%s", expected, got)
 		}
 	})
 }
@@ -303,9 +293,9 @@ func TestConfigBaseUnmarshal(t *testing.T) {
 			config: validUnmarshallableClusterConfig.obj,
 		}
 
-		gvkmap, err := kubeadmutil.SplitYAMLDocuments([]byte(validUnmarshallableClusterConfig.yaml))
+		gvkmap, err := kubeadmutil.SplitConfigDocuments([]byte(validUnmarshallableClusterConfig.yaml))
 		if err != nil {
-			t.Fatalf("unexpected failure of SplitYAMLDocuments: %v", err)
+			t.Fatalf("unexpected failure of SplitConfigDocuments: %v", err)
 		}
 
 		got := &clusterConfig{
@@ -317,8 +307,8 @@ func TestConfigBaseUnmarshal(t *testing.T) {
 			t.Fatalf("unexpected failure of Unmarshal: %v", err)
 		}
 
-		if !reflect.DeepEqual(got, expected) {
-			t.Fatalf("Missmatch between expected and got:\nExpected:\n%v\n---\nGot:\n%v", expected, got)
+		if diff := cmp.Diff(expected.config, got.config); diff != "" {
+			t.Fatalf("Unexpected diff (-expected,+got):\n%s", diff)
 		}
 	})
 }
@@ -342,7 +332,7 @@ func TestGeneratedConfigFromCluster(t *testing.T) {
 				hash: testYAMLHash,
 			},
 			{
-				name:         "Missmatching hash means user supplied config",
+				name:         "Mismatching hash means user supplied config",
 				hash:         mismatchHash,
 				userSupplied: true,
 			},
@@ -471,9 +461,9 @@ func runClusterConfigFromTest(t *testing.T, perform func(t *testing.T, in string
 
 func TestLoadingFromDocumentMap(t *testing.T) {
 	runClusterConfigFromTest(t, func(t *testing.T, in string) (kubeadmapi.ComponentConfig, error) {
-		gvkmap, err := kubeadmutil.SplitYAMLDocuments([]byte(in))
+		gvkmap, err := kubeadmutil.SplitConfigDocuments([]byte(in))
 		if err != nil {
-			t.Fatalf("unexpected failure of SplitYAMLDocuments: %v", err)
+			t.Fatalf("unexpected failure of SplitConfigDocuments: %v", err)
 		}
 
 		return clusterConfigHandler.FromDocumentMap(gvkmap)
@@ -490,238 +480,65 @@ func TestLoadingFromCluster(t *testing.T) {
 	})
 }
 
-func TestFetchFromClusterWithLocalOverwrites(t *testing.T) {
-	fakeKnownContext(func() {
-		cases := []struct {
-			desc          string
-			obj           runtime.Object
-			config        string
-			expectedValue string
-			isNotLoaded   bool
-			expectedErr   bool
-		}{
-			{
-				desc:          "appropriate cluster object without overwrite is used",
-				obj:           testClusterConfigMap(currentFooClusterConfig, false),
-				expectedValue: "foo",
-			},
-			{
-				desc:          "appropriate cluster object with appropriate overwrite is overwritten",
-				obj:           testClusterConfigMap(currentFooClusterConfig, false),
-				config:        dedent.Dedent(currentBarClusterConfig),
-				expectedValue: "bar",
-			},
-			{
-				desc:        "appropriate cluster object with old overwrite returns an error",
-				obj:         testClusterConfigMap(currentFooClusterConfig, false),
-				config:      dedent.Dedent(oldBarClusterConfig),
-				expectedErr: true,
-			},
-			{
-				desc:        "old config without overwrite returns an error",
-				obj:         testClusterConfigMap(oldFooClusterConfig, false),
-				expectedErr: true,
-			},
-			{
-				desc:          "old config with appropriate overwrite returns the substitute",
-				obj:           testClusterConfigMap(oldFooClusterConfig, false),
-				config:        dedent.Dedent(currentBarClusterConfig),
-				expectedValue: "bar",
-			},
-			{
-				desc:        "old config with old overwrite returns an error",
-				obj:         testClusterConfigMap(oldFooClusterConfig, false),
-				config:      dedent.Dedent(oldBarClusterConfig),
-				expectedErr: true,
-			},
-			{
-				desc:          "appropriate signed cluster object without overwrite is used",
-				obj:           testClusterConfigMap(currentFooClusterConfig, true),
-				expectedValue: "foo",
-			},
-			{
-				desc:          "appropriate signed cluster object with appropriate overwrite is overwritten",
-				obj:           testClusterConfigMap(currentFooClusterConfig, true),
-				config:        dedent.Dedent(currentBarClusterConfig),
-				expectedValue: "bar",
-			},
-			{
-				desc:        "appropriate signed cluster object with old overwrite returns an error",
-				obj:         testClusterConfigMap(currentFooClusterConfig, true),
-				config:      dedent.Dedent(oldBarClusterConfig),
-				expectedErr: true,
-			},
-			{
-				desc:        "old signed config without an overwrite is not loaded",
-				obj:         testClusterConfigMap(oldFooClusterConfig, true),
-				isNotLoaded: true,
-			},
-			{
-				desc:          "old signed config with appropriate overwrite returns the substitute",
-				obj:           testClusterConfigMap(oldFooClusterConfig, true),
-				config:        dedent.Dedent(currentBarClusterConfig),
-				expectedValue: "bar",
-			},
-			{
-				desc:        "old signed config with old overwrite returns an error",
-				obj:         testClusterConfigMap(oldFooClusterConfig, true),
-				config:      dedent.Dedent(oldBarClusterConfig),
-				expectedErr: true,
-			},
-		}
-
-		for _, test := range cases {
-			t.Run(test.desc, func(t *testing.T) {
-				client := clientsetfake.NewSimpleClientset(test.obj)
-
-				docmap, err := kubeadmutil.SplitYAMLDocuments([]byte(test.config))
-				if err != nil {
-					t.Fatalf("unexpected failure of SplitYAMLDocuments: %v", err)
-				}
-
-				clusterCfg := testClusterCfg()
-
-				err = FetchFromClusterWithLocalOverwrites(clusterCfg, client, docmap)
-				if err != nil {
-					if !test.expectedErr {
-						t.Errorf("unexpected failure: %v", err)
-					}
-				} else {
-					if test.expectedErr {
-						t.Error("unexpected success")
-					} else {
-						clusterCfg, ok := clusterCfg.ComponentConfigs[kubeadmapiv1.GroupName]
-						if !ok {
-							if !test.isNotLoaded {
-								t.Error("no config was loaded when it should have been")
-							}
-						} else {
-							actualConfig, ok := clusterCfg.(*clusterConfig)
-							if !ok {
-								t.Error("the config is not of the expected type")
-							} else if actualConfig.config.ClusterName != test.expectedValue {
-								t.Errorf("unexpected value:\n\tgot: %q\n\texpected: %q", actualConfig.config.ClusterName, test.expectedValue)
-							}
-						}
-					}
-				}
-			})
-		}
-	})
-}
-
 func TestGetVersionStates(t *testing.T) {
 	fakeKnownContext(func() {
-		versionStateCurrent := outputapiv1alpha2.ComponentConfigVersionState{
+		versionStateCurrent := outputapiv1alpha3.ComponentConfigVersionState{
 			Group:            kubeadmapiv1.GroupName,
 			CurrentVersion:   currentClusterConfigVersion,
 			PreferredVersion: currentClusterConfigVersion,
 		}
-		versionStateOld := outputapiv1alpha2.ComponentConfigVersionState{
-			Group:                 kubeadmapiv1.GroupName,
-			CurrentVersion:        oldClusterConfigVersion,
-			PreferredVersion:      currentClusterConfigVersion,
-			ManualUpgradeRequired: true,
-		}
 
 		cases := []struct {
-			desc     string
-			obj      runtime.Object
-			config   string
-			expected outputapiv1alpha2.ComponentConfigVersionState
+			desc        string
+			obj         runtime.Object
+			expectedErr bool
+			expected    outputapiv1alpha3.ComponentConfigVersionState
 		}{
 			{
-				desc:     "appropriate cluster object without overwrite",
+				desc:     "appropriate cluster object",
 				obj:      testClusterConfigMap(currentFooClusterConfig, false),
 				expected: versionStateCurrent,
 			},
 			{
-				desc:     "appropriate cluster object with appropriate overwrite",
-				obj:      testClusterConfigMap(currentFooClusterConfig, false),
-				config:   dedent.Dedent(currentBarClusterConfig),
-				expected: versionStateCurrent,
+				desc:        "old config returns an error",
+				obj:         testClusterConfigMap(oldFooClusterConfig, false),
+				expectedErr: true,
 			},
 			{
-				desc:     "appropriate cluster object with old overwrite",
-				obj:      testClusterConfigMap(currentFooClusterConfig, false),
-				config:   dedent.Dedent(oldBarClusterConfig),
-				expected: versionStateOld,
-			},
-			{
-				desc:     "old config without overwrite returns an error",
-				obj:      testClusterConfigMap(oldFooClusterConfig, false),
-				expected: versionStateOld,
-			},
-			{
-				desc:     "old config with appropriate overwrite",
-				obj:      testClusterConfigMap(oldFooClusterConfig, false),
-				config:   dedent.Dedent(currentBarClusterConfig),
-				expected: versionStateCurrent,
-			},
-			{
-				desc:     "old config with old overwrite",
-				obj:      testClusterConfigMap(oldFooClusterConfig, false),
-				config:   dedent.Dedent(oldBarClusterConfig),
-				expected: versionStateOld,
-			},
-			{
-				desc:     "appropriate signed cluster object without overwrite",
+				desc:     "appropriate signed cluster object",
 				obj:      testClusterConfigMap(currentFooClusterConfig, true),
 				expected: versionStateCurrent,
 			},
 			{
-				desc:     "appropriate signed cluster object with appropriate overwrite",
-				obj:      testClusterConfigMap(currentFooClusterConfig, true),
-				config:   dedent.Dedent(currentBarClusterConfig),
-				expected: versionStateCurrent,
-			},
-			{
-				desc:     "appropriate signed cluster object with old overwrit",
-				obj:      testClusterConfigMap(currentFooClusterConfig, true),
-				config:   dedent.Dedent(oldBarClusterConfig),
-				expected: versionStateOld,
-			},
-			{
-				desc: "old signed config without an overwrite",
+				desc: "old signed config",
 				obj:  testClusterConfigMap(oldFooClusterConfig, true),
-				expected: outputapiv1alpha2.ComponentConfigVersionState{
+				expected: outputapiv1alpha3.ComponentConfigVersionState{
 					Group:            kubeadmapiv1.GroupName,
 					CurrentVersion:   "", // The config is treated as if it's missing
 					PreferredVersion: currentClusterConfigVersion,
 				},
 			},
-			{
-				desc:     "old signed config with appropriate overwrite",
-				obj:      testClusterConfigMap(oldFooClusterConfig, true),
-				config:   dedent.Dedent(currentBarClusterConfig),
-				expected: versionStateCurrent,
-			},
-			{
-				desc:     "old signed config with old overwrite",
-				obj:      testClusterConfigMap(oldFooClusterConfig, true),
-				config:   dedent.Dedent(oldBarClusterConfig),
-				expected: versionStateOld,
-			},
 		}
 
 		for _, test := range cases {
 			t.Run(test.desc, func(t *testing.T) {
 				client := clientsetfake.NewSimpleClientset(test.obj)
 
-				docmap, err := kubeadmutil.SplitYAMLDocuments([]byte(test.config))
-				if err != nil {
-					t.Fatalf("unexpected failure of SplitYAMLDocuments: %v", err)
-				}
-
 				clusterCfg := testClusterCfg()
 
-				got, err := GetVersionStates(clusterCfg, client, docmap)
-				if err != nil {
+				got, err := GetVersionStates(clusterCfg, client)
+				if err != nil && !test.expectedErr {
 					t.Errorf("unexpected error: %v", err)
-				} else if len(got) != 1 {
-					t.Errorf("got %d, but expected only a single result: %v", len(got), got)
-				} else if got[0] != test.expected {
-					t.Errorf("unexpected result:\n\texpected: %v\n\tgot: %v", test.expected, got[0])
+				}
+				if err == nil {
+					if test.expectedErr {
+						t.Errorf("expected error not found: %v", test.expectedErr)
+					}
+					if len(got) != 1 {
+						t.Errorf("got %d, but expected only a single result: %v", len(got), got)
+					} else if got[0] != test.expected {
+						t.Errorf("unexpected result:\n\texpected: %v\n\tgot: %v", test.expected, got[0])
+					}
 				}
 			})
 		}

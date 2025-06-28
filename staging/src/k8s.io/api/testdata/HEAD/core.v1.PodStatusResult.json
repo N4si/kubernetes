@@ -44,10 +44,12 @@
     ]
   },
   "status": {
+    "observedGeneration": 17,
     "phase": "phaseValue",
     "conditions": [
       {
         "type": "typeValue",
+        "observedGeneration": 7,
         "status": "statusValue",
         "lastProbeTime": "2003-01-01T01:01:01Z",
         "lastTransitionTime": "2004-01-01T01:01:01Z",
@@ -59,6 +61,11 @@
     "reason": "reasonValue",
     "nominatedNodeName": "nominatedNodeNameValue",
     "hostIP": "hostIPValue",
+    "hostIPs": [
+      {
+        "ip": "ipValue"
+      }
+    ],
     "podIP": "podIPValue",
     "podIPs": [
       {
@@ -111,8 +118,8 @@
         "imageID": "imageIDValue",
         "containerID": "containerIDValue",
         "started": true,
-        "resourcesAllocated": {
-          "resourcesAllocatedKey": "0"
+        "allocatedResources": {
+          "allocatedResourcesKey": "0"
         },
         "resources": {
           "limits": {
@@ -123,10 +130,40 @@
           },
           "claims": [
             {
-              "name": "nameValue"
+              "name": "nameValue",
+              "request": "requestValue"
             }
           ]
-        }
+        },
+        "volumeMounts": [
+          {
+            "name": "nameValue",
+            "mountPath": "mountPathValue",
+            "readOnly": true,
+            "recursiveReadOnly": "recursiveReadOnlyValue"
+          }
+        ],
+        "user": {
+          "linux": {
+            "uid": 1,
+            "gid": 2,
+            "supplementalGroups": [
+              3
+            ]
+          }
+        },
+        "allocatedResourcesStatus": [
+          {
+            "name": "nameValue",
+            "resources": [
+              {
+                "resourceID": "resourceIDValue",
+                "health": "healthValue"
+              }
+            ]
+          }
+        ],
+        "stopSignal": "stopSignalValue"
       }
     ],
     "containerStatuses": [
@@ -174,8 +211,8 @@
         "imageID": "imageIDValue",
         "containerID": "containerIDValue",
         "started": true,
-        "resourcesAllocated": {
-          "resourcesAllocatedKey": "0"
+        "allocatedResources": {
+          "allocatedResourcesKey": "0"
         },
         "resources": {
           "limits": {
@@ -186,10 +223,40 @@
           },
           "claims": [
             {
-              "name": "nameValue"
+              "name": "nameValue",
+              "request": "requestValue"
             }
           ]
-        }
+        },
+        "volumeMounts": [
+          {
+            "name": "nameValue",
+            "mountPath": "mountPathValue",
+            "readOnly": true,
+            "recursiveReadOnly": "recursiveReadOnlyValue"
+          }
+        ],
+        "user": {
+          "linux": {
+            "uid": 1,
+            "gid": 2,
+            "supplementalGroups": [
+              3
+            ]
+          }
+        },
+        "allocatedResourcesStatus": [
+          {
+            "name": "nameValue",
+            "resources": [
+              {
+                "resourceID": "resourceIDValue",
+                "health": "healthValue"
+              }
+            ]
+          }
+        ],
+        "stopSignal": "stopSignalValue"
       }
     ],
     "qosClass": "qosClassValue",
@@ -238,8 +305,8 @@
         "imageID": "imageIDValue",
         "containerID": "containerIDValue",
         "started": true,
-        "resourcesAllocated": {
-          "resourcesAllocatedKey": "0"
+        "allocatedResources": {
+          "allocatedResourcesKey": "0"
         },
         "resources": {
           "limits": {
@@ -250,12 +317,48 @@
           },
           "claims": [
             {
-              "name": "nameValue"
+              "name": "nameValue",
+              "request": "requestValue"
             }
           ]
-        }
+        },
+        "volumeMounts": [
+          {
+            "name": "nameValue",
+            "mountPath": "mountPathValue",
+            "readOnly": true,
+            "recursiveReadOnly": "recursiveReadOnlyValue"
+          }
+        ],
+        "user": {
+          "linux": {
+            "uid": 1,
+            "gid": 2,
+            "supplementalGroups": [
+              3
+            ]
+          }
+        },
+        "allocatedResourcesStatus": [
+          {
+            "name": "nameValue",
+            "resources": [
+              {
+                "resourceID": "resourceIDValue",
+                "health": "healthValue"
+              }
+            ]
+          }
+        ],
+        "stopSignal": "stopSignalValue"
       }
     ],
-    "resize": "resizeValue"
+    "resize": "resizeValue",
+    "resourceClaimStatuses": [
+      {
+        "name": "nameValue",
+        "resourceClaimName": "resourceClaimNameValue"
+      }
+    ]
   }
 }

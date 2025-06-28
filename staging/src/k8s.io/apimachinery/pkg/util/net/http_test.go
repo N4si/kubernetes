@@ -26,7 +26,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -205,14 +204,14 @@ func TestProxierWithNoProxyCIDR(t *testing.T) {
 	}
 
 	for _, test := range testCases {
-		os.Setenv("NO_PROXY", test.noProxy)
+		t.Setenv("NO_PROXY", test.noProxy)
 		actualDelegated := false
 		proxyFunc := NewProxierWithNoProxyCIDR(func(req *http.Request) (*url.URL, error) {
 			actualDelegated = true
 			return nil, nil
 		})
 
-		req, err := http.NewRequest("GET", test.url, nil)
+		req, err := http.NewRequest(http.MethodGet, test.url, nil)
 		if err != nil {
 			t.Errorf("%s: unexpected err: %v", test.name, err)
 			continue
@@ -445,7 +444,7 @@ func TestSourceIPs(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			req, _ := http.NewRequest("GET", "https://cluster.k8s.io/apis/foobars/v1/foo/bar", nil)
+			req, _ := http.NewRequest(http.MethodGet, "https://cluster.k8s.io/apis/foobars/v1/foo/bar", nil)
 			req.RemoteAddr = test.remoteAddr
 			if test.forwardedFor != "" {
 				req.Header.Set("X-Forwarded-For", test.forwardedFor)
@@ -917,40 +916,28 @@ func TestIsProbableEOF(t *testing.T) {
 	}
 }
 
-func setEnv(key, value string) func() {
-	originalValue := os.Getenv(key)
-	os.Setenv(key, value)
-	return func() {
-		os.Setenv(key, originalValue)
-	}
-}
-
 func TestReadIdleTimeoutSeconds(t *testing.T) {
-	reset := setEnv("HTTP2_READ_IDLE_TIMEOUT_SECONDS", "60")
+	t.Setenv("HTTP2_READ_IDLE_TIMEOUT_SECONDS", "60")
 	if e, a := 60, readIdleTimeoutSeconds(); e != a {
 		t.Errorf("expected %d, got %d", e, a)
 	}
-	reset()
 
-	reset = setEnv("HTTP2_READ_IDLE_TIMEOUT_SECONDS", "illegal value")
+	t.Setenv("HTTP2_READ_IDLE_TIMEOUT_SECONDS", "illegal value")
 	if e, a := 30, readIdleTimeoutSeconds(); e != a {
 		t.Errorf("expected %d, got %d", e, a)
 	}
-	reset()
 }
 
 func TestPingTimeoutSeconds(t *testing.T) {
-	reset := setEnv("HTTP2_PING_TIMEOUT_SECONDS", "60")
+	t.Setenv("HTTP2_PING_TIMEOUT_SECONDS", "60")
 	if e, a := 60, pingTimeoutSeconds(); e != a {
 		t.Errorf("expected %d, got %d", e, a)
 	}
-	reset()
 
-	reset = setEnv("HTTP2_PING_TIMEOUT_SECONDS", "illegal value")
+	t.Setenv("HTTP2_PING_TIMEOUT_SECONDS", "illegal value")
 	if e, a := 15, pingTimeoutSeconds(); e != a {
 		t.Errorf("expected %d, got %d", e, a)
 	}
-	reset()
 }
 
 func Benchmark_ParseQuotedString(b *testing.B) {

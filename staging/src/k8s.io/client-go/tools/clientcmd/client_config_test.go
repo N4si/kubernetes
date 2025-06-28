@@ -22,14 +22,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/imdario/mergo"
+	"github.com/google/go-cmp/cmp"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/dump"
 	restclient "k8s.io/client-go/rest"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+	utiltesting "k8s.io/client-go/util/testing"
+	"k8s.io/utils/ptr"
 )
 
-func TestMergoSemantics(t *testing.T) {
+func TestMergeSemantics(t *testing.T) {
 	type U struct {
 		A string
 		B int64
@@ -39,7 +42,11 @@ func TestMergoSemantics(t *testing.T) {
 		X string
 		Y int64
 		U U
+
+		StringPtr *string
+		StructPtr *U
 	}
+
 	var testDataStruct = []struct {
 		dst      T
 		src      T
@@ -60,22 +67,31 @@ func TestMergoSemantics(t *testing.T) {
 			src:      T{S: []string{"test1", "test2", "test3"}},
 			expected: T{S: []string{"test1", "test2", "test3"}},
 		},
+		{
+			dst:      T{},
+			src:      T{StringPtr: ptr.To("a"), StructPtr: ptr.To(U{A: "a", B: 1})},
+			expected: T{StringPtr: ptr.To("a"), StructPtr: ptr.To(U{A: "a", B: 1})},
+		},
+		{
+			dst:      T{StringPtr: ptr.To("a"), StructPtr: ptr.To(U{A: "a", B: 1})},
+			src:      T{},
+			expected: T{StringPtr: ptr.To("a"), StructPtr: ptr.To(U{A: "a", B: 1})},
+		},
+		{
+			dst:      T{StringPtr: ptr.To("a"), StructPtr: ptr.To(U{A: "a", B: 1})},
+			src:      T{StringPtr: ptr.To("b"), StructPtr: ptr.To(U{A: "b", B: 0})}, // zero value B overrides non-zero value B in pointer member
+			expected: T{StringPtr: ptr.To("b"), StructPtr: ptr.To(U{A: "b", B: 0})},
+		},
 	}
-	for _, data := range testDataStruct {
-		err := mergo.Merge(&data.dst, &data.src, mergo.WithOverride)
+	for i, data := range testDataStruct {
+		t.Logf("case %d: %+v, %+v", i, data.dst, data.src)
+		err := merge(&data.dst, &data.src)
 		if err != nil {
 			t.Errorf("error while merging: %s", err)
 		}
 		if !reflect.DeepEqual(data.dst, data.expected) {
-			// The mergo library has previously changed in a an incompatible way.
-			// example:
-			//
-			//   https://github.com/imdario/mergo/commit/d304790b2ed594794496464fadd89d2bb266600a
-			//
 			// This test verifies that the semantics of the merge are what we expect.
-			// If they are not, the mergo library may have been updated and broken
-			// unexpectedly.
-			t.Errorf("mergo.MergeWithOverwrite did not provide expected output: %+v doesn't match %+v", data.dst, data.expected)
+			t.Errorf("merge did not provide expected output:\ngot:  %s\nwant: %s\ndiff: %s", dump.OneLine(data.dst), dump.OneLine(data.expected), cmp.Diff(data.dst, data.expected))
 		}
 	}
 
@@ -91,21 +107,151 @@ func TestMergoSemantics(t *testing.T) {
 		},
 	}
 	for _, data := range testDataMap {
-		err := mergo.Merge(&data.dst, &data.src, mergo.WithOverride)
+		err := merge(&data.dst, &data.src)
 		if err != nil {
 			t.Errorf("error while merging: %s", err)
 		}
 		if !reflect.DeepEqual(data.dst, data.expected) {
-			// The mergo library has previously changed in a an incompatible way.
-			// example:
-			//
-			//   https://github.com/imdario/mergo/commit/d304790b2ed594794496464fadd89d2bb266600a
-			//
 			// This test verifies that the semantics of the merge are what we expect.
-			// If they are not, the mergo library may have been updated and broken
-			// unexpectedly.
-			t.Errorf("mergo.MergeWithOverwrite did not provide expected output: %+v doesn't match %+v", data.dst, data.expected)
+			t.Errorf("merge did not provide expected output: %+v doesn't match %+v", data.dst, data.expected)
 		}
+	}
+
+	type Struct struct {
+		String  string
+		StringP *string
+		Int     int
+		IntP    *int
+		Bool    bool
+		BoolP   *bool
+		Slice   []string
+		SliceP  *[]string
+		Map     map[string]string
+		MapP    *map[string]string
+	}
+	type T2 struct {
+		String  string
+		StringP *string
+		Int     int
+		IntP    *int
+		Bool    bool
+		BoolP   *bool
+		Slice   []string
+		SliceP  *[]string
+		Map     map[string]string
+		MapP    *map[string]string
+		Struct  Struct
+		StructP *Struct
+	}
+
+	var testcases = []struct {
+		name     string
+		dst      T2
+		src      T2
+		expected T2
+	}{
+		{
+			name:     "zero noop",
+			dst:      T2{},
+			src:      T2{},
+			expected: T2{},
+		},
+		{
+			name: "override zero dst",
+			dst:  T2{},
+			src: T2{
+				String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}), Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"}),
+				Struct:  Struct{String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}), Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"})},
+				StructP: ptr.To(Struct{String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}), Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"})}),
+			},
+			expected: T2{
+				String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}), Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"}),
+				Struct:  Struct{String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}), Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"})},
+				StructP: ptr.To(Struct{String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}), Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"})}),
+			},
+		},
+		{
+			name: "noop zero src",
+			dst: T2{
+				String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}), Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"}),
+				Struct:  Struct{String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}), Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"})},
+				StructP: ptr.To(Struct{String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}), Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"})}),
+			},
+			src: T2{},
+			expected: T2{
+				String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}), Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"}),
+				Struct:  Struct{String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}), Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"})},
+				StructP: ptr.To(Struct{String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}), Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"})}),
+			},
+		},
+		{
+			name: "overwrite non-zero values, merge maps",
+			dst: T2{
+				String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}),
+				Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"}),
+				Struct:  Struct{String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}), Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"})},
+				StructP: ptr.To(Struct{String: "a", StringP: ptr.To("a"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"a"}, SliceP: ptr.To([]string{"a"}), Map: map[string]string{"a": "1"}, MapP: ptr.To(map[string]string{"a": "1"})}),
+			},
+			src: T2{
+				String: "b", StringP: ptr.To("b"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"b"}, SliceP: ptr.To([]string{"b"}),
+				Map: map[string]string{"b": "1"}, MapP: ptr.To(map[string]string{"b": "1"}),
+				Struct:  Struct{String: "b", StringP: ptr.To("b"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"b"}, SliceP: ptr.To([]string{"b"}), Map: map[string]string{"b": "1"}, MapP: ptr.To(map[string]string{"b": "1"})},
+				StructP: ptr.To(Struct{String: "b", StringP: ptr.To("b"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"b"}, SliceP: ptr.To([]string{"b"}), Map: map[string]string{"b": "1"}, MapP: ptr.To(map[string]string{"b": "1"})}),
+			},
+			expected: T2{
+				// overwritten
+				String: "b", StringP: ptr.To("b"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"b"}, SliceP: ptr.To([]string{"b"}), MapP: ptr.To(map[string]string{"b": "1"}),
+				// merged
+				Map: map[string]string{"a": "1", "b": "1"},
+				Struct: Struct{
+					// overwritten
+					String: "b", StringP: ptr.To("b"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"b"}, SliceP: ptr.To([]string{"b"}), MapP: ptr.To(map[string]string{"b": "1"}),
+					// merged
+					Map: map[string]string{"a": "1", "b": "1"},
+				},
+				// overwritten
+				StructP: ptr.To(Struct{String: "b", StringP: ptr.To("b"), Int: 1, IntP: ptr.To(1), Bool: true, BoolP: ptr.To(true), Slice: []string{"b"}, SliceP: ptr.To([]string{"b"}), Map: map[string]string{"b": "1"}, MapP: ptr.To(map[string]string{"b": "1"})}),
+			},
+		},
+		{
+			name: "overwrite non-zero values, merge maps",
+			dst: T2{
+				Struct: Struct{
+					String: "a", Int: 1, Map: map[string]string{"a": "1", "shared": "1"}, MapP: ptr.To(map[string]string{"a": "1", "shared": "1"}),
+				},
+				StructP: ptr.To(Struct{
+					String: "a", Int: 1, Map: map[string]string{"a": "1", "shared": "1"}, MapP: ptr.To(map[string]string{"a": "1", "shared": "1"}),
+				}),
+			},
+			src: T2{
+				Struct: Struct{
+					String: "b", Int: 0, Map: map[string]string{"b": "1"},
+				},
+				StructP: ptr.To(Struct{
+					String: "b", Int: 0, Map: map[string]string{"b": "1"},
+				}),
+			},
+			expected: T2{
+				Struct: Struct{
+					String: "b", Int: 1 /* preserved */, Map: map[string]string{"a": "1", "b": "1", "shared": "1"} /* merged */, MapP: ptr.To(map[string]string{"a": "1", "shared": "1"}), /* preserved */
+				},
+				StructP: ptr.To(Struct{
+					String: "b", Int: 0 /* overwritten */, Map: map[string]string{"b": "1"} /* unmerged */, MapP: nil, /* overwritten*/
+				}),
+			},
+		},
+	}
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := merge(&tc.dst, &tc.src)
+			if err != nil {
+				t.Errorf("error while merging: %s", err)
+			}
+			if !reflect.DeepEqual(tc.dst, tc.expected) {
+				// This test verifies that the semantics of the merge are what we expect.
+				t.Errorf("merge did not provide expected output:\ngot:  %s\nwant: %s\ndiff: %s", dump.OneLine(tc.dst), dump.OneLine(tc.expected), cmp.Diff(tc.dst, tc.expected))
+			}
+		})
 	}
 }
 
@@ -177,7 +323,7 @@ func TestCAOverridesCAData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("could not create tempfile: %v", err)
 	}
-	defer os.Remove(file.Name())
+	defer utiltesting.CloseAndRemove(t, file)
 
 	config := createCAValidTestConfig()
 	clientBuilder := NewNonInteractiveClientConfig(*config, "clean", &ConfigOverrides{
@@ -312,8 +458,7 @@ func TestModifyContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer os.Remove(tempPath.Name())
-
+	defer utiltesting.CloseAndRemove(t, tempPath)
 	pathOptions := NewDefaultPathOptions()
 	config := createValidTestConfig()
 
@@ -498,7 +643,7 @@ func TestBasicTokenFile(t *testing.T) {
 		t.Errorf("Unexpected error: %v", err)
 		return
 	}
-	defer os.Remove(f.Name())
+	defer utiltesting.CloseAndRemove(t, f)
 	if err := os.WriteFile(f.Name(), []byte(token), 0644); err != nil {
 		t.Errorf("Unexpected error: %v", err)
 		return
@@ -534,7 +679,7 @@ func TestPrecedenceTokenFile(t *testing.T) {
 		t.Errorf("Unexpected error: %v", err)
 		return
 	}
-	defer os.Remove(f.Name())
+	defer utiltesting.CloseAndRemove(t, f)
 	if err := os.WriteFile(f.Name(), []byte(token), 0644); err != nil {
 		t.Errorf("Unexpected error: %v", err)
 		return
@@ -923,7 +1068,7 @@ users:
 	if err != nil {
 		t.Error(err)
 	}
-	defer os.Remove(tmpfile.Name())
+	defer utiltesting.CloseAndRemove(t, tmpfile)
 	if err := os.WriteFile(tmpfile.Name(), []byte(content), 0666); err != nil {
 		t.Error(err)
 	}
@@ -1010,5 +1155,70 @@ func TestCleanANSIEscapeCodes(t *testing.T) {
 				t.Errorf("expected %q, actual %q", test.out, actualOut)
 			}
 		})
+	}
+}
+
+func TestMergeRawConfigDoOverride(t *testing.T) {
+	const (
+		server         = "https://anything.com:8080"
+		token          = "the-token"
+		modifiedServer = "http://localhost:8081"
+		modifiedToken  = "modified-token"
+	)
+	config := createValidTestConfig()
+
+	// add another context which to modify with overrides
+	config.Clusters["modify"] = &clientcmdapi.Cluster{
+		Server: server,
+	}
+	config.AuthInfos["modify"] = &clientcmdapi.AuthInfo{
+		Token: token,
+	}
+	config.Contexts["modify"] = &clientcmdapi.Context{
+		Cluster:   "modify",
+		AuthInfo:  "modify",
+		Namespace: "modify",
+	}
+
+	// create overrides for the modify context
+	overrides := &ConfigOverrides{
+		ClusterInfo: clientcmdapi.Cluster{
+			Server: modifiedServer,
+		},
+		Context: clientcmdapi.Context{
+			Namespace: "foobar",
+			Cluster:   "modify",
+			AuthInfo:  "modify",
+		},
+		AuthInfo: clientcmdapi.AuthInfo{
+			Token: modifiedToken,
+		},
+		CurrentContext: "modify",
+	}
+
+	cut := NewDefaultClientConfig(*config, overrides)
+	act, err := cut.MergedRawConfig()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	// ensure overrides were applied to "modify"
+	actContext := act.CurrentContext
+	if actContext != "modify" {
+		t.Errorf("Expected context %v, got %v", "modify", actContext)
+	}
+	if act.Clusters[actContext].Server != "http://localhost:8081" {
+		t.Errorf("Expected server %v, got %v", "http://localhost:8081", act.Clusters[actContext].Server)
+	}
+	if act.Contexts[actContext].Namespace != "foobar" {
+		t.Errorf("Expected namespace %v, got %v", "foobar", act.Contexts[actContext].Namespace)
+	}
+
+	// ensure context "clean" was not touched
+	if act.Clusters["clean"].Server != config.Clusters["clean"].Server {
+		t.Errorf("Expected server %v, got %v", config.Clusters["clean"].Server, act.Clusters["clean"].Server)
+	}
+	if act.Contexts["clean"].Namespace != config.Contexts["clean"].Namespace {
+		t.Errorf("Expected namespace %v, got %v", config.Contexts["clean"].Namespace, act.Contexts["clean"].Namespace)
 	}
 }

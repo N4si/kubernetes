@@ -60,7 +60,7 @@ func TestIsStandardResource(t *testing.T) {
 		{"requests.hugepages-2Mi", true},
 	}
 	for i, tc := range testCases {
-		if IsStandardResourceName(tc.input) != tc.output {
+		if IsStandardResourceName(core.ResourceName(tc.input)) != tc.output {
 			t.Errorf("case[%d], input: %s, expected: %t, got: %t", i, tc.input, tc.output, !tc.output)
 		}
 	}
@@ -77,7 +77,7 @@ func TestIsStandardContainerResource(t *testing.T) {
 		{"hugepages-2Mi", true},
 	}
 	for i, tc := range testCases {
-		if IsStandardContainerResourceName(tc.input) != tc.output {
+		if IsStandardContainerResourceName(core.ResourceName(tc.input)) != tc.output {
 			t.Errorf("case[%d], input: %s, expected: %t, got: %t", i, tc.input, tc.output, !tc.output)
 		}
 	}
@@ -365,6 +365,51 @@ func TestIsServiceIPSet(t *testing.T) {
 			}
 			if IsServiceIPSet(&s) != tc.output {
 				t.Errorf("case, input: %v, expected: %v, got: %v", tc.input, tc.output, !tc.output)
+			}
+		})
+	}
+}
+
+func TestHasInvalidLabelValueInNodeSelectorTerms(t *testing.T) {
+	testCases := []struct {
+		name   string
+		terms  []core.NodeSelectorTerm
+		expect bool
+	}{
+		{
+			name: "valid values",
+			terms: []core.NodeSelectorTerm{{
+				MatchExpressions: []core.NodeSelectorRequirement{{
+					Key:      "foo",
+					Operator: core.NodeSelectorOpIn,
+					Values:   []string{"far"},
+				}},
+			}},
+			expect: false,
+		},
+		{
+			name:   "empty terms",
+			terms:  []core.NodeSelectorTerm{},
+			expect: false,
+		},
+		{
+			name: "invalid label value",
+			terms: []core.NodeSelectorTerm{{
+				MatchExpressions: []core.NodeSelectorRequirement{{
+					Key:      "foo",
+					Operator: core.NodeSelectorOpIn,
+					Values:   []string{"-1"},
+				}},
+			}},
+			expect: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := HasInvalidLabelValueInNodeSelectorTerms(tc.terms)
+			if got != tc.expect {
+				t.Errorf("exepct %v, got %v", tc.expect, got)
 			}
 		})
 	}

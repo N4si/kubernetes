@@ -27,20 +27,19 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
 	"k8s.io/kubernetes/pkg/scheduler/apis/config/scheme"
 	configv1 "k8s.io/kubernetes/pkg/scheduler/apis/config/v1"
-	configv1beta2 "k8s.io/kubernetes/pkg/scheduler/apis/config/v1beta2"
-	configv1beta3 "k8s.io/kubernetes/pkg/scheduler/apis/config/v1beta3"
 )
 
-func loadConfigFromFile(logger klog.Logger, file string) (*config.KubeSchedulerConfiguration, error) {
+// LoadConfigFromFile loads scheduler config from the specified file path
+func LoadConfigFromFile(logger klog.Logger, file string) (*config.KubeSchedulerConfiguration, error) {
 	data, err := os.ReadFile(file)
 	if err != nil {
 		return nil, err
 	}
 
-	return loadConfig(logger, data)
+	return loadConfig(data)
 }
 
-func loadConfig(logger klog.Logger, data []byte) (*config.KubeSchedulerConfiguration, error) {
+func loadConfig(data []byte) (*config.KubeSchedulerConfiguration, error) {
 	// The UniversalDecoder runs defaulting and returns the internal type by default.
 	obj, gvk, err := scheme.Codecs.UniversalDecoder().Decode(data, nil, nil)
 	if err != nil {
@@ -52,12 +51,6 @@ func loadConfig(logger klog.Logger, data []byte) (*config.KubeSchedulerConfigura
 		// conversion. See KubeSchedulerConfiguration internal type definition for
 		// more details.
 		cfgObj.TypeMeta.APIVersion = gvk.GroupVersion().String()
-		switch cfgObj.TypeMeta.APIVersion {
-		case configv1beta2.SchemeGroupVersion.String():
-			logger.Info("KubeSchedulerConfiguration v1beta2 is deprecated in v1.25, will be removed in v1.28")
-		case configv1beta3.SchemeGroupVersion.String():
-			logger.Info("KubeSchedulerConfiguration v1beta3 is deprecated in v1.26, will be removed in v1.29")
-		}
 		return cfgObj, nil
 	}
 	return nil, fmt.Errorf("couldn't decode as KubeSchedulerConfiguration, got %s: ", gvk)
@@ -73,10 +66,6 @@ func encodeConfig(cfg *config.KubeSchedulerConfiguration) (*bytes.Buffer, error)
 
 	var encoder runtime.Encoder
 	switch cfg.TypeMeta.APIVersion {
-	case configv1beta2.SchemeGroupVersion.String():
-		encoder = scheme.Codecs.EncoderForVersion(info.Serializer, configv1beta2.SchemeGroupVersion)
-	case configv1beta3.SchemeGroupVersion.String():
-		encoder = scheme.Codecs.EncoderForVersion(info.Serializer, configv1beta3.SchemeGroupVersion)
 	case configv1.SchemeGroupVersion.String():
 		encoder = scheme.Codecs.EncoderForVersion(info.Serializer, configv1.SchemeGroupVersion)
 	default:

@@ -64,6 +64,7 @@ spec:
   sessionAffinityConfig:
     clientIP:
       timeoutSeconds: 1
+  trafficDistribution: trafficDistributionValue
   type: typeValue
 status:
   conditions:
@@ -77,6 +78,7 @@ status:
     ingress:
     - hostname: hostnameValue
       ip: ipValue
+      ipMode: ipModeValue
       ports:
       - error: errorValue
         port: 1

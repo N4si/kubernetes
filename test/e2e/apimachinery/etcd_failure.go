@@ -34,12 +34,13 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
-var _ = SIGDescribe("Etcd failure [Disruptive]", func() {
+var _ = SIGDescribe("Etcd failure", framework.WithDisruptive(), func() {
 
 	f := framework.NewDefaultFramework("etcd-failure")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.BeforeEach(func(ctx context.Context) {
 		// This test requires:
@@ -47,7 +48,7 @@ var _ = SIGDescribe("Etcd failure [Disruptive]", func() {
 		// - master access
 		// ... so the provider check should be identical to the intersection of
 		// providers that provide those capabilities.
-		e2eskipper.SkipUnlessProviderIs("gce")
+		e2eskipper.SkipUnlessProviderIs("gce", "aws")
 		e2eskipper.SkipUnlessSSHKeyPresent()
 
 		err := e2erc.RunRC(ctx, testutils.RCConfig{
@@ -73,18 +74,18 @@ var _ = SIGDescribe("Etcd failure [Disruptive]", func() {
 		etcdFailTest(
 			ctx,
 			f,
-			"pgrep etcd | xargs -I {} sudo kill -9 {}",
+			"pgrep etcd | grep -v etcd-manager | xargs -I {} sudo kill -9 {}",
 			"echo 'do nothing. monit should restart etcd.'",
 		)
 	})
 })
 
 func etcdFailTest(ctx context.Context, f *framework.Framework, failCommand, fixCommand string) {
-	doEtcdFailure(ctx, failCommand, fixCommand)
+	doEtcdFailure(ctx, f, failCommand, fixCommand)
 
 	checkExistingRCRecovers(ctx, f)
 
-	apps.TestReplicationControllerServeImageOrFail(ctx, f, "basic", framework.ServeHostnameImage)
+	apps.TestReplicationControllerServeImageOrFail(ctx, f, "basic", imageutils.GetE2EImage(imageutils.Agnhost))
 }
 
 // For this duration, etcd will be failed by executing a failCommand on the master.
@@ -94,17 +95,30 @@ func etcdFailTest(ctx context.Context, f *framework.Framework, failCommand, fixC
 // master and go on to assert that etcd and kubernetes components recover.
 const etcdFailureDuration = 20 * time.Second
 
-func doEtcdFailure(ctx context.Context, failCommand, fixCommand string) {
+func doEtcdFailure(ctx context.Context, f *framework.Framework, failCommand, fixCommand string) {
 	ginkgo.By("failing etcd")
 
-	masterExec(ctx, failCommand)
+	masterExec(ctx, f, failCommand)
 	time.Sleep(etcdFailureDuration)
-	masterExec(ctx, fixCommand)
+	masterExec(ctx, f, fixCommand)
 }
 
-func masterExec(ctx context.Context, cmd string) {
-	host := framework.APIAddress() + ":22"
+func masterExec(ctx context.Context, f *framework.Framework, cmd string) {
+	nodes := framework.GetControlPlaneNodes(ctx, f.ClientSet)
+	// checks if there is at least one control-plane node
+
+	gomega.Expect(nodes.Items).NotTo(gomega.BeEmpty(),
+		"at least one node with label %s should exist.", framework.ControlPlaneLabel)
+
+	ips := framework.GetNodeExternalIPs(&nodes.Items[0])
+	gomega.Expect(ips).NotTo(gomega.BeEmpty(), "at least one external ip should exist.")
+
+	host := ips[0] + ":22"
 	result, err := e2essh.SSH(ctx, cmd, host, framework.TestContext.Provider)
+	framework.ExpectNoError(err)
+	e2essh.LogResult(result)
+
+	result, err = e2essh.SSH(ctx, cmd, host, framework.TestContext.Provider)
 	framework.ExpectNoError(err, "failed to SSH to host %s on provider %s and run command: %q", host, framework.TestContext.Provider, cmd)
 	if result.Code != 0 {
 		e2essh.LogResult(result)
@@ -118,7 +132,7 @@ func checkExistingRCRecovers(ctx context.Context, f *framework.Framework) {
 	rcSelector := labels.Set{"name": "baz"}.AsSelector()
 
 	ginkgo.By("deleting pods from existing replication controller")
-	framework.ExpectNoError(wait.PollWithContext(ctx, time.Millisecond*500, time.Second*60, func(ctx context.Context) (bool, error) {
+	framework.ExpectNoError(wait.PollUntilContextTimeout(ctx, time.Millisecond*500, time.Second*60, false, func(ctx context.Context) (bool, error) {
 		options := metav1.ListOptions{LabelSelector: rcSelector.String()}
 		pods, err := podClient.List(ctx, options)
 		if err != nil {
@@ -137,7 +151,7 @@ func checkExistingRCRecovers(ctx context.Context, f *framework.Framework) {
 	}))
 
 	ginkgo.By("waiting for replication controller to recover")
-	framework.ExpectNoError(wait.PollWithContext(ctx, time.Millisecond*500, time.Second*60, func(ctx context.Context) (bool, error) {
+	framework.ExpectNoError(wait.PollUntilContextTimeout(ctx, time.Millisecond*500, time.Second*60, false, func(ctx context.Context) (bool, error) {
 		options := metav1.ListOptions{LabelSelector: rcSelector.String()}
 		pods, err := podClient.List(ctx, options)
 		framework.ExpectNoError(err, "failed to list pods in namespace: %s, that match label selector: %s", f.Namespace.Name, rcSelector.String())

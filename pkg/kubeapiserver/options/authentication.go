@@ -17,31 +17,68 @@ limitations under the License.
 package options
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/pflag"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apiserver/pkg/apis/apiserver"
+	"k8s.io/apiserver/pkg/apis/apiserver/install"
+	apiservervalidation "k8s.io/apiserver/pkg/apis/apiserver/validation"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
+	authenticationcel "k8s.io/apiserver/pkg/authentication/cel"
+	genericfeatures "k8s.io/apiserver/pkg/features"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/apiserver/pkg/server/egressselector"
 	genericoptions "k8s.io/apiserver/pkg/server/options"
+	authenticationconfigmetrics "k8s.io/apiserver/pkg/server/options/authenticationconfig/metrics"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/apiserver/plugin/pkg/authenticator/token/oidc"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	v1listers "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/util/keyutil"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/klog/v2"
 	openapicommon "k8s.io/kube-openapi/pkg/common"
 	serviceaccountcontroller "k8s.io/kubernetes/pkg/controller/serviceaccount"
+	"k8s.io/kubernetes/pkg/features"
 	kubeauthenticator "k8s.io/kubernetes/pkg/kubeapiserver/authenticator"
 	authzmodes "k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
+	"k8s.io/kubernetes/pkg/serviceaccount"
+	"k8s.io/kubernetes/pkg/util/filesystem"
 	"k8s.io/kubernetes/plugin/pkg/auth/authenticator/token/bootstrap"
+	"k8s.io/utils/pointer"
 )
+
+const (
+	oidcIssuerURLFlag      = "oidc-issuer-url"
+	oidcClientIDFlag       = "oidc-client-id"
+	oidcCAFileFlag         = "oidc-ca-file"
+	oidcUsernameClaimFlag  = "oidc-username-claim"
+	oidcUsernamePrefixFlag = "oidc-username-prefix"
+	oidcGroupsClaimFlag    = "oidc-groups-claim"
+	oidcGroupsPrefixFlag   = "oidc-groups-prefix"
+	oidcSigningAlgsFlag    = "oidc-signing-algs"
+	oidcRequiredClaimFlag  = "oidc-required-claim"
+)
+
+// UpdateAuthenticationConfigTimeout controls how long we wait for calls to updateAuthenticationConfig to succeed.
+// Exported as a variable so that it can be overridden in integration tests.
+var UpdateAuthenticationConfigTimeout = time.Minute
 
 // BuiltInAuthenticationOptions contains all build-in authentication options for API Server
 type BuiltInAuthenticationOptions struct {
@@ -55,6 +92,8 @@ type BuiltInAuthenticationOptions struct {
 	TokenFile       *TokenFileAuthenticationOptions
 	WebHook         *WebHookAuthenticationOptions
 
+	AuthenticationConfigFile string
+
 	TokenSuccessCacheTTL time.Duration
 	TokenFailureCacheTTL time.Duration
 }
@@ -62,6 +101,8 @@ type BuiltInAuthenticationOptions struct {
 // AnonymousAuthenticationOptions contains anonymous authentication options for API Server
 type AnonymousAuthenticationOptions struct {
 	Allow bool
+	// FlagsSet tracks whether any of the configuration options were set via a command-line flag.
+	FlagsSet bool
 }
 
 // BootstrapTokenAuthenticationOptions contains bootstrap token authentication options for API Server
@@ -80,16 +121,26 @@ type OIDCAuthenticationOptions struct {
 	GroupsPrefix   string
 	SigningAlgs    []string
 	RequiredClaims map[string]string
+
+	// FlagsSet tracks whether any of the configuration options were set via a command-line flag.
+	FlagsSet bool
 }
 
 // ServiceAccountAuthenticationOptions contains service account authentication options for API Server
 type ServiceAccountAuthenticationOptions struct {
-	KeyFiles         []string
-	Lookup           bool
-	Issuers          []string
-	JWKSURI          string
-	MaxExpiration    time.Duration
-	ExtendExpiration bool
+	KeyFiles              []string
+	Lookup                bool
+	Issuers               []string
+	JWKSURI               string
+	ExtendExpiration      bool
+	MaxExpiration         time.Duration
+	MaxExtendedExpiration time.Duration
+	// OptionalTokenGetter is a function that returns a service account token getter.
+	// If not set, the default token getter will be used.
+	OptionalTokenGetter func(factory informers.SharedInformerFactory) serviceaccount.ServiceAccountTokenGetter
+	// ExternalPublicKeysGetter gets set if `--service-account-signing-endpoint` is passed.
+	// ExternalPublicKeysGetter is mutually exclusive with KeyFiles.
+	ExternalPublicKeysGetter serviceaccount.PublicKeysGetter
 }
 
 // TokenFileAuthenticationOptions contains token file authentication options for API Server
@@ -132,7 +183,9 @@ func (o *BuiltInAuthenticationOptions) WithAll() *BuiltInAuthenticationOptions {
 
 // WithAnonymous set default value for anonymous authentication
 func (o *BuiltInAuthenticationOptions) WithAnonymous() *BuiltInAuthenticationOptions {
-	o.Anonymous = &AnonymousAuthenticationOptions{Allow: true}
+	o.Anonymous = &AnonymousAuthenticationOptions{
+		Allow: true,
+	}
 	return o
 }
 
@@ -150,7 +203,10 @@ func (o *BuiltInAuthenticationOptions) WithClientCert() *BuiltInAuthenticationOp
 
 // WithOIDC set default value for OIDC authentication
 func (o *BuiltInAuthenticationOptions) WithOIDC() *BuiltInAuthenticationOptions {
-	o.OIDC = &OIDCAuthenticationOptions{}
+	o.OIDC = &OIDCAuthenticationOptions{
+		UsernameClaim: "sub",
+		SigningAlgs:   []string{"RS256"},
+	}
 	return o
 }
 
@@ -162,7 +218,12 @@ func (o *BuiltInAuthenticationOptions) WithRequestHeader() *BuiltInAuthenticatio
 
 // WithServiceAccounts set default value for service account authentication
 func (o *BuiltInAuthenticationOptions) WithServiceAccounts() *BuiltInAuthenticationOptions {
-	o.ServiceAccounts = &ServiceAccountAuthenticationOptions{Lookup: true, ExtendExpiration: true}
+	if o.ServiceAccounts == nil {
+		o.ServiceAccounts = &ServiceAccountAuthenticationOptions{}
+	}
+	o.ServiceAccounts.Lookup = true
+	o.ServiceAccounts.ExtendExpiration = true
+	o.ServiceAccounts.MaxExtendedExpiration = serviceaccount.ExpirationExtensionSeconds * time.Second
 	return o
 }
 
@@ -184,11 +245,13 @@ func (o *BuiltInAuthenticationOptions) WithWebHook() *BuiltInAuthenticationOptio
 
 // Validate checks invalid config combination
 func (o *BuiltInAuthenticationOptions) Validate() []error {
+	if o == nil {
+		return nil
+	}
+
 	var allErrors []error
 
-	if o.OIDC != nil && (len(o.OIDC.IssuerURL) > 0) != (len(o.OIDC.ClientID) > 0) {
-		allErrors = append(allErrors, fmt.Errorf("oidc-issuer-url and oidc-client-id should be specified together"))
-	}
+	allErrors = append(allErrors, o.validateOIDCOptions()...)
 
 	if o.ServiceAccounts != nil && len(o.ServiceAccounts.Issuers) > 0 {
 		seen := make(map[string]bool)
@@ -215,8 +278,8 @@ func (o *BuiltInAuthenticationOptions) Validate() []error {
 		if len(o.ServiceAccounts.Issuers) == 0 {
 			allErrors = append(allErrors, errors.New("service-account-issuer is a required flag"))
 		}
-		if len(o.ServiceAccounts.KeyFiles) == 0 {
-			allErrors = append(allErrors, errors.New("service-account-key-file is a required flag"))
+		if len(o.ServiceAccounts.KeyFiles) == 0 && o.ServiceAccounts.ExternalPublicKeysGetter == nil {
+			allErrors = append(allErrors, errors.New("either `--service-account-key-file` or `--service-account-signing-endpoint` must be set"))
 		}
 
 		// Validate the JWKS URI when it is explicitly set.
@@ -230,6 +293,11 @@ func (o *BuiltInAuthenticationOptions) Validate() []error {
 		}
 	}
 
+	// verify that if ServiceAccountTokenNodeBinding is enabled, ServiceAccountTokenNodeBindingValidation is also enabled.
+	if utilfeature.DefaultFeatureGate.Enabled(features.ServiceAccountTokenNodeBinding) && !utilfeature.DefaultFeatureGate.Enabled(features.ServiceAccountTokenNodeBindingValidation) {
+		allErrors = append(allErrors, fmt.Errorf("the %q feature gate can only be enabled if the %q feature gate is also enabled", features.ServiceAccountTokenNodeBinding, features.ServiceAccountTokenNodeBindingValidation))
+	}
+
 	if o.WebHook != nil {
 		retryBackoff := o.WebHook.RetryBackoff
 		if retryBackoff != nil && retryBackoff.Steps <= 0 {
@@ -237,11 +305,25 @@ func (o *BuiltInAuthenticationOptions) Validate() []error {
 		}
 	}
 
+	if o.RequestHeader != nil {
+		allErrors = append(allErrors, o.RequestHeader.Validate()...)
+	}
+
 	return allErrors
 }
 
 // AddFlags returns flags of authentication for a API Server
 func (o *BuiltInAuthenticationOptions) AddFlags(fs *pflag.FlagSet) {
+	if o == nil {
+		return
+	}
+
+	fs.StringVar(&o.AuthenticationConfigFile, "authentication-config", o.AuthenticationConfigFile, ""+
+		"File with Authentication Configuration to configure the JWT Token authenticator or the anonymous authenticator. "+
+		"Requires the StructuredAuthenticationConfiguration feature gate. "+
+		"This flag is mutually exclusive with the --oidc-* flags if the file configures the JWT Token authenticator. "+
+		"This flag is mutually exclusive with --anonymous-auth if the file configures the Anonymous authenticator.")
+
 	fs.StringSliceVar(&o.APIAudiences, "api-audiences", o.APIAudiences, ""+
 		"Identifiers of the API. The service account token authenticator will validate that "+
 		"tokens used against the API are bound to at least one of these audiences. If the "+
@@ -253,6 +335,7 @@ func (o *BuiltInAuthenticationOptions) AddFlags(fs *pflag.FlagSet) {
 			"Enables anonymous requests to the secure port of the API server. "+
 			"Requests that are not rejected by another authentication method are treated as anonymous requests. "+
 			"Anonymous requests have a username of system:anonymous, and a group name of system:unauthenticated.")
+		trackProvidedFlag(fs, "anonymous-auth", &o.Anonymous.FlagsSet)
 	}
 
 	if o.BootstrapToken != nil {
@@ -266,45 +349,54 @@ func (o *BuiltInAuthenticationOptions) AddFlags(fs *pflag.FlagSet) {
 	}
 
 	if o.OIDC != nil {
-		fs.StringVar(&o.OIDC.IssuerURL, "oidc-issuer-url", o.OIDC.IssuerURL, ""+
+		fs.StringVar(&o.OIDC.IssuerURL, oidcIssuerURLFlag, o.OIDC.IssuerURL, ""+
 			"The URL of the OpenID issuer, only HTTPS scheme will be accepted. "+
 			"If set, it will be used to verify the OIDC JSON Web Token (JWT).")
+		trackProvidedFlag(fs, oidcIssuerURLFlag, &o.OIDC.FlagsSet)
 
-		fs.StringVar(&o.OIDC.ClientID, "oidc-client-id", o.OIDC.ClientID,
+		fs.StringVar(&o.OIDC.ClientID, oidcClientIDFlag, o.OIDC.ClientID, ""+
 			"The client ID for the OpenID Connect client, must be set if oidc-issuer-url is set.")
+		trackProvidedFlag(fs, oidcClientIDFlag, &o.OIDC.FlagsSet)
 
-		fs.StringVar(&o.OIDC.CAFile, "oidc-ca-file", o.OIDC.CAFile, ""+
+		fs.StringVar(&o.OIDC.CAFile, oidcCAFileFlag, o.OIDC.CAFile, ""+
 			"If set, the OpenID server's certificate will be verified by one of the authorities "+
 			"in the oidc-ca-file, otherwise the host's root CA set will be used.")
+		trackProvidedFlag(fs, oidcCAFileFlag, &o.OIDC.FlagsSet)
 
-		fs.StringVar(&o.OIDC.UsernameClaim, "oidc-username-claim", "sub", ""+
+		fs.StringVar(&o.OIDC.UsernameClaim, oidcUsernameClaimFlag, o.OIDC.UsernameClaim, ""+
 			"The OpenID claim to use as the user name. Note that claims other than the default ('sub') "+
 			"is not guaranteed to be unique and immutable. This flag is experimental, please see "+
 			"the authentication documentation for further details.")
+		trackProvidedFlag(fs, oidcUsernameClaimFlag, &o.OIDC.FlagsSet)
 
-		fs.StringVar(&o.OIDC.UsernamePrefix, "oidc-username-prefix", "", ""+
+		fs.StringVar(&o.OIDC.UsernamePrefix, oidcUsernamePrefixFlag, o.OIDC.UsernamePrefix, ""+
 			"If provided, all usernames will be prefixed with this value. If not provided, "+
 			"username claims other than 'email' are prefixed by the issuer URL to avoid "+
 			"clashes. To skip any prefixing, provide the value '-'.")
+		trackProvidedFlag(fs, oidcUsernamePrefixFlag, &o.OIDC.FlagsSet)
 
-		fs.StringVar(&o.OIDC.GroupsClaim, "oidc-groups-claim", "", ""+
+		fs.StringVar(&o.OIDC.GroupsClaim, oidcGroupsClaimFlag, o.OIDC.GroupsClaim, ""+
 			"If provided, the name of a custom OpenID Connect claim for specifying user groups. "+
 			"The claim value is expected to be a string or array of strings. This flag is experimental, "+
 			"please see the authentication documentation for further details.")
+		trackProvidedFlag(fs, oidcGroupsClaimFlag, &o.OIDC.FlagsSet)
 
-		fs.StringVar(&o.OIDC.GroupsPrefix, "oidc-groups-prefix", "", ""+
+		fs.StringVar(&o.OIDC.GroupsPrefix, oidcGroupsPrefixFlag, o.OIDC.GroupsPrefix, ""+
 			"If provided, all groups will be prefixed with this value to prevent conflicts with "+
 			"other authentication strategies.")
+		trackProvidedFlag(fs, oidcGroupsPrefixFlag, &o.OIDC.FlagsSet)
 
-		fs.StringSliceVar(&o.OIDC.SigningAlgs, "oidc-signing-algs", []string{"RS256"}, ""+
+		fs.StringSliceVar(&o.OIDC.SigningAlgs, oidcSigningAlgsFlag, o.OIDC.SigningAlgs, ""+
 			"Comma-separated list of allowed JOSE asymmetric signing algorithms. JWTs with a "+
 			"supported 'alg' header values are: RS256, RS384, RS512, ES256, ES384, ES512, PS256, PS384, PS512. "+
 			"Values are defined by RFC 7518 https://tools.ietf.org/html/rfc7518#section-3.1.")
+		trackProvidedFlag(fs, oidcSigningAlgsFlag, &o.OIDC.FlagsSet)
 
-		fs.Var(cliflag.NewMapStringStringNoSplit(&o.OIDC.RequiredClaims), "oidc-required-claim", ""+
+		fs.Var(cliflag.NewMapStringStringNoSplit(&o.OIDC.RequiredClaims), oidcRequiredClaimFlag, ""+
 			"A key=value pair that describes a required claim in the ID Token. "+
 			"If set, the claim is verified to be present in the ID Token with a matching value. "+
 			"Repeat this flag to specify multiple claims.")
+		trackProvidedFlag(fs, oidcRequiredClaimFlag, &o.OIDC.FlagsSet)
 	}
 
 	if o.RequestHeader != nil {
@@ -336,9 +428,9 @@ func (o *BuiltInAuthenticationOptions) AddFlags(fs *pflag.FlagSet) {
 
 		fs.StringVar(&o.ServiceAccounts.JWKSURI, "service-account-jwks-uri", o.ServiceAccounts.JWKSURI, ""+
 			"Overrides the URI for the JSON Web Key Set in the discovery doc served at "+
-			"/.well-known/openid-configuration. This flag is useful if the discovery doc"+
+			"/.well-known/openid-configuration. This flag is useful if the discovery doc "+
 			"and key set are served to relying parties from a URL other than the "+
-			"API server's external (as auto-detected or overridden with external-hostname). ")
+			"API server's external (as auto-detected or overridden with external-hostname).")
 
 		fs.DurationVar(&o.ServiceAccounts.MaxExpiration, "service-account-max-token-expiration", o.ServiceAccounts.MaxExpiration, ""+
 			"The maximum validity duration of a token created by the service account token issuer. If an otherwise valid "+
@@ -370,15 +462,16 @@ func (o *BuiltInAuthenticationOptions) AddFlags(fs *pflag.FlagSet) {
 	}
 }
 
-// ToAuthenticationConfig convert BuiltInAuthenticationOptions to kubeauthenticator.Config
+// ToAuthenticationConfig convert BuiltInAuthenticationOptions to kubeauthenticator.Config. Returns
+// an empty config if o is nil.
 func (o *BuiltInAuthenticationOptions) ToAuthenticationConfig() (kubeauthenticator.Config, error) {
+	if o == nil {
+		return kubeauthenticator.Config{}, nil
+	}
+
 	ret := kubeauthenticator.Config{
 		TokenSuccessCacheTTL: o.TokenSuccessCacheTTL,
 		TokenFailureCacheTTL: o.TokenFailureCacheTTL,
-	}
-
-	if o.Anonymous != nil {
-		ret.Anonymous = o.Anonymous.Allow
 	}
 
 	if o.BootstrapToken != nil {
@@ -393,16 +486,98 @@ func (o *BuiltInAuthenticationOptions) ToAuthenticationConfig() (kubeauthenticat
 		}
 	}
 
-	if o.OIDC != nil {
-		ret.OIDCCAFile = o.OIDC.CAFile
-		ret.OIDCClientID = o.OIDC.ClientID
-		ret.OIDCGroupsClaim = o.OIDC.GroupsClaim
-		ret.OIDCGroupsPrefix = o.OIDC.GroupsPrefix
-		ret.OIDCIssuerURL = o.OIDC.IssuerURL
-		ret.OIDCUsernameClaim = o.OIDC.UsernameClaim
-		ret.OIDCUsernamePrefix = o.OIDC.UsernamePrefix
+	// When the StructuredAuthenticationConfiguration feature is enabled and the authentication config file is provided,
+	// load the authentication config from the file, otherwise set up an empty configuration.
+	if len(o.AuthenticationConfigFile) > 0 {
+		var err error
+		if ret.AuthenticationConfig, ret.AuthenticationConfigData, err = loadAuthenticationConfig(o.AuthenticationConfigFile); err != nil {
+			return kubeauthenticator.Config{}, fmt.Errorf("failed to load authentication configuration from file %q: %w", o.AuthenticationConfigFile, err)
+		}
+	} else {
+		ret.AuthenticationConfig = &apiserver.AuthenticationConfiguration{}
+	}
+
+	// Set up JWT authenticators from config file or from flags
+	if len(o.AuthenticationConfigFile) > 0 {
+		// all known signing algs are allowed when using authentication config
+		// TODO: what we really want to express is 'any alg is fine as long it matches a public key'
+		ret.OIDCSigningAlgs = oidc.AllValidSigningAlgorithms()
+	} else if o.OIDC != nil && len(o.OIDC.IssuerURL) > 0 && len(o.OIDC.ClientID) > 0 {
+		usernamePrefix := o.OIDC.UsernamePrefix
+
+		if o.OIDC.UsernamePrefix == "" && o.OIDC.UsernameClaim != "email" {
+			// Legacy CLI flag behavior. If a usernamePrefix isn't provided, prefix all claims other than "email"
+			// with the issuerURL.
+			//
+			// See https://github.com/kubernetes/kubernetes/issues/31380
+			usernamePrefix = o.OIDC.IssuerURL + "#"
+		}
+		if o.OIDC.UsernamePrefix == "-" {
+			// Special value indicating usernames shouldn't be prefixed.
+			usernamePrefix = ""
+		}
+
+		jwtAuthenticator := apiserver.JWTAuthenticator{
+			Issuer: apiserver.Issuer{
+				URL:       o.OIDC.IssuerURL,
+				Audiences: []string{o.OIDC.ClientID},
+			},
+			ClaimMappings: apiserver.ClaimMappings{
+				Username: apiserver.PrefixedClaimOrExpression{
+					Prefix: pointer.String(usernamePrefix),
+					Claim:  o.OIDC.UsernameClaim,
+				},
+			},
+		}
+
+		if len(o.OIDC.GroupsClaim) > 0 {
+			jwtAuthenticator.ClaimMappings.Groups = apiserver.PrefixedClaimOrExpression{
+				Prefix: pointer.String(o.OIDC.GroupsPrefix),
+				Claim:  o.OIDC.GroupsClaim,
+			}
+		}
+
+		if len(o.OIDC.CAFile) != 0 {
+			caContent, err := os.ReadFile(o.OIDC.CAFile)
+			if err != nil {
+				return kubeauthenticator.Config{}, err
+			}
+			jwtAuthenticator.Issuer.CertificateAuthority = string(caContent)
+		}
+
+		if len(o.OIDC.RequiredClaims) > 0 {
+			claimValidationRules := make([]apiserver.ClaimValidationRule, 0, len(o.OIDC.RequiredClaims))
+			for claim, value := range o.OIDC.RequiredClaims {
+				claimValidationRules = append(claimValidationRules, apiserver.ClaimValidationRule{
+					Claim:         claim,
+					RequiredValue: value,
+				})
+			}
+			jwtAuthenticator.ClaimValidationRules = claimValidationRules
+		}
+
+		ret.AuthenticationConfig.JWT = []apiserver.JWTAuthenticator{jwtAuthenticator}
+
 		ret.OIDCSigningAlgs = o.OIDC.SigningAlgs
-		ret.OIDCRequiredClaims = o.OIDC.RequiredClaims
+	}
+
+	// Set up anonymous authenticator from config file or flags
+	if o.Anonymous != nil {
+		switch {
+		case ret.AuthenticationConfig.Anonymous != nil && o.Anonymous.FlagsSet:
+			// Flags and config file are mutually exclusive
+			return kubeauthenticator.Config{}, field.Forbidden(field.NewPath("anonymous"), "--anonymous-auth flag cannot be set when anonymous field is configured in authentication configuration file")
+		case ret.AuthenticationConfig.Anonymous != nil:
+			// Use the config-file-specified values
+			ret.Anonymous = *ret.AuthenticationConfig.Anonymous
+		default:
+			// Use the flag-specified values
+			ret.Anonymous = apiserver.AnonymousAuthConfig{Enabled: o.Anonymous.Allow}
+		}
+	}
+
+	if err := apiservervalidation.ValidateAuthenticationConfiguration(authenticationcel.NewDefaultCompiler(), ret.AuthenticationConfig, ret.ServiceAccountIssuers).ToAggregate(); err != nil {
+		return kubeauthenticator.Config{}, fmt.Errorf("invalid authentication configuration: %w", err)
 	}
 
 	if o.RequestHeader != nil {
@@ -418,7 +593,28 @@ func (o *BuiltInAuthenticationOptions) ToAuthenticationConfig() (kubeauthenticat
 		if len(o.ServiceAccounts.Issuers) != 0 && len(o.APIAudiences) == 0 {
 			ret.APIAudiences = authenticator.Audiences(o.ServiceAccounts.Issuers)
 		}
-		ret.ServiceAccountKeyFiles = o.ServiceAccounts.KeyFiles
+
+		switch {
+		case len(o.ServiceAccounts.KeyFiles) > 0 && o.ServiceAccounts.ExternalPublicKeysGetter != nil:
+			return kubeauthenticator.Config{}, fmt.Errorf("cannot set mutually exclusive flags `--service-account-key-file` and `--service-account-signing-endpoint` at the same time")
+		case len(o.ServiceAccounts.KeyFiles) > 0:
+			allPublicKeys := []interface{}{}
+			for _, keyfile := range o.ServiceAccounts.KeyFiles {
+				publicKeys, err := keyutil.PublicKeysFromFile(keyfile)
+				if err != nil {
+					return kubeauthenticator.Config{}, err
+				}
+				allPublicKeys = append(allPublicKeys, publicKeys...)
+			}
+			keysGetter, err := serviceaccount.StaticPublicKeysGetter(allPublicKeys)
+			if err != nil {
+				return kubeauthenticator.Config{}, fmt.Errorf("failed to set up public service account keys: %w", err)
+			}
+			ret.ServiceAccountPublicKeysGetter = keysGetter
+		case o.ServiceAccounts.ExternalPublicKeysGetter != nil:
+			ret.ServiceAccountPublicKeysGetter = o.ServiceAccounts.ExternalPublicKeysGetter
+		}
+
 		ret.ServiceAccountIssuers = o.ServiceAccounts.Issuers
 		ret.ServiceAccountLookup = o.ServiceAccounts.Lookup
 	}
@@ -447,7 +643,17 @@ func (o *BuiltInAuthenticationOptions) ToAuthenticationConfig() (kubeauthenticat
 }
 
 // ApplyTo requires already applied OpenAPIConfig and EgressSelector if present.
-func (o *BuiltInAuthenticationOptions) ApplyTo(authInfo *genericapiserver.AuthenticationInfo, secureServing *genericapiserver.SecureServingInfo, egressSelector *egressselector.EgressSelector, openAPIConfig *openapicommon.Config, openAPIV3Config *openapicommon.Config, extclient kubernetes.Interface, versionedInformer informers.SharedInformerFactory) error {
+// The input context controls the lifecycle of background goroutines started to reload the authentication config file.
+func (o *BuiltInAuthenticationOptions) ApplyTo(
+	ctx context.Context,
+	authInfo *genericapiserver.AuthenticationInfo,
+	secureServing *genericapiserver.SecureServingInfo,
+	egressSelector *egressselector.EgressSelector,
+	openAPIConfig *openapicommon.Config,
+	openAPIV3Config *openapicommon.OpenAPIV3Config,
+	extclient kubernetes.Interface,
+	versionedInformer informers.SharedInformerFactory,
+	apiServerID string) error {
 	if o == nil {
 		return nil
 	}
@@ -472,22 +678,36 @@ func (o *BuiltInAuthenticationOptions) ApplyTo(authInfo *genericapiserver.Authen
 		}
 	}
 
+	authInfo.RequestHeaderConfig = authenticatorConfig.RequestHeaderConfig
 	authInfo.APIAudiences = o.APIAudiences
 	if o.ServiceAccounts != nil && len(o.ServiceAccounts.Issuers) != 0 && len(o.APIAudiences) == 0 {
 		authInfo.APIAudiences = authenticator.Audiences(o.ServiceAccounts.Issuers)
 	}
 
-	authenticatorConfig.ServiceAccountTokenGetter = serviceaccountcontroller.NewGetterFromClient(
-		extclient,
-		versionedInformer.Core().V1().Secrets().Lister(),
-		versionedInformer.Core().V1().ServiceAccounts().Lister(),
-		versionedInformer.Core().V1().Pods().Lister(),
-	)
+	// If the optional token getter function is set, use it. Otherwise, use the default token getter.
+	if o.ServiceAccounts != nil && o.ServiceAccounts.OptionalTokenGetter != nil {
+		authenticatorConfig.ServiceAccountTokenGetter = o.ServiceAccounts.OptionalTokenGetter(versionedInformer)
+	} else {
+		var nodeLister v1listers.NodeLister
+		if utilfeature.DefaultFeatureGate.Enabled(features.ServiceAccountTokenNodeBindingValidation) {
+			nodeLister = versionedInformer.Core().V1().Nodes().Lister()
+		}
+
+		authenticatorConfig.ServiceAccountTokenGetter = serviceaccountcontroller.NewGetterFromClient(
+			extclient,
+			versionedInformer.Core().V1().Secrets().Lister(),
+			versionedInformer.Core().V1().ServiceAccounts().Lister(),
+			versionedInformer.Core().V1().Pods().Lister(),
+			nodeLister,
+		)
+	}
 	authenticatorConfig.SecretsWriter = extclient.CoreV1()
 
-	authenticatorConfig.BootstrapTokenAuthenticator = bootstrap.NewTokenAuthenticator(
-		versionedInformer.Core().V1().Secrets().Lister().Secrets(metav1.NamespaceSystem),
-	)
+	if authenticatorConfig.BootstrapToken {
+		authenticatorConfig.BootstrapTokenAuthenticator = bootstrap.NewTokenAuthenticator(
+			versionedInformer.Core().V1().Secrets().Lister().Secrets(metav1.NamespaceSystem),
+		)
+	}
 
 	if egressSelector != nil {
 		egressDialer, err := egressSelector.Lookup(egressselector.ControlPlane.AsNetworkContext())
@@ -497,14 +717,87 @@ func (o *BuiltInAuthenticationOptions) ApplyTo(authInfo *genericapiserver.Authen
 		authenticatorConfig.CustomDial = egressDialer
 	}
 
-	authInfo.Authenticator, openAPIConfig.SecurityDefinitions, err = authenticatorConfig.New()
-	if openAPIV3Config != nil {
-		openAPIV3Config.SecurityDefinitions = openAPIConfig.SecurityDefinitions
-	}
+	// var openAPIV3SecuritySchemes spec3.SecuritySchemes
+	authenticator, updateAuthenticationConfig, openAPIV2SecurityDefinitions, openAPIV3SecuritySchemes, err := authenticatorConfig.New(ctx)
 	if err != nil {
 		return err
 	}
+	authInfo.Authenticator = authenticator
 
+	if len(o.AuthenticationConfigFile) > 0 {
+		authenticationconfigmetrics.RegisterMetrics()
+		trackedAuthenticationConfigData := authenticatorConfig.AuthenticationConfigData
+		var mu sync.Mutex
+
+		// ensure anonymous config doesn't change on reload
+		originalFileAnonymousConfig := authenticatorConfig.AuthenticationConfig.DeepCopy().Anonymous
+
+		go filesystem.WatchUntil(
+			ctx,
+			time.Minute,
+			o.AuthenticationConfigFile,
+			func() {
+				// TODO collapse onto shared logic with DynamicEncryptionConfigContent controller
+
+				mu.Lock()
+				defer mu.Unlock()
+
+				authConfigBytes, err := os.ReadFile(o.AuthenticationConfigFile)
+				if err != nil {
+					klog.ErrorS(err, "failed to read authentication config file")
+					authenticationconfigmetrics.RecordAuthenticationConfigAutomaticReloadFailure(apiServerID)
+					// we do not update the tracker here because this error could eventually resolve as we keep retrying
+					return
+				}
+
+				authConfigData := string(authConfigBytes)
+
+				if authConfigData == trackedAuthenticationConfigData {
+					return
+				}
+
+				authConfig, err := loadAuthenticationConfigFromData(authConfigBytes)
+				if err != nil {
+					klog.ErrorS(err, "failed to load authentication config")
+					authenticationconfigmetrics.RecordAuthenticationConfigAutomaticReloadFailure(apiServerID)
+					// this config is not structurally valid and never will be, update the tracker so we stop retrying
+					trackedAuthenticationConfigData = authConfigData
+					return
+				}
+
+				validationErrs := apiservervalidation.ValidateAuthenticationConfiguration(authenticationcel.NewDefaultCompiler(), authConfig, authenticatorConfig.ServiceAccountIssuers)
+				if !reflect.DeepEqual(originalFileAnonymousConfig, authConfig.Anonymous) {
+					validationErrs = append(validationErrs, field.Forbidden(field.NewPath("anonymous"), "changed from initial configuration file"))
+				}
+				if err := validationErrs.ToAggregate(); err != nil {
+					klog.ErrorS(err, "failed to validate authentication config")
+					authenticationconfigmetrics.RecordAuthenticationConfigAutomaticReloadFailure(apiServerID)
+					// this config is not semantically valid and never will be, update the tracker so we stop retrying
+					trackedAuthenticationConfigData = authConfigData
+					return
+				}
+
+				timeoutCtx, timeoutCancel := context.WithTimeout(ctx, UpdateAuthenticationConfigTimeout)
+				defer timeoutCancel()
+				if err := updateAuthenticationConfig(timeoutCtx, authConfig); err != nil {
+					klog.ErrorS(err, "failed to update authentication config")
+					authenticationconfigmetrics.RecordAuthenticationConfigAutomaticReloadFailure(apiServerID)
+					// we do not update the tracker here because this error could eventually resolve as we keep retrying
+					return
+				}
+
+				trackedAuthenticationConfigData = authConfigData
+				klog.InfoS("reloaded authentication config")
+				authenticationconfigmetrics.RecordAuthenticationConfigAutomaticReloadSuccess(apiServerID)
+			},
+			func(err error) { klog.ErrorS(err, "watching authentication config file") },
+		)
+	}
+
+	openAPIConfig.SecurityDefinitions = openAPIV2SecurityDefinitions
+	if openAPIV3Config != nil {
+		openAPIV3Config.SecuritySchemes = openAPIV3SecuritySchemes
+	}
 	return nil
 }
 
@@ -520,4 +813,80 @@ func (o *BuiltInAuthenticationOptions) ApplyAuthorization(authorization *BuiltIn
 		klog.Warningf("AnonymousAuth is not allowed with the AlwaysAllow authorizer. Resetting AnonymousAuth to false. You should use a different authorizer")
 		o.Anonymous.Allow = false
 	}
+}
+
+func trackProvidedFlag(fs *pflag.FlagSet, flagName string, provided *bool) {
+	f := fs.Lookup(flagName)
+	f.Value = cliflag.NewTracker(f.Value, provided)
+}
+
+func (o *BuiltInAuthenticationOptions) validateOIDCOptions() []error {
+	var allErrors []error
+
+	// Existing validation when jwt authenticator is configured with oidc-* flags
+	if len(o.AuthenticationConfigFile) == 0 {
+		if o.OIDC != nil && o.OIDC.FlagsSet && (len(o.OIDC.IssuerURL) == 0 || len(o.OIDC.ClientID) == 0) {
+			allErrors = append(allErrors, fmt.Errorf("oidc-issuer-url and oidc-client-id must be specified together when any oidc-* flags are set"))
+		}
+
+		return allErrors
+	}
+
+	// New validation when authentication config file is provided
+
+	// Authentication config file is only supported when the StructuredAuthenticationConfiguration feature is enabled
+	if !utilfeature.DefaultFeatureGate.Enabled(genericfeatures.StructuredAuthenticationConfiguration) {
+		allErrors = append(allErrors, fmt.Errorf("set --feature-gates=%s=true to use authentication-config file", genericfeatures.StructuredAuthenticationConfiguration))
+	}
+
+	// Authentication config file and oidc-* flags are mutually exclusive
+	if o.OIDC != nil && o.OIDC.FlagsSet {
+		allErrors = append(allErrors, fmt.Errorf("authentication-config file and oidc-* flags are mutually exclusive"))
+	}
+
+	return allErrors
+}
+
+var (
+	cfgScheme = runtime.NewScheme()
+	codecs    = serializer.NewCodecFactory(cfgScheme, serializer.EnableStrict)
+)
+
+func init() {
+	install.Install(cfgScheme)
+}
+
+// loadAuthenticationConfig parses the authentication configuration from the given file and returns it and the file's contents.
+func loadAuthenticationConfig(configFilePath string) (*apiserver.AuthenticationConfiguration, string, error) {
+	data, err := os.ReadFile(configFilePath)
+	if err != nil {
+		return nil, "", err
+	}
+
+	configuration, err := loadAuthenticationConfigFromData(data)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return configuration, string(data), nil
+}
+
+func loadAuthenticationConfigFromData(data []byte) (*apiserver.AuthenticationConfiguration, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty config data")
+	}
+
+	decodedObj, err := runtime.Decode(codecs.UniversalDecoder(), data)
+	if err != nil {
+		return nil, err
+	}
+	configuration, ok := decodedObj.(*apiserver.AuthenticationConfiguration)
+	if !ok {
+		return nil, fmt.Errorf("expected AuthenticationConfiguration, got %T", decodedObj)
+	}
+	if configuration == nil { // sanity check, this should never happen but check just in case since we rely on it
+		return nil, fmt.Errorf("expected non-nil AuthenticationConfiguration")
+	}
+
+	return configuration, nil
 }

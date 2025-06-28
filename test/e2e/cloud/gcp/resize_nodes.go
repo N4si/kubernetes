@@ -23,6 +23,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/common"
 	"k8s.io/kubernetes/test/e2e/framework"
@@ -44,10 +45,10 @@ func resizeRC(ctx context.Context, c clientset.Interface, ns, name string, repli
 	return err
 }
 
-var _ = SIGDescribe("Nodes [Disruptive]", func() {
+var _ = SIGDescribe("Nodes", framework.WithDisruptive(), func() {
 	f := framework.NewDefaultFramework("resize-nodes")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
-	var systemPodsNo int32
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
+	var systemPodsNo int
 	var c clientset.Interface
 	var ns string
 	var group string
@@ -57,7 +58,7 @@ var _ = SIGDescribe("Nodes [Disruptive]", func() {
 		ns = f.Namespace.Name
 		systemPods, err := e2epod.GetPodsInNamespace(ctx, c, ns, map[string]string{})
 		framework.ExpectNoError(err)
-		systemPodsNo = int32(len(systemPods))
+		systemPodsNo = len(systemPods)
 		if strings.Contains(framework.TestContext.CloudConfig.NodeInstanceGroup, ",") {
 			framework.Failf("Test dose not support cluster setup with more than one MIG: %s", framework.TestContext.CloudConfig.NodeInstanceGroup)
 		} else {
@@ -66,29 +67,18 @@ var _ = SIGDescribe("Nodes [Disruptive]", func() {
 	})
 
 	// Slow issue #13323 (8 min)
-	ginkgo.Describe("Resize [Slow]", func() {
+	f.Describe("Resize", framework.WithSlow(), func() {
 		var originalNodeCount int32
 
 		ginkgo.BeforeEach(func() {
-			e2eskipper.SkipUnlessProviderIs("gce", "gke", "aws")
+			e2eskipper.SkipUnlessProviderIs("gce")
 			e2eskipper.SkipUnlessNodeCountIsAtLeast(2)
 			ginkgo.DeferCleanup(func(ctx context.Context) {
 				ginkgo.By("restoring the original node instance group size")
 				if err := framework.ResizeGroup(group, int32(framework.TestContext.CloudConfig.NumNodes)); err != nil {
 					framework.Failf("Couldn't restore the original node instance group size: %v", err)
 				}
-				// In GKE, our current tunneling setup has the potential to hold on to a broken tunnel (from a
-				// rebooted/deleted node) for up to 5 minutes before all tunnels are dropped and recreated.
-				// Most tests make use of some proxy feature to verify functionality. So, if a reboot test runs
-				// right before a test that tries to get logs, for example, we may get unlucky and try to use a
-				// closed tunnel to a node that was recently rebooted. There's no good way to framework.Poll for proxies
-				// being closed, so we sleep.
-				//
-				// TODO(cjcullen) reduce this sleep (#19314)
-				if framework.ProviderIs("gke") {
-					ginkgo.By("waiting 5 minutes for all dead tunnels to be dropped")
-					time.Sleep(5 * time.Minute)
-				}
+
 				if err := framework.WaitForGroupSize(group, int32(framework.TestContext.CloudConfig.NumNodes)); err != nil {
 					framework.Failf("Couldn't restore the original node instance group size: %v", err)
 				}
@@ -99,7 +89,7 @@ var _ = SIGDescribe("Nodes [Disruptive]", func() {
 				// Many e2e tests assume that the cluster is fully healthy before they start.  Wait until
 				// the cluster is restored to health.
 				ginkgo.By("waiting for system pods to successfully restart")
-				err := e2epod.WaitForPodsRunningReady(ctx, c, metav1.NamespaceSystem, systemPodsNo, 0, framework.PodReadyBeforeTimeout)
+				err := e2epod.WaitForPodsRunningReady(ctx, c, metav1.NamespaceSystem, systemPodsNo, framework.PodReadyBeforeTimeout)
 				framework.ExpectNoError(err)
 			})
 		})
@@ -108,11 +98,14 @@ var _ = SIGDescribe("Nodes [Disruptive]", func() {
 			// Create a replication controller for a service that serves its hostname.
 			// The source for the Docker container kubernetes/serve_hostname is in contrib/for-demos/serve_hostname
 			name := "my-hostname-delete-node"
+			rcLabels := map[string]string{"name": name}
 			numNodes, err := e2enode.TotalRegistered(ctx, c)
 			framework.ExpectNoError(err)
 			originalNodeCount = int32(numNodes)
-			common.NewRCByName(c, ns, name, originalNodeCount, nil, nil)
-			err = e2epod.VerifyPods(ctx, c, ns, name, true, originalNodeCount)
+			_, err = common.NewRCByName(c, ns, name, originalNodeCount, nil, nil, rcLabels)
+			framework.ExpectNoError(err)
+
+			err = e2epod.VerifyPods(ctx, c, ns, name, labels.SelectorFromSet(rcLabels), true, originalNodeCount)
 			framework.ExpectNoError(err)
 
 			targetNumNodes := int32(framework.TestContext.CloudConfig.NumNodes - 1)
@@ -129,7 +122,7 @@ var _ = SIGDescribe("Nodes [Disruptive]", func() {
 			time.Sleep(f.Timeouts.PodStartShort)
 
 			ginkgo.By("verifying whether the pods from the removed node are recreated")
-			err = e2epod.VerifyPods(ctx, c, ns, name, true, originalNodeCount)
+			err = e2epod.VerifyPods(ctx, c, ns, name, labels.SelectorFromSet(rcLabels), true, originalNodeCount)
 			framework.ExpectNoError(err)
 		})
 
@@ -138,12 +131,17 @@ var _ = SIGDescribe("Nodes [Disruptive]", func() {
 			// Create a replication controller for a service that serves its hostname.
 			// The source for the Docker container kubernetes/serve_hostname is in contrib/for-demos/serve_hostname
 			name := "my-hostname-add-node"
-			common.NewSVCByName(c, ns, name)
+			rcLabels := map[string]string{"name": name}
+			err := common.NewSVCByName(c, ns, name, rcLabels)
+			framework.ExpectNoError(err)
+
 			numNodes, err := e2enode.TotalRegistered(ctx, c)
 			framework.ExpectNoError(err)
 			originalNodeCount = int32(numNodes)
-			common.NewRCByName(c, ns, name, originalNodeCount, nil, nil)
-			err = e2epod.VerifyPods(ctx, c, ns, name, true, originalNodeCount)
+			_, err = common.NewRCByName(c, ns, name, originalNodeCount, nil, nil, rcLabels)
+			framework.ExpectNoError(err)
+
+			err = e2epod.VerifyPods(ctx, c, ns, name, labels.SelectorFromSet(rcLabels), true, originalNodeCount)
 			framework.ExpectNoError(err)
 
 			targetNumNodes := int32(framework.TestContext.CloudConfig.NumNodes + 1)
@@ -158,7 +156,7 @@ var _ = SIGDescribe("Nodes [Disruptive]", func() {
 			ginkgo.By(fmt.Sprintf("increasing size of the replication controller to %d and verifying all pods are running", originalNodeCount+1))
 			err = resizeRC(ctx, c, ns, name, originalNodeCount+1)
 			framework.ExpectNoError(err)
-			err = e2epod.VerifyPods(ctx, c, ns, name, true, originalNodeCount+1)
+			err = e2epod.VerifyPods(ctx, c, ns, name, labels.SelectorFromSet(rcLabels), true, originalNodeCount+1)
 			framework.ExpectNoError(err)
 		})
 	})

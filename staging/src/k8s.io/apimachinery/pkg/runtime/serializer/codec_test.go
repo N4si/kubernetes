@@ -33,8 +33,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/diff"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 
-	fuzz "github.com/google/gofuzz"
+	"github.com/google/go-cmp/cmp"
 	flag "github.com/spf13/pflag"
+	"sigs.k8s.io/randfill"
 	"sigs.k8s.io/yaml"
 )
 
@@ -60,9 +61,9 @@ func (testMetaFactory) Interpret(data []byte) (*schema.GroupVersionKind, error) 
 }
 
 // TestObjectFuzzer can randomly populate all the above objects.
-var TestObjectFuzzer = fuzz.New().NilChance(.5).NumElements(1, 100).Funcs(
-	func(j *runtimetesting.MyWeirdCustomEmbeddedVersionKindField, c fuzz.Continue) {
-		c.FuzzNoCustom(j)
+var TestObjectFuzzer = randfill.New().NilChance(.5).NumElements(1, 100).Funcs(
+	func(j *runtimetesting.MyWeirdCustomEmbeddedVersionKindField, c randfill.Continue) {
+		c.FillNoCustom(j)
 		j.APIVersion = ""
 		j.ObjectKind = ""
 	},
@@ -105,7 +106,7 @@ var semantic = conversion.EqualitiesOrDie(
 
 func runTest(t *testing.T, source interface{}) {
 	name := reflect.TypeOf(source).Elem().Name()
-	TestObjectFuzzer.Fuzz(source)
+	TestObjectFuzzer.Fill(source)
 
 	_, codec := GetTestScheme()
 	data, err := runtime.Encode(codec, source.(runtime.Object))
@@ -128,7 +129,7 @@ func runTest(t *testing.T, source interface{}) {
 		return
 	}
 	if !semantic.DeepEqual(source, obj3) {
-		t.Errorf("3: %v: diff: %v", name, diff.ObjectDiff(source, obj3))
+		t.Errorf("3: %v: diff: %v", name, cmp.Diff(source, obj3))
 		return
 	}
 }

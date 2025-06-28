@@ -22,9 +22,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 func phaseBuilder(name string, phases ...Phase) Phase {
@@ -401,14 +402,8 @@ func TestBindToCommandArgRequirements(t *testing.T) {
 					continue
 				}
 
-				// Ensure it is the expected function
-				if reflect.ValueOf(cCmd.Args).Pointer() != reflect.ValueOf(args.args).Pointer() {
-					t.Error("The function pointers where not equal.")
-				}
-
 				// Test passing argument set
 				err := cCmd.Args(cCmd, args.pass)
-
 				if err != nil {
 					t.Errorf("command %s should validate the args: %v\n %v", cCmd.Name(), args.pass, err)
 				}

@@ -31,13 +31,11 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
-	genericfeatures "k8s.io/apiserver/pkg/features"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	clientset "k8s.io/client-go/kubernetes"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/kubernetes/cmd/kube-apiserver/app/options"
 	"k8s.io/kubernetes/pkg/controlplane"
 	"k8s.io/kubernetes/test/integration/framework"
+	"k8s.io/kubernetes/test/utils/ktesting"
 )
 
 const (
@@ -147,10 +145,8 @@ func (d *noxuDelayingAuthorizer) Authorize(ctx context.Context, a authorizer.Att
 // Secondarily, this test also checks the observed seat utilizations against values derived from expecting that
 // the throughput observed by the client equals the execution throughput observed by the server.
 func TestConcurrencyIsolation(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, genericfeatures.APIPriorityAndFairness, true)()
-	// NOTE: disabling the feature should fail the test
-
-	_, kubeConfig, closeFn := framework.StartTestServer(t, framework.TestServerSetup{
+	tCtx := ktesting.Init(t)
+	_, kubeConfig, closeFn := framework.StartTestServer(tCtx, t, framework.TestServerSetup{
 		ModifyServerRunOptions: func(opts *options.ServerRunOptions) {
 			// Ensure all clients are allowed to send requests.
 			opts.Authorization.Modes = []string{"AlwaysAllow"}
@@ -159,7 +155,7 @@ func TestConcurrencyIsolation(t *testing.T) {
 		},
 		ModifyServerConfig: func(config *controlplane.Config) {
 			// Wrap default authorizer with one that delays requests from noxu clients
-			config.GenericConfig.Authorization.Authorizer = &noxuDelayingAuthorizer{config.GenericConfig.Authorization.Authorizer}
+			config.ControlPlane.Generic.Authorization.Authorizer = &noxuDelayingAuthorizer{config.ControlPlane.Generic.Authorization.Authorizer}
 		},
 	})
 	defer closeFn()
@@ -191,7 +187,7 @@ func TestConcurrencyIsolation(t *testing.T) {
 	wg.Add(noxu1NumGoroutines)
 	streamRequests(noxu1NumGoroutines, func() {
 		start := time.Now()
-		_, err := noxu1Client.CoreV1().Namespaces().Get(context.Background(), "default", metav1.GetOptions{})
+		_, err := noxu1Client.CoreV1().Namespaces().Get(tCtx, "default", metav1.GetOptions{})
 		duration := time.Since(start).Seconds()
 		noxu1LatMeasure.update(duration)
 		if err != nil {
@@ -204,7 +200,7 @@ func TestConcurrencyIsolation(t *testing.T) {
 	wg.Add(noxu2NumGoroutines)
 	streamRequests(noxu2NumGoroutines, func() {
 		start := time.Now()
-		_, err := noxu2Client.CoreV1().Namespaces().Get(context.Background(), "default", metav1.GetOptions{})
+		_, err := noxu2Client.CoreV1().Namespaces().Get(tCtx, "default", metav1.GetOptions{})
 		duration := time.Since(start).Seconds()
 		noxu2LatMeasure.update(duration)
 		if err != nil {
@@ -284,9 +280,9 @@ func TestConcurrencyIsolation(t *testing.T) {
 	// standard deviation divided by mean, for a class of traffic is a characterization of all the noise that applied to
 	// that class. We found that noxu1 generally had a much bigger CV than noxu2. This makes sense, because noxu1 probes
 	// more behavior --- the waiting in queues. So we take the minimum of the two as an indicator of the relative amount
-	// of noise that comes from all the other behavior. Currently, we use 2 times the experienced coefficient of variation
+	// of noise that comes from all the other behavior. Currently, we use 3 times the experienced coefficient of variation
 	// as the margin of error.
-	margin := 2 * math.Min(noxu1LatStats.cv, noxu2LatStats.cv)
+	margin := 3 * math.Min(noxu1LatStats.cv, noxu2LatStats.cv)
 	t.Logf("Error margin is %v", margin)
 
 	isConcurrencyExpected := func(name string, observed float64, expected float64) bool {
@@ -318,7 +314,7 @@ func getRequestMetricsSnapshot(c clientset.Interface) (metricSnapshot, error) {
 		return nil, err
 	}
 
-	dec := expfmt.NewDecoder(strings.NewReader(string(resp)), expfmt.FmtText)
+	dec := expfmt.NewDecoder(strings.NewReader(string(resp)), expfmt.NewFormat(expfmt.TypeTextPlain))
 	decoder := expfmt.SampleDecoder{
 		Dec:  dec,
 		Opts: &expfmt.DecodeOptions{},

@@ -6,18 +6,12 @@ options:
 approvers:
   - release-engineering-approvers
   - release-managers
-  - AuraSinis # 1.24 Release Notes Lead
-  - cici37 # 1.23 Release Notes Lead
-  - csantanapr # 1.25 Release Notes Lead
-  - harshanarayana # 1.27 Release Notes Lead
-  - ramrodo # 1.26 Release Notes Lead
+  - release-team-subproject-leads
+  - satyampsoni # 1.32 Release Notes Lead
 reviewers:
   - release-managers
-  - AnaMMedina21 # 1.27 Release Notes Shadow
-  - harshanarayana # 1.27 Release Notes Lead
-  - rjsadow # 1.27 Release Notes Shadow
-  - sanchita-07 # 1.27 Release Notes Shadow
-  - yrs147 # 1.27 Release Notes Shadow
+  - release-team-subproject-leads
+  - satyampsoni # 1.32 Release Notes Lead
 labels:
   - sig/release
   - area/release-eng

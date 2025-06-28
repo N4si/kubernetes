@@ -22,9 +22,6 @@ import (
 
 // NodeLifecycleControllerConfiguration contains elements describing NodeLifecycleController.
 type NodeLifecycleControllerConfiguration struct {
-	// If set to true enables NoExecute Taints and will evict all not-tolerating
-	// Pod running on Nodes tainted with this kind of Taints.
-	EnableTaintManager bool
 	// nodeEvictionRate is the number of nodes per second on which pods are deleted in case of node failure when a zone is healthy
 	NodeEvictionRate float32
 	// secondaryNodeEvictionRate is the number of nodes per second on which pods are deleted in case of node failure when a zone is unhealthy
@@ -35,10 +32,9 @@ type NodeLifecycleControllerConfiguration struct {
 	// NodeMonitorGracePeriod is the amount of time which we allow a running node to be
 	// unresponsive before marking it unhealthy. Must be N times more than kubelet's
 	// nodeStatusUpdateFrequency, where N means number of retries allowed for kubelet
-	// to post node status.
+	// to post node status. This value should also be greater than the sum of
+	// HTTP2_PING_TIMEOUT_SECONDS and HTTP2_READ_IDLE_TIMEOUT_SECONDS.
 	NodeMonitorGracePeriod metav1.Duration
-	// podEvictionTimeout is the grace period for deleting pods on failed nodes.
-	PodEvictionTimeout metav1.Duration
 	// secondaryNodeEvictionRate is implicitly overridden to 0 for clusters smaller than or equal to largeClusterSizeThreshold
 	LargeClusterSizeThreshold int32
 	// Zone is treated as unhealthy in nodeEvictionRate and secondaryNodeEvictionRate when at least

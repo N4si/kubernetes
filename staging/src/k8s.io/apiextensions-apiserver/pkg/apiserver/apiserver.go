@@ -17,6 +17,7 @@ limitations under the License.
 package apiserver
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -25,7 +26,6 @@ import (
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/install"
 	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
-	"k8s.io/apiextensions-apiserver/pkg/apiserver/conversion"
 	"k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	externalinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
 	"k8s.io/apiextensions-apiserver/pkg/controller/apiapproval"
@@ -41,14 +41,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/apiserver/pkg/endpoints/discovery"
-	"k8s.io/apiserver/pkg/features"
+	"k8s.io/apiserver/pkg/endpoints/discovery/aggregated"
 	genericregistry "k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/rest"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	serverstorage "k8s.io/apiserver/pkg/server/storage"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/apiserver/pkg/util/webhook"
+	"k8s.io/klog/v2"
 )
 
 var (
@@ -83,8 +83,10 @@ type ExtraConfig struct {
 	// the CRD Establishing will be hold by 5 seconds.
 	MasterCount int
 
-	// ConversionFactory is used to provider converters for CRs.
-	ConversionFactory conversion.Factory
+	// ServiceResolver is used in CR webhook converters to resolve webhook's service names
+	ServiceResolver webhook.ServiceResolver
+	// AuthResolverWrapper is used in CR webhook converters
+	AuthResolverWrapper webhook.AuthenticationInfoResolverWrapper
 }
 
 type Config struct {
@@ -117,12 +119,6 @@ func (cfg *Config) Complete() CompletedConfig {
 	}
 
 	c.GenericConfig.EnableDiscovery = false
-	if c.GenericConfig.Version == nil {
-		c.GenericConfig.Version = &version.Info{
-			Major: "0",
-			Minor: "1",
-		}
-	}
 
 	return CompletedConfig{&c}
 }
@@ -195,7 +191,8 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 		c.ExtraConfig.CRDRESTOptionsGetter,
 		c.GenericConfig.AdmissionControl,
 		establishingController,
-		c.ExtraConfig.ConversionFactory,
+		c.ExtraConfig.ServiceResolver,
+		c.ExtraConfig.AuthResolverWrapper,
 		c.ExtraConfig.MasterCount,
 		s.GenericAPIServer.Authorizer,
 		c.GenericConfig.RequestTimeout,
@@ -210,8 +207,12 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 	s.GenericAPIServer.Handler.NonGoRestfulMux.HandlePrefix("/apis/", crdHandler)
 	s.GenericAPIServer.RegisterDestroyFunc(crdHandler.destroy)
 
-	discoveryController := NewDiscoveryController(s.Informers.Apiextensions().V1().CustomResourceDefinitions(), versionDiscoveryHandler, groupDiscoveryHandler, genericServer.AggregatedDiscoveryGroupManager)
-	namingController := status.NewNamingConditionController(s.Informers.Apiextensions().V1().CustomResourceDefinitions(), crdClient.ApiextensionsV1())
+	aggregatedDiscoveryManager := genericServer.AggregatedDiscoveryGroupManager
+	if aggregatedDiscoveryManager != nil {
+		aggregatedDiscoveryManager = aggregatedDiscoveryManager.WithSource(aggregated.CRDSource)
+	}
+	discoveryController := NewDiscoveryController(s.Informers.Apiextensions().V1().CustomResourceDefinitions(), versionDiscoveryHandler, groupDiscoveryHandler, aggregatedDiscoveryManager)
+	namingController := status.NewNamingConditionController(klog.TODO() /* for contextual logging */, s.Informers.Apiextensions().V1().CustomResourceDefinitions(), crdClient.ApiextensionsV1())
 	nonStructuralSchemaController := nonstructuralschema.NewConditionController(s.Informers.Apiextensions().V1().CustomResourceDefinitions(), crdClient.ApiextensionsV1())
 	apiApprovalController := apiapproval.NewKubernetesAPIApprovalPolicyConformantConditionController(s.Informers.Apiextensions().V1().CustomResourceDefinitions(), crdClient.ApiextensionsV1())
 	finalizingController := finalizer.NewCRDFinalizer(
@@ -220,11 +221,11 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 		crdHandler,
 	)
 
-	s.GenericAPIServer.AddPostStartHookOrDie("start-apiextensions-informers", func(context genericapiserver.PostStartHookContext) error {
-		s.Informers.Start(context.StopCh)
+	s.GenericAPIServer.AddPostStartHookOrDie("start-apiextensions-informers", func(hookContext genericapiserver.PostStartHookContext) error {
+		s.Informers.Start(hookContext.Done())
 		return nil
 	})
-	s.GenericAPIServer.AddPostStartHookOrDie("start-apiextensions-controllers", func(context genericapiserver.PostStartHookContext) error {
+	s.GenericAPIServer.AddPostStartHookOrDie("start-apiextensions-controllers", func(hookContext genericapiserver.PostStartHookContext) error {
 		// OpenAPIVersionedService and StaticOpenAPISpec are populated in generic apiserver PrepareRun().
 		// Together they serve the /openapi/v2 endpoint on a generic apiserver. A generic apiserver may
 		// choose to not enable OpenAPI by having null openAPIConfig, and thus OpenAPIVersionedService
@@ -232,25 +233,25 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 		if s.GenericAPIServer.StaticOpenAPISpec != nil {
 			if s.GenericAPIServer.OpenAPIVersionedService != nil {
 				openapiController := openapicontroller.NewController(s.Informers.Apiextensions().V1().CustomResourceDefinitions())
-				go openapiController.Run(s.GenericAPIServer.StaticOpenAPISpec, s.GenericAPIServer.OpenAPIVersionedService, context.StopCh)
+				go openapiController.Run(s.GenericAPIServer.StaticOpenAPISpec, s.GenericAPIServer.OpenAPIVersionedService, hookContext.Done())
 			}
 
-			if s.GenericAPIServer.OpenAPIV3VersionedService != nil && utilfeature.DefaultFeatureGate.Enabled(features.OpenAPIV3) {
+			if s.GenericAPIServer.OpenAPIV3VersionedService != nil {
 				openapiv3Controller := openapiv3controller.NewController(s.Informers.Apiextensions().V1().CustomResourceDefinitions())
-				go openapiv3Controller.Run(s.GenericAPIServer.OpenAPIV3VersionedService, context.StopCh)
+				go openapiv3Controller.Run(s.GenericAPIServer.OpenAPIV3VersionedService, hookContext.Done())
 			}
 		}
 
-		go namingController.Run(context.StopCh)
-		go establishingController.Run(context.StopCh)
-		go nonStructuralSchemaController.Run(5, context.StopCh)
-		go apiApprovalController.Run(5, context.StopCh)
-		go finalizingController.Run(5, context.StopCh)
+		go namingController.Run(hookContext.Done())
+		go establishingController.Run(hookContext.Done())
+		go nonStructuralSchemaController.Run(5, hookContext.Done())
+		go apiApprovalController.Run(5, hookContext.Done())
+		go finalizingController.Run(5, hookContext.Done())
 
 		discoverySyncedCh := make(chan struct{})
-		go discoveryController.Run(context.StopCh, discoverySyncedCh)
+		go discoveryController.Run(hookContext.Done(), discoverySyncedCh)
 		select {
-		case <-context.StopCh:
+		case <-hookContext.Done():
 		case <-discoverySyncedCh:
 		}
 
@@ -259,14 +260,14 @@ func (c completedConfig) New(delegationTarget genericapiserver.DelegationTarget)
 	// we don't want to report healthy until we can handle all CRDs that have already been registered.  Waiting for the informer
 	// to sync makes sure that the lister will be valid before we begin.  There may still be races for CRDs added after startup,
 	// but we won't go healthy until we can handle the ones already present.
-	s.GenericAPIServer.AddPostStartHookOrDie("crd-informer-synced", func(context genericapiserver.PostStartHookContext) error {
-		return wait.PollImmediateUntil(100*time.Millisecond, func() (bool, error) {
+	s.GenericAPIServer.AddPostStartHookOrDie("crd-informer-synced", func(ctx genericapiserver.PostStartHookContext) error {
+		return wait.PollUntilContextCancel(ctx.Context, 100*time.Millisecond, true, func(ctx context.Context) (bool, error) {
 			if s.Informers.Apiextensions().V1().CustomResourceDefinitions().Informer().HasSynced() {
 				close(hasCRDInformerSyncedSignal)
 				return true, nil
 			}
 			return false, nil
-		}, context.StopCh)
+		})
 	})
 
 	return s, nil

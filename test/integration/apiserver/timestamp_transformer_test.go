@@ -29,12 +29,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/apimachinery/pkg/util/managedfields"
 	"k8s.io/apiserver/pkg/endpoints/handlers/fieldmanager"
 	k8stest "k8s.io/kubernetes/pkg/api/testing"
 )
 
 func convertToUnstructured(b *testing.B, obj runtime.Object) runtime.Object {
-	converter := fieldmanager.NewDeducedTypeConverter()
+	converter := managedfields.NewDeducedTypeConverter()
 	typed, err := converter.ObjectToTyped(obj)
 	require.NoError(b, err)
 	res, err := converter.TypedToObject(typed)
@@ -58,11 +59,11 @@ func doBench(b *testing.B, useUnstructured bool, shortCircuit bool) {
 
 	fuzzer.MaxDepth(1000).NilChance(0.2).NumElements(2, 15)
 	pod := &v1.Pod{}
-	fuzzer.Fuzz(pod)
+	fuzzer.Fill(pod)
 
 	fuzzer.NilChance(0.2).NumElements(10, 100).MaxDepth(10)
 	deployment := &v1.Endpoints{}
-	fuzzer.Fuzz(deployment)
+	fuzzer.Fill(deployment)
 
 	bts, err := json.Marshal(deployment)
 	require.NoError(b, err)

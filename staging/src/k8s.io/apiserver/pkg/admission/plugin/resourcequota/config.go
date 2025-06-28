@@ -19,7 +19,6 @@ package resourcequota
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -30,7 +29,7 @@ import (
 
 var (
 	scheme = runtime.NewScheme()
-	codecs = serializer.NewCodecFactory(scheme)
+	codecs = serializer.NewCodecFactory(scheme, serializer.EnableStrict)
 )
 
 func init() {
@@ -50,7 +49,7 @@ func LoadConfiguration(config io.Reader) (*resourcequotaapi.Configuration, error
 		return internalConfig, nil
 	}
 	// we have a config so parse it.
-	data, err := ioutil.ReadAll(config)
+	data, err := io.ReadAll(config)
 	if err != nil {
 		return nil, err
 	}

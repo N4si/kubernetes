@@ -20,14 +20,14 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/pkg/errors"
-
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
-	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases/workflow"
 	cmdutil "k8s.io/kubernetes/cmd/kubeadm/app/cmd/util"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	"k8s.io/kubernetes/cmd/kubeadm/app/features"
 	kubeconfigphase "k8s.io/kubernetes/cmd/kubeadm/app/phases/kubeconfig"
+	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
+	"k8s.io/kubernetes/cmd/kubeadm/app/util/errors"
 )
 
 var (
@@ -40,6 +40,11 @@ var (
 			name:  "admin",
 			short: "Generate a kubeconfig file for the admin to use and for kubeadm itself",
 			long:  "Generate the kubeconfig file for the admin and for kubeadm itself, and save it to %s file.",
+		},
+		kubeadmconstants.SuperAdminKubeConfigFileName: {
+			name:  "super-admin",
+			short: "Generate a kubeconfig file for the super-admin",
+			long:  "Generate a kubeconfig file for the super-admin, and save it to %s file.",
 		},
 		kubeadmconstants.KubeletKubeConfigFileName: {
 			name:  "kubelet",
@@ -68,7 +73,6 @@ func NewKubeConfigPhase() workflow.Phase {
 	return workflow.Phase{
 		Name:  "kubeconfig",
 		Short: "Generate all kubeconfig files necessary to establish the control plane and the admin kubeconfig file",
-		Long:  cmdutil.MacroCommandLongDescription,
 		Phases: []workflow.Phase{
 			{
 				Name:           "all",
@@ -77,6 +81,7 @@ func NewKubeConfigPhase() workflow.Phase {
 				RunAllSiblings: true,
 			},
 			NewKubeConfigFilePhase(kubeadmconstants.AdminKubeConfigFileName),
+			NewKubeConfigFilePhase(kubeadmconstants.SuperAdminKubeConfigFileName),
 			NewKubeConfigFilePhase(kubeadmconstants.KubeletKubeConfigFileName),
 			NewKubeConfigFilePhase(kubeadmconstants.ControllerManagerKubeConfigFileName),
 			NewKubeConfigFilePhase(kubeadmconstants.SchedulerKubeConfigFileName),
@@ -138,7 +143,7 @@ func runKubeConfigFile(kubeConfigFileName string) func(workflow.RunData) error {
 			fmt.Printf("[kubeconfig] External CA mode: Using user provided %s\n", kubeConfigFileName)
 			// If using an external CA while dryrun, copy kubeconfig files to dryrun dir for later use
 			if data.DryRun() {
-				err := phases.CopyFile(filepath.Join(kubeadmconstants.KubernetesDir, kubeConfigFileName), filepath.Join(data.KubeConfigDir(), kubeConfigFileName))
+				err := kubeadmutil.CopyFile(filepath.Join(kubeadmconstants.KubernetesDir, kubeConfigFileName), filepath.Join(data.KubeConfigDir(), kubeConfigFileName))
 				if err != nil {
 					return errors.Wrapf(err, "could not copy %s to dry run directory %s", kubeConfigFileName, data.KubeConfigDir())
 				}
@@ -151,7 +156,16 @@ func runKubeConfigFile(kubeConfigFileName string) func(workflow.RunData) error {
 		cfg.CertificatesDir = data.CertificateWriteDir()
 		defer func() { cfg.CertificatesDir = data.CertificateDir() }()
 
+		initConfiguration := data.Cfg().DeepCopy()
+
+		if features.Enabled(cfg.FeatureGates, features.ControlPlaneKubeletLocalMode) {
+			if kubeConfigFileName == kubeadmconstants.KubeletKubeConfigFileName {
+				// Unset the ControlPlaneEndpoint so the creation falls back to the LocalAPIEndpoint for the kubelet's kubeconfig.
+				initConfiguration.ControlPlaneEndpoint = ""
+			}
+		}
+
 		// creates the KubeConfig file (or use existing)
-		return kubeconfigphase.CreateKubeConfigFile(kubeConfigFileName, data.KubeConfigDir(), data.Cfg())
+		return kubeconfigphase.CreateKubeConfigFile(kubeConfigFileName, data.KubeConfigDir(), initConfiguration)
 	}
 }

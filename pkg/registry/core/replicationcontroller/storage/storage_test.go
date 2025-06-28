@@ -22,21 +22,24 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/diff"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/generic"
 	genericregistrytest "k8s.io/apiserver/pkg/registry/generic/testing"
 	"k8s.io/apiserver/pkg/registry/rest"
 	etcd3testing "k8s.io/apiserver/pkg/storage/etcd3/testing"
+	podtest "k8s.io/kubernetes/pkg/api/pod/testing"
 	"k8s.io/kubernetes/pkg/apis/autoscaling"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -61,7 +64,10 @@ func newStorage(t *testing.T) (ControllerStorage, *etcd3testing.EtcdTestServer) 
 
 // createController is a helper function that returns a controller with the updated resource version.
 func createController(storage *REST, rc api.ReplicationController, t *testing.T) (api.ReplicationController, error) {
-	ctx := genericapirequest.WithNamespace(genericapirequest.NewContext(), rc.Namespace)
+	ctx := genericapirequest.WithRequestInfo(
+		genericapirequest.WithNamespace(genericapirequest.NewContext(), rc.Namespace),
+		&genericapirequest.RequestInfo{APIGroup: "", APIVersion: "v1"},
+	)
 	obj, err := storage.Create(ctx, &rc, rest.ValidateAllObjectFunc, &metav1.CreateOptions{})
 	if err != nil {
 		t.Errorf("Failed to create controller, %v", err)
@@ -82,19 +88,9 @@ func validNewController() *api.ReplicationController {
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{"a": "b"},
 				},
-				Spec: api.PodSpec{
-					Containers: []api.Container{
-						{
-							Name:                     "test",
-							Image:                    "test_image",
-							ImagePullPolicy:          api.PullIfNotPresent,
-							TerminationMessagePolicy: api.TerminationMessageReadFile,
-						},
-					},
-					RestartPolicy: api.RestartPolicyAlways,
-					DNSPolicy:     api.DNSClusterFirst,
-				},
+				Spec: podtest.MakePodSpec(),
 			},
+			Replicas: ptr.To[int32](1),
 		},
 	}
 }
@@ -114,7 +110,7 @@ func TestCreate(t *testing.T) {
 		// invalid (invalid selector)
 		&api.ReplicationController{
 			Spec: api.ReplicationControllerSpec{
-				Replicas: 2,
+				Replicas: ptr.To[int32](2),
 				Selector: map[string]string{},
 				Template: validController.Spec.Template,
 			},
@@ -133,7 +129,7 @@ func TestUpdate(t *testing.T) {
 		// valid updateFunc
 		func(obj runtime.Object) runtime.Object {
 			object := obj.(*api.ReplicationController)
-			object.Spec.Replicas = object.Spec.Replicas + 1
+			object.Spec.Replicas = ptr.To[int32](*object.Spec.Replicas + 1)
 			return object
 		},
 		// invalid updateFunc
@@ -182,7 +178,7 @@ func TestGenerationNumber(t *testing.T) {
 	}
 
 	// Updates to spec should increment the generation number
-	controller.Spec.Replicas++
+	(*controller.Spec.Replicas)++
 	if _, _, err := storage.Controller.Update(ctx, controller.Name, rest.DefaultUpdatedObjectInfo(controller), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc, false, &metav1.UpdateOptions{}); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -259,7 +255,33 @@ func TestWatch(t *testing.T) {
 	)
 }
 
-//TODO TestUpdateStatus
+func TestUpdateStatus(t *testing.T) {
+	storage, server := newStorage(t)
+	defer server.Terminate(t)
+	defer storage.Controller.Store.Destroy()
+
+	ctx := genericapirequest.WithNamespace(genericapirequest.NewContext(), namespace)
+	rcStart, err := createController(storage.Controller, *validController, t)
+	if err != nil {
+		t.Fatalf("error setting new replication controller %v: %v", *validController, err)
+	}
+
+	rc := rcStart.DeepCopy()
+	rc.Status.Replicas++
+	_, _, err = storage.Status.Update(ctx, rc.Name, rest.DefaultUpdatedObjectInfo(rc), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc, false, &metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	obj, err := storage.Status.Get(ctx, rc.Name, &metav1.GetOptions{})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	rcGot := obj.(*api.ReplicationController)
+	// only compare relevant changes b/c of difference in metadata
+	if !apiequality.Semantic.DeepEqual(rc.Status, rcGot.Status) {
+		t.Errorf("unexpected object: %s", cmp.Diff(rc.Status, rcGot.Status))
+	}
+}
 
 func TestScaleGet(t *testing.T) {
 	storage, server := newStorage(t)
@@ -281,7 +303,7 @@ func TestScaleGet(t *testing.T) {
 			CreationTimestamp: rc.CreationTimestamp,
 		},
 		Spec: autoscaling.ScaleSpec{
-			Replicas: validController.Spec.Replicas,
+			Replicas: *validController.Spec.Replicas,
 		},
 		Status: autoscaling.ScaleStatus{
 			Replicas: validController.Status.Replicas,
@@ -294,7 +316,7 @@ func TestScaleGet(t *testing.T) {
 	}
 	got := obj.(*autoscaling.Scale)
 	if !apiequality.Semantic.DeepEqual(want, got) {
-		t.Errorf("unexpected scale: %s", diff.ObjectDiff(want, got))
+		t.Errorf("unexpected scale: %s", cmp.Diff(want, got))
 	}
 }
 
@@ -325,7 +347,7 @@ func TestScaleUpdate(t *testing.T) {
 	}
 	scale := obj.(*autoscaling.Scale)
 	if scale.Spec.Replicas != replicas {
-		t.Errorf("wrong replicas count expected: %d got: %d", replicas, rc.Spec.Replicas)
+		t.Errorf("wrong replicas count expected: %d got: %d", replicas, *rc.Spec.Replicas)
 	}
 
 	update.ResourceVersion = rc.ResourceVersion

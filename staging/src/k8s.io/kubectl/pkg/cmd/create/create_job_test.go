@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 func TestCreateJobValidation(t *testing.T) {
@@ -169,6 +170,7 @@ func TestCreateJobFromCronJob(t *testing.T) {
 							Kind:       "CronJob",
 							Name:       cronJob.GetName(),
 							UID:        cronJob.GetUID(),
+							Controller: ptr.To(true),
 						},
 					},
 				},

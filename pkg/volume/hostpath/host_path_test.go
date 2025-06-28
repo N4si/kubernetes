@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/klog/v2/ktesting"
 	"k8s.io/kubernetes/pkg/volume"
 	volumetest "k8s.io/kubernetes/pkg/volume/testing"
 	"k8s.io/kubernetes/pkg/volume/util/hostutil"
@@ -111,7 +112,8 @@ func TestDeleter(t *testing.T) {
 	if err != nil {
 		t.Fatal("Can't find the plugin by name")
 	}
-	deleter, err := plug.NewDeleter(spec)
+	logger, _ := ktesting.NewTestContext(t)
+	deleter, err := plug.NewDeleter(logger, spec)
 	if err != nil {
 		t.Errorf("Failed to make a new Deleter: %v", err)
 	}
@@ -135,13 +137,13 @@ func TestDeleterTempDir(t *testing.T) {
 		"not-tmp":  {true, "/nottmp"},
 		"good-tmp": {false, "/tmp/scratch"},
 	}
-
+	logger, _ := ktesting.NewTestContext(t)
 	for name, test := range tests {
 		plugMgr := volume.VolumePluginMgr{}
 		plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{}), nil /* prober */, volumetest.NewFakeKubeletVolumeHost(t, "/tmp/fake", nil, nil))
 		spec := &volume.Spec{PersistentVolume: &v1.PersistentVolume{Spec: v1.PersistentVolumeSpec{PersistentVolumeSource: v1.PersistentVolumeSource{HostPath: &v1.HostPathVolumeSource{Path: test.path}}}}}
 		plug, _ := plugMgr.FindDeletablePluginBySpec(spec)
-		deleter, _ := plug.NewDeleter(spec)
+		deleter, _ := plug.NewDeleter(logger, spec)
 		err := deleter.Delete()
 		if err == nil && test.expectedFailure {
 			t.Errorf("Expected failure for test '%s' but got nil err", name)
@@ -157,9 +159,7 @@ func TestProvisioner(t *testing.T) {
 	plugMgr.InitPlugins(ProbeVolumePlugins(volume.VolumeConfig{ProvisioningEnabled: true}),
 		nil,
 		volumetest.NewFakeKubeletVolumeHost(t, "/tmp/fake", nil, nil))
-	spec := &volume.Spec{PersistentVolume: &v1.PersistentVolume{Spec: v1.PersistentVolumeSpec{
-		PersistentVolumeSource: v1.PersistentVolumeSource{HostPath: &v1.HostPathVolumeSource{Path: fmt.Sprintf("/tmp/hostpath.%s", uuid.NewUUID())}}}}}
-	plug, err := plugMgr.FindCreatablePluginBySpec(spec)
+	plug, err := plugMgr.FindProvisionablePluginByName(hostPathPluginName)
 	if err != nil {
 		t.Fatalf("Can't find the plugin by name")
 	}
@@ -167,7 +167,8 @@ func TestProvisioner(t *testing.T) {
 		PVC:                           volumetest.CreateTestPVC("1Gi", []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}),
 		PersistentVolumeReclaimPolicy: v1.PersistentVolumeReclaimDelete,
 	}
-	creator, err := plug.NewProvisioner(options)
+	logger, _ := ktesting.NewTestContext(t)
+	creator, err := plug.NewProvisioner(logger, options)
 	if err != nil {
 		t.Fatalf("Failed to make a new Provisioner: %v", err)
 	}
@@ -214,7 +215,7 @@ func TestInvalidHostPath(t *testing.T) {
 		VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: "/no/backsteps/allowed/.."}},
 	}
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID("poduid")}}
-	mounter, err := plug.NewMounter(volume.NewSpecFromVolume(spec), pod, volume.VolumeOptions{})
+	mounter, err := plug.NewMounter(volume.NewSpecFromVolume(spec), pod)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +243,7 @@ func TestPlugin(t *testing.T) {
 	}
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID("poduid")}}
 	defer os.RemoveAll(volPath)
-	mounter, err := plug.NewMounter(volume.NewSpecFromVolume(spec), pod, volume.VolumeOptions{})
+	mounter, err := plug.NewMounter(volume.NewSpecFromVolume(spec), pod)
 	if err != nil {
 		t.Errorf("Failed to make a new Mounter: %v", err)
 	}
@@ -310,7 +311,7 @@ func TestPersistentClaimReadOnlyFlag(t *testing.T) {
 	// readOnly bool is supplied by persistent-claim volume source when its mounter creates other volumes
 	spec := volume.NewSpecFromPersistentVolume(pv, true)
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID("poduid")}}
-	mounter, _ := plug.NewMounter(spec, pod, volume.VolumeOptions{})
+	mounter, _ := plug.NewMounter(spec, pod)
 	if mounter == nil {
 		t.Fatalf("Got a nil Mounter")
 	}

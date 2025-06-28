@@ -1,3 +1,6 @@
+//go:build linux
+// +build linux
+
 /*
 Copyright 2017 The Kubernetes Authors.
 
@@ -18,9 +21,9 @@ package testing
 
 import (
 	"fmt"
-	"k8s.io/utils/net"
 
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/utils/net"
 )
 
 // FakeNetlinkHandle mock implementation of proxy NetlinkHandle
@@ -131,6 +134,21 @@ func (h *FakeNetlinkHandle) GetAllLocalAddresses() (sets.Set[string], error) {
 	// List all addresses from all available network interfaces.
 	for linkName := range h.localAddresses {
 		// list all addresses from a given network interface.
+		for _, addr := range h.localAddresses[linkName] {
+			if h.isValidForSet(addr) {
+				res.Insert(addr)
+			}
+		}
+	}
+	return res, nil
+}
+
+func (h *FakeNetlinkHandle) GetAllLocalAddressesExcept(dev string) (sets.Set[string], error) {
+	res := sets.New[string]()
+	for linkName := range h.localAddresses {
+		if linkName == dev {
+			continue
+		}
 		for _, addr := range h.localAddresses[linkName] {
 			if h.isValidForSet(addr) {
 				res.Insert(addr)

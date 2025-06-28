@@ -27,8 +27,8 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	endpointsliceutil "k8s.io/endpointslice/util"
 	"k8s.io/kubernetes/pkg/apis/discovery/validation"
-	endpointutil "k8s.io/kubernetes/pkg/controller/util/endpoint"
 	netutils "k8s.io/utils/net"
 )
 
@@ -38,7 +38,7 @@ type addrTypePortMapKey string
 
 // newAddrTypePortMapKey generates a PortMapKey from endpoint ports.
 func newAddrTypePortMapKey(endpointPorts []discovery.EndpointPort, addrType discovery.AddressType) addrTypePortMapKey {
-	pmk := fmt.Sprintf("%s-%s", addrType, endpointutil.NewPortMapKey(endpointPorts))
+	pmk := fmt.Sprintf("%s-%s", addrType, endpointsliceutil.NewPortMapKey(endpointPorts))
 	return addrTypePortMapKey(pmk)
 }
 
@@ -47,18 +47,6 @@ func (pk addrTypePortMapKey) addressType() discovery.AddressType {
 		return discovery.AddressTypeIPv6
 	}
 	return discovery.AddressTypeIPv4
-}
-
-func getAddressType(address string) *discovery.AddressType {
-	ip := netutils.ParseIPSloppy(address)
-	if ip == nil {
-		return nil
-	}
-	addressType := discovery.AddressTypeIPv4
-	if ip.To4() == nil {
-		addressType = discovery.AddressTypeIPv6
-	}
-	return &addressType
 }
 
 // newEndpointSlice returns an EndpointSlice generated from an Endpoints
@@ -85,7 +73,7 @@ func newEndpointSlice(endpoints *corev1.Endpoints, ports []discovery.EndpointPor
 
 	// overwrite specific labels
 	epSlice.Labels[discovery.LabelServiceName] = endpoints.Name
-	epSlice.Labels[discovery.LabelManagedBy] = controllerName
+	epSlice.Labels[discovery.LabelManagedBy] = ControllerName
 
 	// clone all annotations but EndpointsLastChangeTriggerTime and LastAppliedConfigAnnotation
 	for annotation, val := range endpoints.Annotations {
@@ -115,10 +103,20 @@ func getEndpointSlicePrefix(serviceName string) string {
 }
 
 // addressToEndpoint converts an address from an Endpoints resource to an
-// EndpointSlice endpoint.
-func addressToEndpoint(address corev1.EndpointAddress, ready bool) *discovery.Endpoint {
+// EndpointSlice endpoint and AddressType.
+func addressToEndpoint(address corev1.EndpointAddress, ready bool) (*discovery.Endpoint, *discovery.AddressType) {
+	ip := netutils.ParseIPSloppy(address.IP)
+	if ip == nil {
+		return nil, nil
+	}
+	addressType := discovery.AddressTypeIPv4
+	if ip.To4() == nil {
+		addressType = discovery.AddressTypeIPv6
+	}
+
 	endpoint := &discovery.Endpoint{
-		Addresses: []string{address.IP},
+		// We parse and restringify the Endpoints IP in case it is in an irregular format.
+		Addresses: []string{ip.String()},
 		Conditions: discovery.EndpointConditions{
 			Ready: &ready,
 		},
@@ -132,7 +130,7 @@ func addressToEndpoint(address corev1.EndpointAddress, ready bool) *discovery.En
 		endpoint.Hostname = &address.Hostname
 	}
 
-	return endpoint
+	return endpoint, &addressType
 }
 
 // epPortsToEpsPorts converts ports from an Endpoints resource to ports for an
@@ -269,5 +267,5 @@ func managedByChanged(endpointSlice1, endpointSlice2 *discovery.EndpointSlice) b
 // EndpointSlices is the EndpointSlice controller.
 func managedByController(endpointSlice *discovery.EndpointSlice) bool {
 	managedBy, _ := endpointSlice.Labels[discovery.LabelManagedBy]
-	return managedBy == controllerName
+	return managedBy == ControllerName
 }

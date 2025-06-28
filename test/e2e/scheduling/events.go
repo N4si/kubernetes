@@ -23,6 +23,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/onsi/ginkgo/v2"
+
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,8 +33,6 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/kubernetes/test/e2e/framework"
-
-	"github.com/onsi/ginkgo/v2"
 )
 
 func scheduleSuccessEvent(ns, podName, nodeName string) func(*v1.Event) bool {
@@ -109,7 +109,7 @@ func observeEventAfterAction(ctx context.Context, c clientset.Interface, ns stri
 	// Wait up 2 minutes polling every second.
 	timeout := 2 * time.Minute
 	interval := 1 * time.Second
-	err = wait.PollWithContext(ctx, interval, timeout, func(ctx context.Context) (bool, error) {
+	err = wait.PollUntilContextTimeout(ctx, interval, timeout, false, func(ctx context.Context) (bool, error) {
 		return observedMatchingEvent, nil
 	})
 	return err == nil, err

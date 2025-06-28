@@ -24,6 +24,8 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/klog/v2"
+	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
@@ -42,7 +44,7 @@ type preScoreState struct {
 
 // Clone implements the mandatory Clone interface. We don't really copy the data since
 // there is no need for that.
-func (s *preScoreState) Clone() framework.StateData {
+func (s *preScoreState) Clone() fwk.StateData {
 	return s
 }
 
@@ -125,14 +127,10 @@ func (pl *InterPodAffinity) processExistingPod(
 // PreScore builds and writes cycle state used by Score and NormalizeScore.
 func (pl *InterPodAffinity) PreScore(
 	pCtx context.Context,
-	cycleState *framework.CycleState,
+	cycleState fwk.CycleState,
 	pod *v1.Pod,
-	nodes []*v1.Node,
+	nodes []*framework.NodeInfo,
 ) *framework.Status {
-	if len(nodes) == 0 {
-		// No nodes to score.
-		return nil
-	}
 
 	if pl.sharedLister == nil {
 		return framework.NewStatus(framework.Error, "empty shared lister in InterPodAffinity PreScore")
@@ -141,21 +139,19 @@ func (pl *InterPodAffinity) PreScore(
 	affinity := pod.Spec.Affinity
 	hasPreferredAffinityConstraints := affinity != nil && affinity.PodAffinity != nil && len(affinity.PodAffinity.PreferredDuringSchedulingIgnoredDuringExecution) > 0
 	hasPreferredAntiAffinityConstraints := affinity != nil && affinity.PodAntiAffinity != nil && len(affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution) > 0
+	hasConstraints := hasPreferredAffinityConstraints || hasPreferredAntiAffinityConstraints
 
 	// Optionally ignore calculating preferences of existing pods' affinity rules
 	// if the incoming pod has no inter-pod affinities.
-	if pl.args.IgnorePreferredTermsOfExistingPods && !hasPreferredAffinityConstraints && !hasPreferredAntiAffinityConstraints {
-		cycleState.Write(preScoreStateKey, &preScoreState{
-			topologyScore: make(map[string]map[string]int64),
-		})
-		return nil
+	if pl.args.IgnorePreferredTermsOfExistingPods && !hasConstraints {
+		return framework.NewStatus(framework.Skip)
 	}
 
 	// Unless the pod being scheduled has preferred affinity terms, we only
 	// need to process nodes hosting pods with affinity.
 	var allNodes []*framework.NodeInfo
 	var err error
-	if hasPreferredAffinityConstraints || hasPreferredAntiAffinityConstraints {
+	if hasConstraints {
 		allNodes, err = pl.sharedLister.NodeInfos().List()
 		if err != nil {
 			return framework.AsStatus(fmt.Errorf("failed to get all nodes from shared lister: %w", err))
@@ -186,19 +182,18 @@ func (pl *InterPodAffinity) PreScore(
 			return framework.AsStatus(fmt.Errorf("updating PreferredAntiAffinityTerms: %w", err))
 		}
 	}
-	state.namespaceLabels = GetNamespaceLabelsSnapshot(pod.Namespace, pl.nsLister)
+	logger := klog.FromContext(pCtx)
+	state.namespaceLabels = GetNamespaceLabelsSnapshot(logger, pod.Namespace, pl.nsLister)
 
 	topoScores := make([]scoreMap, len(allNodes))
 	index := int32(-1)
 	processNode := func(i int) {
 		nodeInfo := allNodes[i]
-		if nodeInfo.Node() == nil {
-			return
-		}
+
 		// Unless the pod being scheduled has preferred affinity terms, we only
 		// need to process pods with affinity in the node.
 		podsToProcess := nodeInfo.PodsWithAffinity
-		if hasPreferredAffinityConstraints || hasPreferredAntiAffinityConstraints {
+		if hasConstraints {
 			// We need to process all the pods.
 			podsToProcess = nodeInfo.Pods
 		}
@@ -213,6 +208,10 @@ func (pl *InterPodAffinity) PreScore(
 	}
 	pl.parallelizer.Until(pCtx, len(allNodes), processNode, pl.Name())
 
+	if index == -1 {
+		return framework.NewStatus(framework.Skip)
+	}
+
 	for i := 0; i <= int(index); i++ {
 		state.topologyScore.append(topoScores[i])
 	}
@@ -221,7 +220,7 @@ func (pl *InterPodAffinity) PreScore(
 	return nil
 }
 
-func getPreScoreState(cycleState *framework.CycleState) (*preScoreState, error) {
+func getPreScoreState(cycleState fwk.CycleState) (*preScoreState, error) {
 	c, err := cycleState.Read(preScoreStateKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %q from cycleState: %w", preScoreStateKey, err)
@@ -238,11 +237,7 @@ func getPreScoreState(cycleState *framework.CycleState) (*preScoreState, error) 
 // The "score" returned in this function is the sum of weights got from cycleState which have its topologyKey matching with the node's labels.
 // it is normalized later.
 // Note: the returned "score" is positive for pod-affinity, and negative for pod-antiaffinity.
-func (pl *InterPodAffinity) Score(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod, nodeName string) (int64, *framework.Status) {
-	nodeInfo, err := pl.sharedLister.NodeInfos().Get(nodeName)
-	if err != nil {
-		return 0, framework.AsStatus(fmt.Errorf("failed to get node %q from Snapshot: %w", nodeName, err))
-	}
+func (pl *InterPodAffinity) Score(ctx context.Context, cycleState fwk.CycleState, pod *v1.Pod, nodeInfo *framework.NodeInfo) (int64, *framework.Status) {
 	node := nodeInfo.Node()
 
 	s, err := getPreScoreState(cycleState)
@@ -260,7 +255,7 @@ func (pl *InterPodAffinity) Score(ctx context.Context, cycleState *framework.Cyc
 }
 
 // NormalizeScore normalizes the score for each filteredNode.
-func (pl *InterPodAffinity) NormalizeScore(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod, scores framework.NodeScoreList) *framework.Status {
+func (pl *InterPodAffinity) NormalizeScore(ctx context.Context, cycleState fwk.CycleState, pod *v1.Pod, scores framework.NodeScoreList) *framework.Status {
 	s, err := getPreScoreState(cycleState)
 	if err != nil {
 		return framework.AsStatus(err)

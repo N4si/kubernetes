@@ -28,8 +28,8 @@ import (
 //   - The service's usable Cluster-traffic-policy endpoints (taking topology into account, if
 //     relevant). This will be nil if the service does not ever use Cluster traffic policy.
 //
-//   - The service's usable Local-traffic-policy endpoints (including terminating endpoints, if
-//     relevant). This will be nil if the service does not ever use Local traffic policy.
+//   - The service's usable Local-traffic-policy endpoints. This will be nil if the
+//     service does not ever use Local traffic policy.
 //
 //   - The combined list of all endpoints reachable from this node (which is the union of the
 //     previous two lists, but in the case where it is identical to one or the other, we avoid
@@ -37,25 +37,32 @@ import (
 //
 //   - An indication of whether the service has any endpoints reachable from anywhere in the
 //     cluster. (This may be true even if allReachableEndpoints is empty.)
-func CategorizeEndpoints(endpoints []Endpoint, svcInfo ServicePort, nodeLabels map[string]string) (clusterEndpoints, localEndpoints, allReachableEndpoints []Endpoint, hasAnyEndpoints bool) {
-	var useTopology, useServingTerminatingEndpoints bool
+//
+// "Usable endpoints" means Ready endpoints by default, but will fall back to
+// Serving-Terminating endpoints (independently for Cluster and Local) if no Ready
+// endpoints are available.
+func CategorizeEndpoints(endpoints []Endpoint, svcInfo ServicePort, nodeName string, nodeLabels map[string]string) (clusterEndpoints, localEndpoints, allReachableEndpoints []Endpoint, hasAnyEndpoints bool) {
+	var topologyMode string
+	var useServingTerminatingEndpoints bool
 
 	if svcInfo.UsesClusterEndpoints() {
-		useTopology = canUseTopology(endpoints, svcInfo, nodeLabels)
+		zone := nodeLabels[v1.LabelTopologyZone]
+		topologyMode = topologyModeFromHints(svcInfo, endpoints, nodeName, zone)
 		clusterEndpoints = filterEndpoints(endpoints, func(ep Endpoint) bool {
 			if !ep.IsReady() {
 				return false
 			}
-			if useTopology && !availableForTopology(ep, nodeLabels) {
+			if !availableForTopology(ep, topologyMode, nodeName, zone) {
 				return false
 			}
 			return true
 		})
 
-		// if there are 0 cluster-wide endpoints, we can try to fallback to any terminating endpoints that are ready.
-		// When falling back to terminating endpoints, we do NOT consider topology aware routing since this is a best
-		// effort attempt to avoid dropping connections.
-		if len(clusterEndpoints) == 0 && utilfeature.DefaultFeatureGate.Enabled(features.ProxyTerminatingEndpoints) {
+		// If we didn't get any endpoints, try again using terminating endpoints.
+		// (Note that we would already have chosen to ignore topology if there
+		// were no ready endpoints for the given topology, so the problem at this
+		// point must be that there are no ready endpoints anywhere.)
+		if len(clusterEndpoints) == 0 {
 			clusterEndpoints = filterEndpoints(endpoints, func(ep Endpoint) bool {
 				if ep.IsServing() && ep.IsTerminating() {
 					return true
@@ -84,12 +91,12 @@ func CategorizeEndpoints(endpoints []Endpoint, svcInfo ServicePort, nodeLabels m
 	for _, ep := range endpoints {
 		if ep.IsReady() {
 			hasAnyEndpoints = true
-			if ep.GetIsLocal() {
+			if ep.IsLocal() {
 				hasLocalReadyEndpoints = true
 			}
-		} else if ep.IsServing() && ep.IsTerminating() && utilfeature.DefaultFeatureGate.Enabled(features.ProxyTerminatingEndpoints) {
+		} else if ep.IsServing() && ep.IsTerminating() {
 			hasAnyEndpoints = true
-			if ep.GetIsLocal() {
+			if ep.IsLocal() {
 				hasLocalServingTerminatingEndpoints = true
 			}
 		}
@@ -97,12 +104,12 @@ func CategorizeEndpoints(endpoints []Endpoint, svcInfo ServicePort, nodeLabels m
 
 	if hasLocalReadyEndpoints {
 		localEndpoints = filterEndpoints(endpoints, func(ep Endpoint) bool {
-			return ep.GetIsLocal() && ep.IsReady()
+			return ep.IsLocal() && ep.IsReady()
 		})
 	} else if hasLocalServingTerminatingEndpoints {
 		useServingTerminatingEndpoints = true
 		localEndpoints = filterEndpoints(endpoints, func(ep Endpoint) bool {
-			return ep.GetIsLocal() && ep.IsServing() && ep.IsTerminating()
+			return ep.IsLocal() && ep.IsServing() && ep.IsTerminating()
 		})
 	}
 
@@ -111,9 +118,9 @@ func CategorizeEndpoints(endpoints []Endpoint, svcInfo ServicePort, nodeLabels m
 		return
 	}
 
-	if !useTopology && !useServingTerminatingEndpoints {
+	if topologyMode == "" && !useServingTerminatingEndpoints {
 		// !useServingTerminatingEndpoints means that localEndpoints contains only
-		// Ready endpoints. !useTopology means that clusterEndpoints contains *every*
+		// Ready endpoints. topologyMode=="" means that clusterEndpoints contains *every*
 		// Ready endpoint. So clusterEndpoints must be a superset of localEndpoints.
 		allReachableEndpoints = clusterEndpoints
 		return
@@ -137,59 +144,77 @@ func CategorizeEndpoints(endpoints []Endpoint, svcInfo ServicePort, nodeLabels m
 	return
 }
 
-// canUseTopology returns true if topology aware routing is enabled and properly configured
-// in this cluster. That is, it checks that:
-// * The TopologyAwareHints feature is enabled
-// * The "service.kubernetes.io/topology-aware-hints" annotation on this Service is set to "Auto"
-// * The node's labels include "topology.kubernetes.io/zone"
-// * All of the endpoints for this Service have a topology hint
-// * At least one endpoint for this Service is hinted for this node's zone.
-func canUseTopology(endpoints []Endpoint, svcInfo ServicePort, nodeLabels map[string]string) bool {
-	if !utilfeature.DefaultFeatureGate.Enabled(features.TopologyAwareHints) {
-		return false
-	}
-	hintsAnnotation := svcInfo.HintsAnnotation()
-	if hintsAnnotation != "Auto" && hintsAnnotation != "auto" {
-		if hintsAnnotation != "" && hintsAnnotation != "Disabled" && hintsAnnotation != "disabled" {
-			klog.InfoS("Skipping topology aware endpoint filtering since Service has unexpected value", "annotationTopologyAwareHints", v1.AnnotationTopologyAwareHints, "hints", hintsAnnotation)
-		}
-		return false
-	}
-
-	zone, ok := nodeLabels[v1.LabelTopologyZone]
-	if !ok || zone == "" {
-		klog.InfoS("Skipping topology aware endpoint filtering since node is missing label", "label", v1.LabelTopologyZone)
-		return false
-	}
-
+// topologyModeFromHints returns a topology mode ("", "PreferSameZone", or
+// "PreferSameNode") based on the Endpoint hints:
+//   - If the PreferSameTrafficDistribution feature gate is enabled, and every ready
+//     endpoint has a node hint, and at least one endpoint is hinted for this node, then
+//     it returns "PreferSameNode".
+//   - Otherwise, if every ready endpoint has a zone hint, and at least one endpoint is
+//     hinted for this node's zone, then it returns "PreferSameZone".
+//   - Otherwise it returns "" (meaning, no topology / default traffic distribution).
+func topologyModeFromHints(svcInfo ServicePort, endpoints []Endpoint, nodeName, zone string) string {
+	hasEndpointForNode := false
+	allEndpointsHaveNodeHints := true
 	hasEndpointForZone := false
+	allEndpointsHaveZoneHints := true
 	for _, endpoint := range endpoints {
 		if !endpoint.IsReady() {
 			continue
 		}
-		if endpoint.GetZoneHints().Len() == 0 {
-			klog.InfoS("Skipping topology aware endpoint filtering since one or more endpoints is missing a zone hint")
-			return false
+
+		if endpoint.NodeHints().Len() == 0 {
+			allEndpointsHaveNodeHints = false
+		} else if endpoint.NodeHints().Has(nodeName) {
+			hasEndpointForNode = true
 		}
 
-		if endpoint.GetZoneHints().Has(zone) {
+		if endpoint.ZoneHints().Len() == 0 {
+			allEndpointsHaveZoneHints = false
+		} else if endpoint.ZoneHints().Has(zone) {
 			hasEndpointForZone = true
 		}
 	}
 
-	if !hasEndpointForZone {
-		klog.InfoS("Skipping topology aware endpoint filtering since no hints were provided for zone", "zone", zone)
-		return false
+	if utilfeature.DefaultFeatureGate.Enabled(features.PreferSameTrafficDistribution) {
+		if allEndpointsHaveNodeHints {
+			if hasEndpointForNode {
+				return v1.ServiceTrafficDistributionPreferSameNode
+			}
+			klog.V(2).InfoS("Ignoring same-node topology hints for service since no hints were provided for node", "service", svcInfo, "node", nodeName)
+		} else {
+			klog.V(7).InfoS("Ignoring same-node topology hints for service since one or more endpoints is missing a node hint", "service", svcInfo)
+		}
+	}
+	if allEndpointsHaveZoneHints {
+		if hasEndpointForZone {
+			return v1.ServiceTrafficDistributionPreferSameZone
+		}
+		if zone == "" {
+			klog.V(2).InfoS("Ignoring same-zone topology hints for service since node is missing label", "service", svcInfo, "label", v1.LabelTopologyZone)
+		} else {
+			klog.V(2).InfoS("Ignoring same-zone topology hints for service since no hints were provided for zone", "service", svcInfo, "zone", zone)
+		}
+	} else {
+		klog.V(7).InfoS("Ignoring same-zone topology hints for service since one or more endpoints is missing a zone hint", "service", svcInfo.String())
 	}
 
-	return true
+	return ""
 }
 
-// availableForTopology checks if this endpoint is available for use on this node, given
-// topology constraints. (It assumes that canUseTopology() returned true.)
-func availableForTopology(endpoint Endpoint, nodeLabels map[string]string) bool {
-	zone := nodeLabels[v1.LabelTopologyZone]
-	return endpoint.GetZoneHints().Has(zone)
+// availableForTopology checks if this endpoint is available for use on this node when
+// using the given topologyMode. (Note that there's no fallback here; the fallback happens
+// when deciding which mode to use, not when applying that decision.)
+func availableForTopology(endpoint Endpoint, topologyMode, nodeName, zone string) bool {
+	switch topologyMode {
+	case "":
+		return true
+	case v1.ServiceTrafficDistributionPreferSameNode:
+		return endpoint.NodeHints().Has(nodeName)
+	case v1.ServiceTrafficDistributionPreferSameZone:
+		return endpoint.ZoneHints().Has(zone)
+	default:
+		return false
+	}
 }
 
 // filterEndpoints filters endpoints according to predicate

@@ -55,7 +55,12 @@ func NewPublisher(cmInformer coreinformers.ConfigMapInformer, nsInformer coreinf
 	e := &Publisher{
 		client: cl,
 		rootCA: rootCA,
-		queue:  workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "root_ca_cert_publisher"),
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.DefaultTypedControllerRateLimiter[string](),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "root_ca_cert_publisher",
+			},
+		),
 	}
 
 	cmInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -90,7 +95,7 @@ type Publisher struct {
 
 	nsListerSynced cache.InformerSynced
 
-	queue workqueue.RateLimitingInterface
+	queue workqueue.TypedRateLimitingInterface[string]
 }
 
 // Run starts process
@@ -98,8 +103,9 @@ func (c *Publisher) Run(ctx context.Context, workers int) {
 	defer utilruntime.HandleCrash()
 	defer c.queue.ShutDown()
 
-	klog.Infof("Starting root CA certificate configmap publisher")
-	defer klog.Infof("Shutting down root CA certificate configmap publisher")
+	logger := klog.FromContext(ctx)
+	logger.Info("Starting root CA cert publisher controller")
+	defer logger.Info("Shutting down root CA cert publisher controller")
 
 	if !cache.WaitForNamedCacheSync("crt configmap", ctx.Done(), c.cmListerSynced) {
 		return
@@ -163,7 +169,7 @@ func (c *Publisher) processNextWorkItem(ctx context.Context) bool {
 	}
 	defer c.queue.Done(key)
 
-	if err := c.syncHandler(ctx, key.(string)); err != nil {
+	if err := c.syncHandler(ctx, key); err != nil {
 		utilruntime.HandleError(fmt.Errorf("syncing %q failed: %v", key, err))
 		c.queue.AddRateLimited(key)
 		return true
@@ -177,7 +183,7 @@ func (c *Publisher) syncNamespace(ctx context.Context, ns string) (err error) {
 	startTime := time.Now()
 	defer func() {
 		recordMetrics(startTime, err)
-		klog.V(4).Infof("Finished syncing namespace %q (%v)", ns, time.Since(startTime))
+		klog.FromContext(ctx).V(4).Info("Finished syncing namespace", "namespace", ns, "elapsedTime", time.Since(startTime))
 	}()
 
 	cm, err := c.cmLister.ConfigMaps(ns).Get(RootCACertConfigMapName)

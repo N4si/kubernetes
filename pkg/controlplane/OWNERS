@@ -3,13 +3,13 @@
 approvers:
   - deads2k
   - derekwaynecarr
-  - lavalamp
   - mikedanese
   - sttts
   - wojtek-t
+  - jpbetz
 reviewers:
+  - aojea
   - thockin
-  - lavalamp
   - smarterclayton
   - wojtek-t
   - deads2k
@@ -24,11 +24,14 @@ reviewers:
   - luxas
   - janetkuo
   - justinsb
-  - ncdc
   - mwielgus
   - soltysh
   - enj
+  - jpbetz
 labels:
   - sig/api-machinery
 emeritus_approvers:
   - nikhiljindal
+  - lavalamp
+emeritus_reviewers:
+  - ncdc

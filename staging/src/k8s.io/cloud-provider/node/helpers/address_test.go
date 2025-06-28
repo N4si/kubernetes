@@ -17,13 +17,11 @@ limitations under the License.
 package helpers
 
 import (
-	"net"
 	"reflect"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	netutils "k8s.io/utils/net"
 )
 
 const (
@@ -94,17 +92,17 @@ func TestAddToNodeAddresses(t *testing.T) {
 	}
 }
 
-func TestPreferNodeIP(t *testing.T) {
+func TestGetNodeAddressesFromNodeIP(t *testing.T) {
 	cases := []struct {
 		name              string
-		nodeIP            net.IP
+		nodeIP            string
 		nodeAddresses     []v1.NodeAddress
 		expectedAddresses []v1.NodeAddress
 		shouldError       bool
 	}{
 		{
 			name:   "A single InternalIP",
-			nodeIP: netutils.ParseIPSloppy("10.1.1.1"),
+			nodeIP: "10.1.1.1",
 			nodeAddresses: []v1.NodeAddress{
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
 				{Type: v1.NodeHostName, Address: testKubeletHostname},
@@ -117,7 +115,7 @@ func TestPreferNodeIP(t *testing.T) {
 		},
 		{
 			name:   "NodeIP is external",
-			nodeIP: netutils.ParseIPSloppy("55.55.55.55"),
+			nodeIP: "55.55.55.55",
 			nodeAddresses: []v1.NodeAddress{
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
 				{Type: v1.NodeExternalIP, Address: "55.55.55.55"},
@@ -133,7 +131,7 @@ func TestPreferNodeIP(t *testing.T) {
 		{
 			// Accommodating #45201 and #49202
 			name:   "InternalIP and ExternalIP are the same",
-			nodeIP: netutils.ParseIPSloppy("55.55.55.55"),
+			nodeIP: "55.55.55.55",
 			nodeAddresses: []v1.NodeAddress{
 				{Type: v1.NodeInternalIP, Address: "44.44.44.44"},
 				{Type: v1.NodeExternalIP, Address: "44.44.44.44"},
@@ -150,7 +148,7 @@ func TestPreferNodeIP(t *testing.T) {
 		},
 		{
 			name:   "An Internal/ExternalIP, an Internal/ExternalDNS",
-			nodeIP: netutils.ParseIPSloppy("10.1.1.1"),
+			nodeIP: "10.1.1.1",
 			nodeAddresses: []v1.NodeAddress{
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
 				{Type: v1.NodeExternalIP, Address: "55.55.55.55"},
@@ -169,7 +167,7 @@ func TestPreferNodeIP(t *testing.T) {
 		},
 		{
 			name:   "An Internal with multiple internal IPs",
-			nodeIP: netutils.ParseIPSloppy("10.1.1.1"),
+			nodeIP: "10.1.1.1",
 			nodeAddresses: []v1.NodeAddress{
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
 				{Type: v1.NodeInternalIP, Address: "10.2.2.2"},
@@ -186,7 +184,7 @@ func TestPreferNodeIP(t *testing.T) {
 		},
 		{
 			name:   "An InternalIP that isn't valid: should error",
-			nodeIP: netutils.ParseIPSloppy("10.2.2.2"),
+			nodeIP: "10.2.2.2",
 			nodeAddresses: []v1.NodeAddress{
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
 				{Type: v1.NodeExternalIP, Address: "55.55.55.55"},
@@ -197,7 +195,7 @@ func TestPreferNodeIP(t *testing.T) {
 		},
 		{
 			name:   "Dual-stack cloud, with nodeIP, different IPv6 formats",
-			nodeIP: netutils.ParseIPSloppy("2600:1f14:1d4:d101::ba3d"),
+			nodeIP: "2600:1f14:1d4:d101::ba3d",
 			nodeAddresses: []v1.NodeAddress{
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
 				{Type: v1.NodeInternalIP, Address: "2600:1f14:1d4:d101:0:0:0:ba3d"},
@@ -210,7 +208,17 @@ func TestPreferNodeIP(t *testing.T) {
 			shouldError: false,
 		},
 		{
-			name: "Dual-stack cloud, IPv4 first, no nodeIP",
+			name:   "Single-stack cloud, dual-stack request",
+			nodeIP: "10.1.1.1,fc01:1234::5678",
+			nodeAddresses: []v1.NodeAddress{
+				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
+			},
+			shouldError: true,
+		},
+		{
+			name:   "Dual-stack cloud, IPv4 first, IPv4-primary request",
+			nodeIP: "10.1.1.1,fc01:1234::5678",
 			nodeAddresses: []v1.NodeAddress{
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
 				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
@@ -224,76 +232,98 @@ func TestPreferNodeIP(t *testing.T) {
 			shouldError: false,
 		},
 		{
-			name: "Dual-stack cloud, IPv6 first, no nodeIP",
+			name:   "Dual-stack cloud, IPv6 first, IPv4-primary request",
+			nodeIP: "10.1.1.1,fc01:1234::5678",
 			nodeAddresses: []v1.NodeAddress{
 				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
 				{Type: v1.NodeHostName, Address: testKubeletHostname},
 			},
 			expectedAddresses: []v1.NodeAddress{
-				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
 				{Type: v1.NodeHostName, Address: testKubeletHostname},
 			},
 			shouldError: false,
 		},
 		{
-			name:   "Dual-stack cloud, IPv4 first, request IPv4",
-			nodeIP: netutils.ParseIPSloppy("0.0.0.0"),
+			name:   "Dual-stack cloud, dual-stack request, multiple IPs",
+			nodeIP: "10.1.1.1,fc01:1234::5678",
 			nodeAddresses: []v1.NodeAddress{
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeInternalIP, Address: "10.1.1.2"},
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::1234"},
 				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
 				{Type: v1.NodeHostName, Address: testKubeletHostname},
 			},
+			// additional IPs of the same type are removed, as in the
+			// single-stack case.
 			expectedAddresses: []v1.NodeAddress{
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
-				{Type: v1.NodeHostName, Address: testKubeletHostname},
 				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
 			},
 			shouldError: false,
 		},
 		{
-			name:   "Dual-stack cloud, IPv6 first, request IPv4",
-			nodeIP: netutils.ParseIPSloppy("0.0.0.0"),
+			name:   "Dual-stack cloud, dual-stack request, extra ExternalIP",
+			nodeIP: "10.1.1.1,fc01:1234::5678",
 			nodeAddresses: []v1.NodeAddress{
-				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeExternalIP, Address: "55.55.55.55"},
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::1234"},
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
 				{Type: v1.NodeHostName, Address: testKubeletHostname},
 			},
+			// The ExternalIP is preserved, since no ExternalIP was matched
+			// by --node-ip.
 			expectedAddresses: []v1.NodeAddress{
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
-				{Type: v1.NodeHostName, Address: testKubeletHostname},
 				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+				{Type: v1.NodeExternalIP, Address: "55.55.55.55"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
 			},
 			shouldError: false,
 		},
 		{
-			name:   "Dual-stack cloud, IPv4 first, request IPv6",
-			nodeIP: netutils.ParseIPSloppy("::"),
+			name:   "Dual-stack cloud, dual-stack request, multiple ExternalIPs",
+			nodeIP: "fc01:1234::5678,10.1.1.1",
 			nodeAddresses: []v1.NodeAddress{
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeExternalIP, Address: "55.55.55.55"},
 				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+				{Type: v1.NodeExternalIP, Address: "2001:db1::1"},
 				{Type: v1.NodeHostName, Address: testKubeletHostname},
 			},
+			// The ExternalIPs are preserved, since no ExternalIP was matched
+			// by --node-ip.
 			expectedAddresses: []v1.NodeAddress{
 				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
-				{Type: v1.NodeHostName, Address: testKubeletHostname},
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeExternalIP, Address: "55.55.55.55"},
+				{Type: v1.NodeExternalIP, Address: "2001:db1::1"},
+				{Type: v1.NodeHostName, Address: testKubeletHostname},
 			},
 			shouldError: false,
 		},
 		{
-			name:   "Dual-stack cloud, IPv6 first, request IPv6",
-			nodeIP: netutils.ParseIPSloppy("::"),
+			name:   "Dual-stack cloud, dual-stack request, mixed InternalIP/ExternalIP match",
+			nodeIP: "55.55.55.55,fc01:1234::5678",
 			nodeAddresses: []v1.NodeAddress{
-				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
 				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
+				{Type: v1.NodeExternalIP, Address: "55.55.55.55"},
+				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
+				{Type: v1.NodeExternalIP, Address: "2001:db1::1"},
 				{Type: v1.NodeHostName, Address: testKubeletHostname},
 			},
+			// Since the IPv4 --node-ip value matched an ExternalIP, that
+			// filters out the IPv6 ExternalIP. Since the IPv6 --node-ip value
+			// matched in InternalIP, that filters out the IPv4 InternalIP
+			// value.
 			expectedAddresses: []v1.NodeAddress{
+				{Type: v1.NodeExternalIP, Address: "55.55.55.55"},
 				{Type: v1.NodeInternalIP, Address: "fc01:1234::5678"},
 				{Type: v1.NodeHostName, Address: testKubeletHostname},
-				{Type: v1.NodeInternalIP, Address: "10.1.1.1"},
 			},
 			shouldError: false,
 		},
@@ -301,13 +331,13 @@ func TestPreferNodeIP(t *testing.T) {
 
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := PreferNodeIP(tt.nodeIP, tt.nodeAddresses)
+			got, err := GetNodeAddressesFromNodeIP(tt.nodeIP, tt.nodeAddresses)
 			if (err != nil) != tt.shouldError {
-				t.Errorf("PreferNodeIP() error = %v, wantErr %v", err, tt.shouldError)
+				t.Errorf("GetNodeAddressesFromNodeIP() error = %v, wantErr %v", err, tt.shouldError)
 				return
 			}
 			if !reflect.DeepEqual(got, tt.expectedAddresses) {
-				t.Errorf("PreferNodeIP() = %v, want %v", got, tt.expectedAddresses)
+				t.Errorf("GetNodeAddressesFromNodeIP() = %v, want %v", got, tt.expectedAddresses)
 			}
 		})
 	}

@@ -18,11 +18,11 @@ package autoscaling
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2eautoscaling "k8s.io/kubernetes/test/e2e/framework/autoscaling"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
@@ -33,9 +33,9 @@ import (
 	"github.com/onsi/gomega/gmeasure"
 )
 
-var _ = SIGDescribe("[Feature:ClusterSizeAutoscalingScaleUp] [Slow] Autoscaling", func() {
+var _ = SIGDescribe(feature.ClusterSizeAutoscalingScaleUp, framework.WithSlow(), "Autoscaling", func() {
 	f := framework.NewDefaultFramework("autoscaling")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 	var experiment *gmeasure.Experiment
 
 	ginkgo.Describe("Autoscaling a service", func() {
@@ -50,40 +50,22 @@ var _ = SIGDescribe("[Feature:ClusterSizeAutoscalingScaleUp] [Slow] Autoscaling"
 		})
 
 		ginkgo.Context("from 1 pod and 3 nodes to 8 pods and >=4 nodes", func() {
-			const nodesNum = 3       // Expect there to be 3 nodes before and after the test.
-			var nodeGroupName string // Set by BeforeEach, used by AfterEach to scale this node group down after the test.
-			var nodes *v1.NodeList   // Set by BeforeEach, used by Measure to calculate CPU request based on node's sizes.
+			const nodesNum = 3 // Expect there to be 3 nodes before and after the test.
 
 			ginkgo.BeforeEach(func(ctx context.Context) {
-				// Make sure there is only 1 node group, otherwise this test becomes useless.
-				nodeGroups := strings.Split(framework.TestContext.CloudConfig.NodeInstanceGroup, ",")
-				if len(nodeGroups) != 1 {
-					e2eskipper.Skipf("test expects 1 node group, found %d", len(nodeGroups))
-				}
-				nodeGroupName = nodeGroups[0]
-
-				// Make sure the node group has exactly 'nodesNum' nodes, otherwise this test becomes useless.
-				nodeGroupSize, err := framework.GroupSize(nodeGroupName)
+				nodes, err := e2enode.GetReadySchedulableNodes(ctx, f.ClientSet)
 				framework.ExpectNoError(err)
-				if nodeGroupSize != nodesNum {
-					e2eskipper.Skipf("test expects %d nodes, found %d", nodesNum, nodeGroupSize)
+				nodeCount := len(nodes.Items)
+				if nodeCount != nodesNum {
+					e2eskipper.Skipf("test expects %d schedulable nodes, found %d", nodesNum, nodeCount)
 				}
-
-				// Make sure all nodes are schedulable, otherwise we are in some kind of a problem state.
-				nodes, err = e2enode.GetReadySchedulableNodes(ctx, f.ClientSet)
-				framework.ExpectNoError(err)
-				schedulableCount := len(nodes.Items)
-				framework.ExpectEqual(schedulableCount, nodeGroupSize, "not all nodes are schedulable")
-			})
-
-			ginkgo.AfterEach(func(ctx context.Context) {
-				// Attempt cleanup only if a node group was targeted for scale up.
-				// Otherwise the test was probably skipped and we'll get a gcloud error due to invalid parameters.
-				if len(nodeGroupName) > 0 {
-					// Scale down back to only 'nodesNum' nodes, as expected at the start of the test.
-					framework.ExpectNoError(framework.ResizeGroup(nodeGroupName, nodesNum))
-					framework.ExpectNoError(e2enode.WaitForReadyNodes(ctx, f.ClientSet, nodesNum, 15*time.Minute))
-				}
+				// As the last deferred cleanup ensure that the state is restored.
+				// AfterEach does not allow for this because it runs before other deferred
+				// cleanups happen, and they are blocking cluster restoring its initial size.
+				ginkgo.DeferCleanup(func(ctx context.Context) {
+					ginkgo.By("Waiting for scale down after test")
+					framework.ExpectNoError(e2enode.WaitForReadyNodes(ctx, f.ClientSet, nodeCount, 15*time.Minute))
+				})
 			})
 
 			ginkgo.It("takes less than 15 minutes", func(ctx context.Context) {
@@ -93,6 +75,8 @@ var _ = SIGDescribe("[Feature:ClusterSizeAutoscalingScaleUp] [Slow] Autoscaling"
 				// Calculate the CPU request of the service.
 				// This test expects that 8 pods will not fit in 'nodesNum' nodes, but will fit in >='nodesNum'+1 nodes.
 				// Make it so that 'nodesNum' pods fit perfectly per node.
+				nodes, err := e2enode.GetReadySchedulableNodes(ctx, f.ClientSet)
+				framework.ExpectNoError(err)
 				nodeCpus := nodes.Items[0].Status.Allocatable[v1.ResourceCPU]
 				nodeCPUMillis := (&nodeCpus).MilliValue()
 				cpuRequestMillis := int64(nodeCPUMillis / nodesNum)

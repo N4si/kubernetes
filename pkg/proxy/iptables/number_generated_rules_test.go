@@ -1,3 +1,6 @@
+//go:build linux
+// +build linux
+
 /*
 Copyright 2022 The Kubernetes Authors.
 
@@ -27,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	iptablestest "k8s.io/kubernetes/pkg/util/iptables/testing"
 	netutils "k8s.io/utils/net"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 // kube-proxy generates iptables rules to forward traffic from Services to Endpoints
@@ -159,7 +162,7 @@ func TestNumberIptablesRules(t *testing.T) {
 			services:            1,
 			epPerService:        1,
 			expectedFilterRules: 5,
-			expectedNatRules:    17,
+			expectedNatRules:    18,
 		},
 		{
 			name: "1 Services 2 EndpointPerService - LoadBalancer",
@@ -174,7 +177,7 @@ func TestNumberIptablesRules(t *testing.T) {
 			services:            1,
 			epPerService:        2,
 			expectedFilterRules: 5,
-			expectedNatRules:    20,
+			expectedNatRules:    21,
 		},
 		{
 			name: "1 Services 10 EndpointPerService - LoadBalancer",
@@ -189,7 +192,7 @@ func TestNumberIptablesRules(t *testing.T) {
 			services:            1,
 			epPerService:        10,
 			expectedFilterRules: 5,
-			expectedNatRules:    44,
+			expectedNatRules:    45,
 		},
 		{
 			name: "10 Services 0 EndpointsPerService - LoadBalancer",
@@ -219,7 +222,7 @@ func TestNumberIptablesRules(t *testing.T) {
 			services:            10,
 			epPerService:        1,
 			expectedFilterRules: 14,
-			expectedNatRules:    125,
+			expectedNatRules:    135,
 		},
 		{
 			name: "10 Services 2 EndpointPerService - LoadBalancer",
@@ -234,7 +237,7 @@ func TestNumberIptablesRules(t *testing.T) {
 			services:            10,
 			epPerService:        2,
 			expectedFilterRules: 14,
-			expectedNatRules:    155,
+			expectedNatRules:    165,
 		},
 		{
 			name: "10 Services 10 EndpointPerService - LoadBalancer",
@@ -249,7 +252,7 @@ func TestNumberIptablesRules(t *testing.T) {
 			services:            10,
 			epPerService:        10,
 			expectedFilterRules: 14,
-			expectedNatRules:    395,
+			expectedNatRules:    405,
 		},
 	}
 
@@ -361,8 +364,6 @@ func generateServiceEndpoints(nServices, nEndpoints int, epsFunc func(eps *disco
 	baseEp := netutils.BigForIP(netutils.ParseIPSloppy("172.16.0.1"))
 	epPort := 8080
 
-	tcpProtocol := v1.ProtocolTCP
-
 	eps := &discovery.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ep",
@@ -371,9 +372,9 @@ func generateServiceEndpoints(nServices, nEndpoints int, epsFunc func(eps *disco
 		AddressType: discovery.AddressTypeIPv4,
 		Endpoints:   []discovery.Endpoint{},
 		Ports: []discovery.EndpointPort{{
-			Name:     pointer.String(fmt.Sprintf("%d", epPort)),
-			Port:     pointer.Int32(int32(epPort)),
-			Protocol: &tcpProtocol,
+			Name:     ptr.To(fmt.Sprintf("%d", epPort)),
+			Port:     ptr.To(int32(epPort)),
+			Protocol: ptr.To(v1.ProtocolTCP),
 		}},
 	}
 
@@ -414,7 +415,7 @@ func generateServiceEndpoints(nServices, nEndpoints int, epsFunc func(eps *disco
 				Name:       fmt.Sprintf("%d", epPort),
 				Protocol:   v1.ProtocolTCP,
 				Port:       int32(basePort + i),
-				TargetPort: intstr.FromInt(epPort),
+				TargetPort: intstr.FromInt32(int32(epPort)),
 			},
 		}
 

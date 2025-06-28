@@ -17,6 +17,7 @@ limitations under the License.
 package testing
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -39,15 +40,11 @@ import (
 	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
-	cloudprovider "k8s.io/cloud-provider"
 	csilibplugins "k8s.io/csi-translation-lib/plugins"
-	proxyutil "k8s.io/kubernetes/pkg/proxy/util"
 	. "k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util/hostutil"
 	"k8s.io/kubernetes/pkg/volume/util/subpath"
 	"k8s.io/mount-utils"
-	"k8s.io/utils/exec"
-	testingexec "k8s.io/utils/exec/testing"
 )
 
 type FakeVolumeHost interface {
@@ -62,10 +59,8 @@ type fakeVolumeHost struct {
 	rootDir                string
 	kubeClient             clientset.Interface
 	pluginMgr              *VolumePluginMgr
-	cloud                  cloudprovider.Interface
 	mounter                mount.Interface
 	hostUtil               hostutil.HostUtils
-	exec                   *testingexec.FakeExec
 	nodeLabels             map[string]string
 	nodeName               string
 	subpather              subpath.Interface
@@ -75,29 +70,27 @@ type fakeVolumeHost struct {
 	informerFactory        informers.SharedInformerFactory
 	kubeletErr             error
 	mux                    sync.Mutex
-	filteredDialOptions    *proxyutil.FilteredDialOptions
 }
 
 var _ VolumeHost = &fakeVolumeHost{}
 var _ FakeVolumeHost = &fakeVolumeHost{}
 
 func NewFakeVolumeHost(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin) FakeVolumeHost {
-	return newFakeVolumeHost(t, rootDir, kubeClient, plugins, nil, nil, "", nil, nil)
+	return newFakeVolumeHost(t, rootDir, kubeClient, plugins, nil, "", nil, nil)
 }
 
-func NewFakeVolumeHostWithCloudProvider(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, cloud cloudprovider.Interface) FakeVolumeHost {
-	return newFakeVolumeHost(t, rootDir, kubeClient, plugins, cloud, nil, "", nil, nil)
+func NewFakeVolumeHostWithCloudProvider(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin) FakeVolumeHost {
+	return newFakeVolumeHost(t, rootDir, kubeClient, plugins, nil, "", nil, nil)
 }
 
 func NewFakeVolumeHostWithCSINodeName(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, nodeName string, driverLister storagelistersv1.CSIDriverLister, volumeAttachLister storagelistersv1.VolumeAttachmentLister) FakeVolumeHost {
-	return newFakeVolumeHost(t, rootDir, kubeClient, plugins, nil, nil, nodeName, driverLister, volumeAttachLister)
+	return newFakeVolumeHost(t, rootDir, kubeClient, plugins, nil, nodeName, driverLister, volumeAttachLister)
 }
 
-func newFakeVolumeHost(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, cloud cloudprovider.Interface, pathToTypeMap map[string]hostutil.FileType, nodeName string, driverLister storagelistersv1.CSIDriverLister, volumeAttachLister storagelistersv1.VolumeAttachmentLister) FakeVolumeHost {
-	host := &fakeVolumeHost{rootDir: rootDir, kubeClient: kubeClient, cloud: cloud, nodeName: nodeName, csiDriverLister: driverLister, volumeAttachmentLister: volumeAttachLister}
+func newFakeVolumeHost(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, pathToTypeMap map[string]hostutil.FileType, nodeName string, driverLister storagelistersv1.CSIDriverLister, volumeAttachLister storagelistersv1.VolumeAttachmentLister) FakeVolumeHost {
+	host := &fakeVolumeHost{rootDir: rootDir, kubeClient: kubeClient, nodeName: nodeName, csiDriverLister: driverLister, volumeAttachmentLister: volumeAttachLister}
 	host.mounter = mount.NewFakeMounter(nil)
 	host.hostUtil = hostutil.NewFakeHostUtil(pathToTypeMap)
-	host.exec = &testingexec.FakeExec{DisableScripts: true}
 	host.pluginMgr = &VolumePluginMgr{}
 	if err := host.pluginMgr.InitPlugins(plugins, nil /* prober */, host); err != nil {
 		t.Fatalf("Failed to init plugins while creating fake volume host: %v", err)
@@ -123,10 +116,6 @@ func (f *fakeVolumeHost) GetPodsDir() string {
 	return filepath.Join(f.rootDir, "pods")
 }
 
-func (f *fakeVolumeHost) GetHostIDsForPod(pod *v1.Pod, containerUID, containerGID *int64) (hostUID, hostGID *int64, err error) {
-	return containerUID, containerGID, nil
-}
-
 func (f *fakeVolumeHost) GetPodVolumeDir(podUID types.UID, pluginName, volumeName string) string {
 	return filepath.Join(f.rootDir, "pods", string(podUID), "volumes", pluginName, volumeName)
 }
@@ -143,20 +132,12 @@ func (f *fakeVolumeHost) GetKubeClient() clientset.Interface {
 	return f.kubeClient
 }
 
-func (f *fakeVolumeHost) GetCloudProvider() cloudprovider.Interface {
-	return f.cloud
-}
-
-func (f *fakeVolumeHost) GetMounter(pluginName string) mount.Interface {
+func (f *fakeVolumeHost) GetMounter() mount.Interface {
 	return f.mounter
 }
 
 func (f *fakeVolumeHost) GetSubpather() subpath.Interface {
 	return f.subpather
-}
-
-func (f *fakeVolumeHost) GetFilteredDialOptions() *proxyutil.FilteredDialOptions {
-	return f.filteredDialOptions
 }
 
 func (f *fakeVolumeHost) GetPluginMgr() *VolumePluginMgr {
@@ -167,7 +148,7 @@ func (f *fakeVolumeHost) GetAttachedVolumesFromNodeStatus() (map[v1.UniqueVolume
 	return map[v1.UniqueVolumeName]string{}, nil
 }
 
-func (f *fakeVolumeHost) NewWrapperMounter(volName string, spec Spec, pod *v1.Pod, opts VolumeOptions) (Mounter, error) {
+func (f *fakeVolumeHost) NewWrapperMounter(volName string, spec Spec, pod *v1.Pod) (Mounter, error) {
 	// The name of wrapper volume is set to "wrapped_{wrapped_volume_name}"
 	wrapperVolumeName := "wrapped_" + volName
 	if spec.Volume != nil {
@@ -177,7 +158,7 @@ func (f *fakeVolumeHost) NewWrapperMounter(volName string, spec Spec, pod *v1.Po
 	if err != nil {
 		return nil, err
 	}
-	return plug.NewMounter(&spec, pod, opts)
+	return plug.NewMounter(&spec, pod)
 }
 
 func (f *fakeVolumeHost) NewWrapperUnmounter(volName string, spec Spec, podUID types.UID) (Unmounter, error) {
@@ -213,10 +194,6 @@ func (f *fakeVolumeHost) GetSecretFunc() func(namespace, name string) (*v1.Secre
 	}
 }
 
-func (f *fakeVolumeHost) GetExec(pluginName string) exec.Interface {
-	return f.exec
-}
-
 func (f *fakeVolumeHost) GetConfigMapFunc() func(namespace, name string) (*v1.ConfigMap, error) {
 	return func(namespace, name string) (*v1.ConfigMap, error) {
 		return f.kubeClient.CoreV1().ConfigMaps(namespace).Get(context.TODO(), name, metav1.GetOptions{})
@@ -248,10 +225,6 @@ func (f *fakeVolumeHost) GetEventRecorder() record.EventRecorder {
 	return nil
 }
 
-func (f *fakeVolumeHost) ScriptCommands(scripts []CommandScript) {
-	ScriptCommands(f.exec, scripts)
-}
-
 func (f *fakeVolumeHost) WaitForKubeletErrNil() error {
 	return wait.PollImmediate(10*time.Millisecond, 10*time.Second, func() (bool, error) {
 		f.mux.Lock()
@@ -268,20 +241,18 @@ var _ AttachDetachVolumeHost = &fakeAttachDetachVolumeHost{}
 var _ FakeVolumeHost = &fakeAttachDetachVolumeHost{}
 
 func NewFakeAttachDetachVolumeHostWithCSINodeName(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, nodeName string, driverLister storagelistersv1.CSIDriverLister, volumeAttachLister storagelistersv1.VolumeAttachmentLister) FakeVolumeHost {
-	return newFakeAttachDetachVolumeHost(t, rootDir, kubeClient, plugins, nil, nil, nodeName, driverLister, volumeAttachLister)
+	return newFakeAttachDetachVolumeHost(t, rootDir, kubeClient, plugins, nil, nodeName, driverLister, volumeAttachLister)
 }
 
-func newFakeAttachDetachVolumeHost(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, cloud cloudprovider.Interface, pathToTypeMap map[string]hostutil.FileType, nodeName string, driverLister storagelistersv1.CSIDriverLister, volumeAttachLister storagelistersv1.VolumeAttachmentLister) FakeVolumeHost {
+func newFakeAttachDetachVolumeHost(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, pathToTypeMap map[string]hostutil.FileType, nodeName string, driverLister storagelistersv1.CSIDriverLister, volumeAttachLister storagelistersv1.VolumeAttachmentLister) FakeVolumeHost {
 	host := &fakeAttachDetachVolumeHost{}
 	host.rootDir = rootDir
 	host.kubeClient = kubeClient
-	host.cloud = cloud
 	host.nodeName = nodeName
 	host.csiDriverLister = driverLister
 	host.volumeAttachmentLister = volumeAttachLister
 	host.mounter = mount.NewFakeMounter(nil)
 	host.hostUtil = hostutil.NewFakeHostUtil(pathToTypeMap)
-	host.exec = &testingexec.FakeExec{DisableScripts: true}
 	host.pluginMgr = &VolumePluginMgr{}
 	if err := host.pluginMgr.InitPlugins(plugins, nil /* prober */, host); err != nil {
 		t.Fatalf("Failed to init plugins while creating fake volume host: %v", err)
@@ -312,9 +283,9 @@ func enableMigrationOnNode(csiNode *storagev1.CSINode, pluginName string) {
 		nodeInfoAnnotations = map[string]string{}
 	}
 
-	newAnnotationSet := sets.NewString()
+	newAnnotationSet := sets.New[string]()
 	newAnnotationSet.Insert(pluginName)
-	nas := strings.Join(newAnnotationSet.List(), ",")
+	nas := strings.Join(sets.List(newAnnotationSet), ",")
 	nodeInfoAnnotations[v1.MigratedPluginsAnnotationKey] = nas
 
 	csiNode.Annotations = nodeInfoAnnotations
@@ -340,32 +311,26 @@ var _ KubeletVolumeHost = &fakeKubeletVolumeHost{}
 var _ FakeVolumeHost = &fakeKubeletVolumeHost{}
 
 func NewFakeKubeletVolumeHost(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin) *fakeKubeletVolumeHost {
-	return newFakeKubeletVolumeHost(t, rootDir, kubeClient, plugins, nil, nil, "", nil, nil)
-}
-
-func NewFakeKubeletVolumeHostWithCloudProvider(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, cloud cloudprovider.Interface) *fakeKubeletVolumeHost {
-	return newFakeKubeletVolumeHost(t, rootDir, kubeClient, plugins, cloud, nil, "", nil, nil)
+	return newFakeKubeletVolumeHost(t, rootDir, kubeClient, plugins, nil, "", nil, nil)
 }
 
 func NewFakeKubeletVolumeHostWithCSINodeName(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, nodeName string, driverLister storagelistersv1.CSIDriverLister, volumeAttachLister storagelistersv1.VolumeAttachmentLister) *fakeKubeletVolumeHost {
-	return newFakeKubeletVolumeHost(t, rootDir, kubeClient, plugins, nil, nil, nodeName, driverLister, volumeAttachLister)
+	return newFakeKubeletVolumeHost(t, rootDir, kubeClient, plugins, nil, nodeName, driverLister, volumeAttachLister)
 }
 
 func NewFakeKubeletVolumeHostWithMounterFSType(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, pathToTypeMap map[string]hostutil.FileType) *fakeKubeletVolumeHost {
-	return newFakeKubeletVolumeHost(t, rootDir, kubeClient, plugins, nil, pathToTypeMap, "", nil, nil)
+	return newFakeKubeletVolumeHost(t, rootDir, kubeClient, plugins, pathToTypeMap, "", nil, nil)
 }
 
-func newFakeKubeletVolumeHost(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, cloud cloudprovider.Interface, pathToTypeMap map[string]hostutil.FileType, nodeName string, driverLister storagelistersv1.CSIDriverLister, volumeAttachLister storagelistersv1.VolumeAttachmentLister) *fakeKubeletVolumeHost {
+func newFakeKubeletVolumeHost(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, pathToTypeMap map[string]hostutil.FileType, nodeName string, driverLister storagelistersv1.CSIDriverLister, volumeAttachLister storagelistersv1.VolumeAttachmentLister) *fakeKubeletVolumeHost {
 	host := &fakeKubeletVolumeHost{}
 	host.rootDir = rootDir
 	host.kubeClient = kubeClient
-	host.cloud = cloud
 	host.nodeName = nodeName
 	host.csiDriverLister = driverLister
 	host.volumeAttachmentLister = volumeAttachLister
 	host.mounter = mount.NewFakeMounter(nil)
 	host.hostUtil = hostutil.NewFakeHostUtil(pathToTypeMap)
-	host.exec = &testingexec.FakeExec{DisableScripts: true}
 	host.pluginMgr = &VolumePluginMgr{}
 	if err := host.pluginMgr.InitPlugins(plugins, nil /* prober */, host); err != nil {
 		t.Fatalf("Failed to init plugins while creating fake volume host: %v", err)
@@ -413,7 +378,6 @@ func (f *fakeKubeletVolumeHost) SetKubeletError(err error) {
 	f.mux.Lock()
 	defer f.mux.Unlock()
 	f.kubeletErr = err
-	return
 }
 
 func (f *fakeKubeletVolumeHost) GetInformerFactory() informers.SharedInformerFactory {
@@ -446,4 +410,31 @@ func (f *fakeKubeletVolumeHost) WaitForCacheSync() error {
 
 func (f *fakeKubeletVolumeHost) GetHostUtil() hostutil.HostUtils {
 	return f.hostUtil
+}
+
+func (f *fakeKubeletVolumeHost) GetTrustAnchorsByName(name string, allowMissing bool) ([]byte, error) {
+	ctb, err := f.kubeClient.CertificatesV1beta1().ClusterTrustBundles().Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("while getting ClusterTrustBundle %s: %w", name, err)
+	}
+
+	return []byte(ctb.Spec.TrustBundle), nil
+}
+
+// Note: we do none of the deduplication and sorting that the real deal should do.
+func (f *fakeKubeletVolumeHost) GetTrustAnchorsBySigner(signerName string, labelSelector *metav1.LabelSelector, allowMissing bool) ([]byte, error) {
+	ctbList, err := f.kubeClient.CertificatesV1beta1().ClusterTrustBundles().List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("while listing all ClusterTrustBundles: %w", err)
+	}
+
+	fullSet := bytes.Buffer{}
+	for i, ctb := range ctbList.Items {
+		fullSet.WriteString(ctb.Spec.TrustBundle)
+		if i != len(ctbList.Items)-1 {
+			fullSet.WriteString("\n")
+		}
+	}
+
+	return fullSet.Bytes(), nil
 }
